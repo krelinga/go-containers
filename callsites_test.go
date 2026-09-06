@@ -15,9 +15,12 @@
 package containers_test
 
 import (
+	"fmt"
 	"maps"
 	"slices"
 	"testing"
+
+	"github.com/krelinga/go-containers"
 )
 
 // ---------------------------------------------------------------------------
@@ -39,6 +42,11 @@ func unauthorizedStdlib(granted, requested []string) []string {
 	return slices.Compact(missing) // requested may contain dupes
 }
 
+func unauthorizedContainer(granted, requested []string) []string {
+	missing := containers.NewSet(requested...).Difference(containers.NewSet(granted...))
+	return slices.Sorted(missing.All())
+}
+
 // ---------------------------------------------------------------------------
 // Task B — permissions held by both users (intersection)
 // ---------------------------------------------------------------------------
@@ -57,6 +65,10 @@ func sharedStdlib(a, b []string) []string {
 	return slices.Sorted(maps.Keys(out))
 }
 
+func sharedContainer(a, b []string) []string {
+	return slices.Sorted(containers.NewSet(a...).Intersect(containers.NewSet(b...)).All())
+}
+
 // ---------------------------------------------------------------------------
 // Task C — dedup
 //
@@ -68,6 +80,10 @@ func distinctStdlib(in []string) []string {
 	s := slices.Clone(in)
 	slices.Sort(s)
 	return slices.Compact(s)
+}
+
+func distinctContainer(in []string) []string {
+	return slices.Sorted(containers.NewSet(in...).All())
 }
 
 // ---------------------------------------------------------------------------
@@ -108,32 +124,68 @@ var distinctCases = []struct {
 	{"empty", nil, nil},
 }
 
-func TestUnauthorizedStdlib(t *testing.T) {
-	for _, tc := range unauthorizedCases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := unauthorizedStdlib(tc.granted, tc.requested); !slices.Equal(got, tc.want) {
-				t.Errorf("got %v, want %v", got, tc.want)
-			}
-		})
+func TestUnauthorized(t *testing.T) {
+	impls := map[string]func(granted, requested []string) []string{
+		"stdlib":    unauthorizedStdlib,
+		"container": unauthorizedContainer,
+	}
+	for _, impl := range slices.Sorted(maps.Keys(impls)) {
+		for _, tc := range unauthorizedCases {
+			t.Run(impl+"/"+tc.name, func(t *testing.T) {
+				if got := impls[impl](tc.granted, tc.requested); !slices.Equal(got, tc.want) {
+					t.Errorf("got %v, want %v", got, tc.want)
+				}
+			})
+		}
 	}
 }
 
-func TestSharedStdlib(t *testing.T) {
-	for _, tc := range sharedCases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := sharedStdlib(tc.a, tc.b); !slices.Equal(got, tc.want) {
-				t.Errorf("got %v, want %v", got, tc.want)
-			}
-		})
+func TestShared(t *testing.T) {
+	impls := map[string]func(a, b []string) []string{
+		"stdlib":    sharedStdlib,
+		"container": sharedContainer,
+	}
+	for _, impl := range slices.Sorted(maps.Keys(impls)) {
+		for _, tc := range sharedCases {
+			t.Run(impl+"/"+tc.name, func(t *testing.T) {
+				if got := impls[impl](tc.a, tc.b); !slices.Equal(got, tc.want) {
+					t.Errorf("got %v, want %v", got, tc.want)
+				}
+			})
+		}
 	}
 }
 
-func TestDistinctStdlib(t *testing.T) {
-	for _, tc := range distinctCases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := distinctStdlib(tc.in); !slices.Equal(got, tc.want) {
-				t.Errorf("got %v, want %v", got, tc.want)
-			}
-		})
+func TestDistinct(t *testing.T) {
+	impls := map[string]func(in []string) []string{
+		"stdlib":    distinctStdlib,
+		"container": distinctContainer,
 	}
+	for _, impl := range slices.Sorted(maps.Keys(impls)) {
+		for _, tc := range distinctCases {
+			t.Run(impl+"/"+tc.name, func(t *testing.T) {
+				if got := impls[impl](tc.in); !slices.Equal(got, tc.want) {
+					t.Errorf("got %v, want %v", got, tc.want)
+				}
+			})
+		}
+	}
+}
+
+// Examples, for godoc.
+
+func ExampleSet() {
+	var granted containers.Set[string]
+	granted.Add("read", "write")
+
+	fmt.Println(granted.Has("read"), granted.Has("delete"), granted.Len())
+	// Output: true false 2
+}
+
+func ExampleSet_Difference() {
+	requested := containers.NewSet("read", "delete", "admin")
+	granted := containers.NewSet("read", "write")
+
+	fmt.Println(slices.Sorted(requested.Difference(granted).All()))
+	// Output: [admin delete]
 }
