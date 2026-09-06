@@ -6,9 +6,14 @@ import (
 	"slices"
 )
 
+// sortedEntry declares its value field FIRST. A zero-sized field in trailing
+// position forces Go to pad the struct, which would make SortedMap[K, struct{}]
+// twice the width of a bare key in both memory and insert time. The ordering
+// costs nothing for a non-empty V. Measured in experiments/sortedsetbacking;
+// same rule that decides where noCopy goes (ADR 0002, decision 5).
 type sortedEntry[K cmp.Ordered, V any] struct {
-	k K
 	v V
+	k K
 }
 
 // A SortedMap is a map whose keys are kept in ascending order.
@@ -62,7 +67,7 @@ func (m *SortedMap[K, V]) Set(k K, v V) {
 	if i, found := m.find(k); found {
 		m.entries[i].v = v
 	} else {
-		m.entries = slices.Insert(m.entries, i, sortedEntry[K, V]{k, v})
+		m.entries = slices.Insert(m.entries, i, sortedEntry[K, V]{k: k, v: v})
 	}
 }
 
@@ -196,7 +201,7 @@ func CollectSortedMap[K cmp.Ordered, V any](seq iter.Seq2[K, V]) *SortedMap[K, V
 func collectSortedEntries[K cmp.Ordered, V any](seq iter.Seq2[K, V]) []sortedEntry[K, V] {
 	var es []sortedEntry[K, V]
 	for k, v := range seq {
-		es = append(es, sortedEntry[K, V]{k, v})
+		es = append(es, sortedEntry[K, V]{k: k, v: v})
 	}
 	slices.SortStableFunc(es, func(a, b sortedEntry[K, V]) int { return cmp.Compare(a.k, b.k) })
 
