@@ -462,3 +462,131 @@ func ExampleCollectSortedMap() {
 	// 50 0.75
 	// 100 0.60
 }
+
+// ===========================================================================
+// SortedSet tasks, per docs/adr/0005-sorted-set.md.
+//
+// Domain: deployed release version numbers.
+//
+// Two baselines are plausible and both appear below. The fair one, matching the
+// standard ADR 0003 held SortedMap to, is a hand-maintained sorted []int. The
+// other is what a user of THIS library would reach for today -- Set[int] plus
+// slices.Sorted -- which is O(n log n) per query because it re-sorts every time.
+// ===========================================================================
+
+type Versions []int
+
+func (v *Versions) Add(n int) {
+	if i, found := slices.BinarySearch(*v, n); !found {
+		*v = slices.Insert(*v, i, n)
+	}
+}
+
+func newVersions(ns ...int) Versions {
+	var v Versions
+	for _, n := range ns {
+		v.Add(n)
+	}
+	return v
+}
+
+// Task H — all versions in order. The baseline is already sorted.
+func versionsInOrderStdlib(v Versions) []int { return v }
+
+// Task I — versions with lo <= n < hi.
+func versionsInRangeStdlib(v Versions, lo, hi int) []int {
+	i, _ := slices.BinarySearch(v, lo)
+	j, _ := slices.BinarySearch(v, hi)
+	return v[i:j]
+}
+
+// Task J — newest version at or before n.
+func versionAtOrBeforeStdlib(v Versions, n int) (int, bool) {
+	i, found := slices.BinarySearch(v, n)
+	if !found {
+		i--
+	}
+	if i < 0 {
+		return 0, false
+	}
+	return v[i], true
+}
+
+// The same task using the Set this library already ships. Correct, and
+// O(n log n) per call because it re-sorts the whole set to answer one question.
+func versionAtOrBeforeViaSet(s *containers.Set[int], n int) (int, bool) {
+	vs := slices.Sorted(s.All())
+	i, found := slices.BinarySearch(vs, n)
+	if !found {
+		i--
+	}
+	if i < 0 {
+		return 0, false
+	}
+	return vs[i], true
+}
+
+var releaseVersions = []int{3, 7, 12, 40}
+
+var versionRangeCases = []struct {
+	name   string
+	lo, hi int
+	want   []int
+}{
+	{"middle", 7, 40, []int{7, 12}},
+	{"all", 0, 100, releaseVersions},
+	{"empty span", 4, 6, nil},
+	{"above everything", 50, 99, nil},
+	{"inverted is empty", 40, 7, nil},
+}
+
+var versionFloorCases = []struct {
+	name   string
+	n      int
+	want   int
+	wantOK bool
+}{
+	{"below all", 1, 0, false},
+	{"exact first", 3, 3, true},
+	{"between", 9, 7, true},
+	{"exact last", 40, 40, true},
+	{"above all", 999, 40, true},
+}
+
+func TestVersionsInOrder(t *testing.T) {
+	if got := versionsInOrderStdlib(newVersions(40, 3, 12, 7, 3)); !slices.Equal(got, releaseVersions) {
+		t.Errorf("got %v, want %v", got, releaseVersions)
+	}
+}
+
+func TestVersionsInRange(t *testing.T) {
+	v := newVersions(releaseVersions...)
+	for _, tc := range versionRangeCases {
+		t.Run("stdlib/"+tc.name, func(t *testing.T) {
+			lo, hi := tc.lo, tc.hi
+			if hi < lo {
+				hi = lo // the baseline would panic on inverted bounds
+			}
+			if got := versionsInRangeStdlib(v, lo, hi); !slices.Equal(got, tc.want) {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestVersionAtOrBefore(t *testing.T) {
+	v := newVersions(releaseVersions...)
+	s := containers.NewSet(releaseVersions...)
+	for _, tc := range versionFloorCases {
+		t.Run("stdlib/"+tc.name, func(t *testing.T) {
+			if got, ok := versionAtOrBeforeStdlib(v, tc.n); got != tc.want || ok != tc.wantOK {
+				t.Errorf("got %v,%v want %v,%v", got, ok, tc.want, tc.wantOK)
+			}
+		})
+		t.Run("viaSet/"+tc.name, func(t *testing.T) {
+			if got, ok := versionAtOrBeforeViaSet(s, tc.n); got != tc.want || ok != tc.wantOK {
+				t.Errorf("got %v,%v want %v,%v", got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
