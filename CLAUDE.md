@@ -11,8 +11,9 @@ beside it:
 |---|---|---|
 | `hashset.go` | `HashSet[T comparable]` | map, unordered |
 | `sortedset.go` | `SortedSet[T cmp.Ordered]` | sorted slice |
-| `map.go` | `Map[K comparable, V any]` | a defined `map[K]V`, unordered |
+| `hashdict.go` | `HashDict[K comparable, V any]` | map, unordered |
 | `sorteddict.go` | `SortedDict[K cmp.Ordered, V any]` | sorted slice |
+| `map.go` | `Map[K comparable, V any]` | a defined `map[K]V` — an **adapter**, not a default |
 | `contracts.go` | the interfaces below | — |
 
 Contracts come in three layers (ADR `0008`), each building on the one beneath:
@@ -72,6 +73,12 @@ to a plain `go test` — a shallow-copy `Clone` that silently shares the underly
   satisfy it silently opts out. Add `Has` or `Get` to reach the read-only layer, and the writes to
   reach the mutation layer. Every existing container satisfied these without changes, because the
   signatures already matched; keep it that way.
+- **`HashDict` is the default hash dict; `Map` is an adapter** (ADR `0009`). Reach for `Map` only
+  when you need a free conversion from an existing `map[K]V`, builtin syntax, to pass the result
+  where a `map[K]V` is expected, or working `encoding/json`. Everything else should use `HashDict`,
+  which follows the same shape rules as the rest of the package.
+- **`HashSet` and `HashDict` are structurally near-identical**, both a `noCopy` plus a map. A bug
+  or an optimisation found in one applies to the other — check both.
 - **Name new types per ADR `0008`.** Implementations are `<Ordering><Concept>` — `HashSet`,
   `SortedDict`. Contracts are `Mutable<Concept>` for writes and the bare concept for reads. The one
   exception is `Map`, which keeps the builtin's name because it is a thin naming of the builtin;
