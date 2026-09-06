@@ -43,7 +43,8 @@ COUNT=20 BENCHTIME=1s ./run.sh         # more samples
 ## Experiments
 
 `experiments/` holds measurement harnesses that answer design questions about
-Go itself — not tests of this library. Each is **its own module**, so the root
+Go itself — not tests of this library. For comparisons that exercise this
+library's own API, see **Call sites** below. Each is **its own module**, so the root
 `go test ./...` never runs them and they stay out of the library's dependency
 graph. `experiments/copycost/` is the worked example; copy its shape.
 
@@ -80,3 +81,58 @@ When an experiment settles a design question, record the decision in
 
 No CI job should gate on these benchmarks: on shared runners the noise floor
 exceeds most effects worth reading.
+
+## Call sites
+
+Before building a container, write the code that would use it. The test:
+**if a realistic call site is not clearly shorter or safer than the
+`slices`/`maps` equivalent, the container is not earning its place.** This is
+the cheapest way to kill a bad design — an afternoon rather than months.
+
+This is deliberately **not** an experiment. `experiments/` isolates each harness
+in its own module precisely so it cannot couple to the library. Call sites are
+worth something only when they *are* coupled: compiled against the real API, and
+breaking the build when it drifts. A call-site comparison that cannot fail is
+worthless, and module isolation is what would make it unable to fail.
+
+The artifact changes form once, so it lives in two places.
+
+### Phase 1 — sketches, in the ADR proposing the container
+
+Fenced Go that does not compile, labelled a sketch. Show the same task twice:
+once with the stdlib (`map[K]struct{}`, `[]T`, `slices`/`maps`), once with the
+API you wish existed. These sketches are the evidence the ADR decides on, exactly
+as `copycost` numbers were the evidence for `0001`.
+
+Record **rejected** designs too. A container that failed its call-site test is
+the most valuable result to have written down, and the easiest to lose.
+
+### Phase 2 — `callsites_test.go` at the repo root
+
+- **`package containers_test`, never `package containers`.** An internal test
+  file can reach unexported identifiers, which gives a flattering and dishonest
+  view of ergonomics. The external test package forces the real public import
+  path, so the API is experienced the way a caller experiences it.
+- **Pair the functions.** `withStdlib` / `withContainer` performing an identical
+  task, adjacent, so the comparison reads in one screen.
+- Use `Example*` functions where the usage belongs in godoc. They compile and run
+  under the root `go test ./...`, so API drift breaks the build.
+- ADR `0001`'s `testing.AllocsPerRun` guardrail belongs here — "this accessor
+  does not allocate" is a real assertion, unlike anything in `experiments/`.
+
+### Land the stdlib baseline first
+
+Commit `callsites_test.go` containing **only** the stdlib versions, before
+writing any container code. When the container lands, rewrite that same file.
+The reviewable artifact is the **diff**, not a side-by-side.
+
+A side-by-side written after implementation is rigged: the container is already
+paid for, and the baseline gets written to lose. A baseline committed in advance
+is the only form of this test that can still come back negative.
+
+### Do not quantify ergonomics
+
+No line counts, token counts, or readability scores. They lend false rigor, and
+line count in particular rewards a clever one-liner over three obvious
+statements. This judgement is subjective; the structure exists to keep it honest
+and recorded, not to fake objectivity.
