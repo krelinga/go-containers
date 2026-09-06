@@ -80,14 +80,15 @@ func (m *SortedMap[K, V]) Get(k K) (V, bool) {
 	return zero, false
 }
 
-// Delete removes k, reporting whether it was present.
-func (m *SortedMap[K, V]) Delete(k K) bool {
-	i, found := m.find(k)
-	if !found {
-		return false
+// Delete removes k. Deleting an absent key is a no-op.
+//
+// It reports nothing so that the signature matches Map.Delete and both types
+// satisfy MutableMap; the builtin delete cannot report presence without an
+// extra lookup. Use Get first if you need to know. See ADR 0007.
+func (m *SortedMap[K, V]) Delete(k K) {
+	if i, found := m.find(k); found {
+		m.entries = slices.Delete(m.entries, i, i+1)
 	}
-	m.entries = slices.Delete(m.entries, i, i+1)
-	return true
 }
 
 // Len returns the number of entries.

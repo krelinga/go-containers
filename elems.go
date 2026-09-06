@@ -26,6 +26,12 @@ type Elems[T any] interface {
 // It is a separate interface rather than a parameterisation of Elems because Go
 // has no higher-kinded types: iter.Seq and iter.Seq2 cannot be unified. This is
 // the same limit that keeps set algebra off an interface in ADR 0002.
+//
+// Whether an iterator reflects writes made after All returned is **unspecified**.
+// SortedMap binds its contents at call time, but only as a side effect of the
+// rule that a nil receiver must panic at the call rather than at iteration; Map
+// wraps a builtin map, for which the Go spec leaves the question open. Do not
+// depend on either behaviour.
 type Elems2[K, V any] interface {
 	Len() int
 	All() iter.Seq2[K, V]

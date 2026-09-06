@@ -53,7 +53,7 @@ func TestSortedMapNilPanicsUniformly(t *testing.T) {
 
 	mustPanic(t, "Set", func() { p.Set(1, "a") })
 	mustPanic(t, "Get", func() { _, _ = p.Get(1) })
-	mustPanic(t, "Delete", func() { _ = p.Delete(1) })
+	mustPanic(t, "Delete", func() { p.Delete(1) })
 	mustPanic(t, "Len", func() { _ = p.Len() })
 	mustPanic(t, "All", func() { _ = p.All() })
 	mustPanic(t, "Range", func() { _ = p.Range(1, 2) })
@@ -81,11 +81,13 @@ func TestSortedMapOrderingAndSet(t *testing.T) {
 		t.Errorf("replace changed Len to %d, want 4", m.Len())
 	}
 
-	if !m.Delete(50) {
-		t.Error("Delete(50) reported not present")
+	m.Delete(50)
+	if _, ok := m.Get(50); ok {
+		t.Error("Delete(50) left the key present")
 	}
-	if m.Delete(50) {
-		t.Error("second Delete(50) reported present")
+	m.Delete(50) // deleting an absent key is a no-op
+	if m.Len() != 3 {
+		t.Errorf("second Delete(50) changed Len to %d, want 3", m.Len())
 	}
 	if got, want := orderedKeys(m), []int{1, 10, 100}; !slices.Equal(got, want) {
 		t.Errorf("after Delete keys = %v, want %v", got, want)
