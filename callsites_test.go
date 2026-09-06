@@ -398,3 +398,40 @@ func ExampleSortedMap_Range() {
 	// 10 0.90
 	// 50 0.75
 }
+
+// ---------------------------------------------------------------------------
+// Task G — load a rate table from an unordered source
+//
+// The baseline sorts the keys first, so every insert into the Table is an
+// append rather than an O(n) memmove. That is what a careful author writes, and
+// it is the fair comparison; the obvious `for k, v := range src` version is
+// O(kn) and would be a strawman. See docs/adr/0004-bulk-insert.md.
+// ---------------------------------------------------------------------------
+
+func bulkLoadStdlib(src map[int]string) Table {
+	var t Table
+	for _, k := range slices.Sorted(maps.Keys(src)) {
+		t.Set(k, src[k])
+	}
+	return t
+}
+
+var bulkLoadCases = []struct {
+	name string
+	src  map[int]string
+	want []Tier
+}{
+	{"rate table", map[int]string{100: "0.60", 1: "1.00", 50: "0.75", 10: "0.90"}, rateTable},
+	{"single", map[int]string{7: "x"}, []Tier{{7, "x"}}},
+	{"empty", map[int]string{}, nil},
+}
+
+func TestBulkLoad(t *testing.T) {
+	for _, tc := range bulkLoadCases {
+		t.Run("stdlib/"+tc.name, func(t *testing.T) {
+			if got := bulkLoadStdlib(tc.src); !slices.Equal(got, tc.want) {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
