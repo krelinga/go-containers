@@ -159,3 +159,79 @@ func (m *SortedMap[K, V]) at(i int) (K, V, bool) {
 func (m *SortedMap[K, V]) Clone() *SortedMap[K, V] {
 	return &SortedMap[K, V]{entries: slices.Clone(m.entries)}
 }
+
+// SetAll adds every entry in seq, replacing existing values for keys already
+// present. Where seq yields the same key more than once, the last wins — the
+// same result as calling Set for each entry in order.
+//
+// SetAll sorts seq once and merges, which is O(k log k + n + k) for k entries
+// against a map of n. Calling Set in a loop is O(kn), because each out-of-order
+// insert memmoves half the backing array. experiments/bulkinsert measured the
+// crossover at roughly four to sixteen entries, nearly independent of n, with
+// SetAll 42x faster at n=100 000 and k=1 024. **Below that crossover Set is
+// marginally cheaper**, so prefer Set when adding one or two entries; SetAll is
+// the better choice for anything more.
+//
+// seq is fully consumed before the map is modified.
+func (m *SortedMap[K, V]) SetAll(seq iter.Seq2[K, V]) {
+	base := m.entries // eager, so a nil receiver panics even when seq is empty
+	add := collectSortedEntries(seq)
+	if len(add) == 0 {
+		return
+	}
+	m.entries = mergeSortedEntries(base, add)
+}
+
+// CollectSortedMap returns a SortedMap holding every entry in seq. Where seq
+// yields the same key more than once, the last wins.
+//
+// It is cheaper than NewSortedMap followed by SetAll: with nothing to merge
+// against, the merge degenerates to the sort alone.
+func CollectSortedMap[K cmp.Ordered, V any](seq iter.Seq2[K, V]) *SortedMap[K, V] {
+	return &SortedMap[K, V]{entries: collectSortedEntries(seq)}
+}
+
+// collectSortedEntries drains seq into a slice sorted by key, keeping the last
+// entry for any repeated key.
+func collectSortedEntries[K cmp.Ordered, V any](seq iter.Seq2[K, V]) []sortedEntry[K, V] {
+	var es []sortedEntry[K, V]
+	for k, v := range seq {
+		es = append(es, sortedEntry[K, V]{k, v})
+	}
+	slices.SortStableFunc(es, func(a, b sortedEntry[K, V]) int { return cmp.Compare(a.k, b.k) })
+
+	// Keep the LAST of each run of equal keys. slices.CompactFunc keeps the
+	// first, which would silently diverge from repeated Set. The sort is stable,
+	// so a run preserves the order seq yielded.
+	out := es[:0]
+	for i, e := range es {
+		if i+1 < len(es) && es[i+1].k == e.k {
+			continue // a later entry carries this key
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// mergeSortedEntries merges two key-sorted, key-distinct runs. Entries from add
+// replace equal keys in base.
+func mergeSortedEntries[K cmp.Ordered, V any](base, add []sortedEntry[K, V]) []sortedEntry[K, V] {
+	out := make([]sortedEntry[K, V], 0, len(base)+len(add))
+	i, j := 0, 0
+	for i < len(base) && j < len(add) {
+		switch cmp.Compare(base[i].k, add[j].k) {
+		case -1:
+			out = append(out, base[i])
+			i++
+		case +1:
+			out = append(out, add[j])
+			j++
+		default:
+			out = append(out, add[j]) // add replaces base
+			i++
+			j++
+		}
+	}
+	out = append(out, base[i:]...)
+	return append(out, add[j:]...)
+}

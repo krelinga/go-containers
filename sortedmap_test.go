@@ -240,3 +240,123 @@ func TestSortedMapCloneIsIndependent(t *testing.T) {
 		t.Error("Clone of zero value should be empty")
 	}
 }
+
+// ADR 0004 decision 3: last write wins among duplicate keys within one input,
+// matching repeated Set. The ADR requires DISTINGUISHABLE values here — the
+// prototype's agreement test used identical ones and passed while wrong.
+func TestSetAllLastWriteWins(t *testing.T) {
+	pairs := []struct {
+		k int
+		v string
+	}{{10, "first"}, {5, "a"}, {10, "second"}, {10, "third"}, {5, "b"}}
+	seq := func(yield func(int, string) bool) {
+		for _, p := range pairs {
+			if !yield(p.k, p.v) {
+				return
+			}
+		}
+	}
+
+	// The loop SetAll replaces, as the reference.
+	loop := containers.NewSortedMap[int, string]()
+	for _, p := range pairs {
+		loop.Set(p.k, p.v)
+	}
+
+	bulk := containers.NewSortedMap[int, string]()
+	bulk.SetAll(seq)
+	collected := containers.CollectSortedMap(seq)
+
+	for _, tc := range []struct {
+		name string
+		m    *containers.SortedMap[int, string]
+	}{{"SetAll", bulk}, {"CollectSortedMap", collected}} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, want := range []struct {
+				k int
+				v string
+			}{{5, "b"}, {10, "third"}} {
+				if got, _ := tc.m.Get(want.k); got != want.v {
+					t.Errorf("Get(%d) = %q, want %q", want.k, got, want.v)
+				}
+			}
+			if tc.m.Len() != loop.Len() {
+				t.Errorf("Len = %d, want %d (loop)", tc.m.Len(), loop.Len())
+			}
+			for k, v := range loop.All() {
+				if got, ok := tc.m.Get(k); !ok || got != v {
+					t.Errorf("disagrees with loop at %d: %q vs %q", k, got, v)
+				}
+			}
+		})
+	}
+}
+
+func TestSetAllMergesWithExisting(t *testing.T) {
+	m := containers.NewSortedMap[int, string]()
+	for _, k := range []int{10, 30, 50} {
+		m.Set(k, "old")
+	}
+	m.SetAll(maps.All(map[int]string{20: "new", 30: "replaced", 60: "new"}))
+
+	if got, want := orderedKeys(m), []int{10, 20, 30, 50, 60}; !slices.Equal(got, want) {
+		t.Errorf("keys = %v, want %v", got, want)
+	}
+	if v, _ := m.Get(30); v != "replaced" {
+		t.Errorf("Get(30) = %q, want %q", v, "replaced")
+	}
+	if v, _ := m.Get(10); v != "old" {
+		t.Errorf("Get(10) = %q, want %q", v, "old")
+	}
+}
+
+func TestSetAllEdgeCases(t *testing.T) {
+	empty := func(yield func(int, string) bool) {}
+
+	// Zero value receiver.
+	var z containers.SortedMap[int, string]
+	z.SetAll(maps.All(map[int]string{2: "b", 1: "a"}))
+	if got, want := orderedKeys(&z), []int{1, 2}; !slices.Equal(got, want) {
+		t.Errorf("zero value SetAll = %v, want %v", got, want)
+	}
+
+	// Empty input leaves the map alone.
+	z.SetAll(empty)
+	if got, want := orderedKeys(&z), []int{1, 2}; !slices.Equal(got, want) {
+		t.Errorf("after empty SetAll = %v, want %v", got, want)
+	}
+
+	if containers.CollectSortedMap(empty).Len() != 0 {
+		t.Error("CollectSortedMap of an empty seq should be empty")
+	}
+
+	// ADR 0002's eager-dereference rule: an EMPTY seq must still panic on a nil
+	// receiver, which a bare range over seq would skip.
+	var p *containers.SortedMap[int, string]
+	mustPanic(t, "SetAll nil receiver, empty seq", func() { p.SetAll(empty) })
+	mustPanic(t, "SetAll nil receiver, non-empty seq", func() {
+		p.SetAll(maps.All(map[int]string{1: "a"}))
+	})
+}
+
+// The iter.Seq2 choice exists so these compose with no adapter.
+func TestSetAllComposes(t *testing.T) {
+	src := containers.NewSortedMap[int, string]()
+	src.SetAll(maps.All(map[int]string{1: "a", 10: "b", 50: "c", 100: "d"}))
+
+	fromAll := containers.CollectSortedMap(src.All())
+	if got, want := orderedKeys(fromAll), []int{1, 10, 50, 100}; !slices.Equal(got, want) {
+		t.Errorf("CollectSortedMap(src.All()) = %v, want %v", got, want)
+	}
+
+	fromRange := containers.CollectSortedMap(src.Range(10, 100))
+	if got, want := orderedKeys(fromRange), []int{10, 50}; !slices.Equal(got, want) {
+		t.Errorf("CollectSortedMap(src.Range(10,100)) = %v, want %v", got, want)
+	}
+
+	dst := containers.NewSortedMap[int, string]()
+	dst.SetAll(src.Range(1, 11))
+	if got, want := orderedKeys(dst), []int{1, 10}; !slices.Equal(got, want) {
+		t.Errorf("dst.SetAll(src.Range(1,11)) = %v, want %v", got, want)
+	}
+}
