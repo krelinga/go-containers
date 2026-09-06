@@ -15,6 +15,7 @@
 package containers_test
 
 import (
+	"cmp"
 	"fmt"
 	"maps"
 	"slices"
@@ -630,4 +631,70 @@ func ExampleSortedSet_Range() {
 	deployed := containers.NewSortedSet(3, 7, 12, 40)
 	fmt.Println(slices.Collect(deployed.Range(7, 40)))
 	// Output: [7 12]
+}
+
+// ===========================================================================
+// Generic-map tasks, per docs/adr/0007-map.md.
+//
+// Task K is the duplication the contract is meant to remove: the same
+// operation written once per backing, because a builtin map has no methods.
+//
+// Note the two are NOT the same code. The Go spec permits deleting from a map
+// while ranging over it, so the map version deletes in place. SortedMap.All
+// binds its backing slice and Delete shifts within it, so doing the same there
+// corrupts the iteration -- it revisits keys and skips others. The sorted
+// version must collect first.
+// ===========================================================================
+
+func pruneMapStdlib[K comparable, V any](m map[K]V, keep func(V) bool) {
+	for k, v := range m {
+		if !keep(v) {
+			delete(m, k) // safe: the spec permits deletion during map iteration
+		}
+	}
+}
+
+func pruneSortedStdlib[K cmp.Ordered, V any](m *containers.SortedMap[K, V], keep func(V) bool) {
+	var drop []K
+	for k, v := range m.All() {
+		if !keep(v) {
+			drop = append(drop, k) // must not delete while iterating
+		}
+	}
+	for _, k := range drop {
+		m.Delete(k)
+	}
+}
+
+var pruneCases = []struct {
+	name string
+	in   map[int]int
+	want []int // keys remaining, ascending
+}{
+	{"drops odds", map[int]int{0: 0, 1: 1, 2: 2, 3: 3, 4: 4}, []int{0, 2, 4}},
+	{"drops nothing", map[int]int{0: 0, 2: 2}, []int{0, 2}},
+	{"drops everything", map[int]int{1: 1, 3: 3}, nil},
+	{"empty", map[int]int{}, nil},
+}
+
+func keepEven(v int) bool { return v%2 == 0 }
+
+func TestPrune(t *testing.T) {
+	for _, tc := range pruneCases {
+		t.Run("stdlib-map/"+tc.name, func(t *testing.T) {
+			m := maps.Clone(tc.in)
+			pruneMapStdlib(m, keepEven)
+			if got := slices.Sorted(maps.Keys(m)); !slices.Equal(got, tc.want) {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
+		t.Run("stdlib-sorted/"+tc.name, func(t *testing.T) {
+			sm := containers.NewSortedMap[int, int]()
+			sm.SetAllSeq(maps.All(tc.in))
+			pruneSortedStdlib(sm, keepEven)
+			if got := slices.Collect(maps.Keys(maps.Collect(sm.All()))); !slices.Equal(slices.Sorted(slices.Values(got)), tc.want) {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
 }
