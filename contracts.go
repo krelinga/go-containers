@@ -98,7 +98,9 @@ var (
 	_ MutableSet[int]          = (*HashSet[int])(nil)
 	_ MutableSet[int]          = (*SortedSet[int])(nil)
 	_ Dict[string, int]        = Map[string, int]{}
+	_ Dict[string, int]        = (*HashDict[string, int])(nil)
 	_ Dict[string, int]        = (*SortedDict[string, int])(nil)
 	_ MutableDict[string, int] = Map[string, int]{}
+	_ MutableDict[string, int] = (*HashDict[string, int])(nil)
 	_ MutableDict[string, int] = (*SortedDict[string, int])(nil)
 )

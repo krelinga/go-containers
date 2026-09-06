@@ -1,10 +1,15 @@
 package containers
 
-import "iter"
+import (
+	"iter"
+	"maps"
+)
 
-// noCopy makes `go vet`'s copylocks analyzer report attempts to copy a Set
-// struct. It is declared first in Set because a zero-sized field in trailing
-// position would force the struct to be padded. See ADR 0002, decision 5.
+// noCopy makes `go vet`'s copylocks analyzer report attempts to copy a
+// container struct. It must be declared FIRST in any struct that carries it: a
+// zero-sized field in trailing position forces the struct to be padded. See ADR
+// 0002 decision 5, and sorteddict_layout_test.go for the same rule applied to
+// sortedEntry.
 type noCopy struct{}
 
 func (*noCopy) Lock()   {}
@@ -93,11 +98,10 @@ func (s *HashSet[T]) All() iter.Seq[T] {
 // Clone returns an independent copy of the set. Mutating the result does not
 // affect s.
 func (s *HashSet[T]) Clone() *HashSet[T] {
-	out := &HashSet[T]{m: make(map[T]struct{}, s.Len())}
-	for v := range s.All() {
-		out.m[v] = struct{}{}
-	}
-	return out
+	// maps.Clone rather than make plus a loop: it duplicates the hash table
+	// instead of re-hashing every value, which experiments/hashdict measured at
+	// 3-4x faster.
+	return &HashSet[T]{m: maps.Clone(s.m)}
 }
 
 // Union returns a new set containing every value in s or o.

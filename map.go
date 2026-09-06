@@ -8,6 +8,16 @@ import (
 // A Map is a map[K]V with methods, so that it can satisfy the interfaces in
 // this package and be used from generic code.
 //
+// # Prefer HashDict unless you need what only Map can do
+//
+// Map is an adapter, not the default hash dict. It cannot carry a noCopy guard
+// or a usable zero value, because it is a map rather than a struct holding one,
+// and it satisfies interfaces as a value where every other container does so
+// through a pointer. HashDict is the type that behaves like the rest of this
+// package. Reach for Map when you specifically need a free conversion from an
+// existing map, builtin syntax, passing the result where a map[K]V is expected,
+// or encoding/json — see below.
+//
 //	m := containers.Map[string, int](existing)
 //
 // That conversion is not a copy: a Map aliases the map it wraps, and mutations
