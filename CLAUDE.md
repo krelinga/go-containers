@@ -4,9 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-This repo is greenfield: `go.mod` and `.devcontainer/` are the only tracked files. There is no
-package source, no tests, and no architecture to preserve yet. Treat design decisions as open, and
-do not assume a prior structure exists.
+Still greenfield: there is no library source and no tests yet, so `go build ./...` at the root
+matches no packages. Treat design decisions as open and do not assume a prior structure exists.
+
+What does exist: `docs/adr/` (accepted design decisions), `experiments/` (measurement harnesses,
+each its own module), and this file.
 
 Intent, per the module path `github.com/krelinga/go-containers`: a generic (type-parameterized)
 container library.
@@ -35,6 +37,8 @@ COUNT=20 BENCHTIME=1s ./run.sh         # more samples
   The devcontainer's Go feature supplies it; a host Go older than 1.26.7 will refuse to build.
 - Single flat package at the repo root — add new container types as sibling files, not subpackages,
   unless there is a reason to split.
+- **Read `docs/adr/` before designing a container type.** Accepted ADRs are binding on new code.
+  `0001` governs when an accessor returns a read-only view rather than a copy.
 
 ## Experiments
 
