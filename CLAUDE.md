@@ -4,16 +4,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-`package containers` at the repo root is the library. `Set[T]` (`set.go`) is the first and
-currently only container; `set_test.go` covers it and `callsites_test.go` holds the stdlib-vs-
-container comparison.
+`package containers` at the repo root is the library. Three containers, each with a `_test.go`
+beside it:
 
-Alongside it: `docs/adr/` (accepted design decisions, binding on new code) and `experiments/`
-(measurement harnesses, each its own module).
+| file | type | backing |
+|---|---|---|
+| `set.go` | `Set[T comparable]` | map, unordered |
+| `sortedset.go` | `SortedSet[T cmp.Ordered]` | sorted slice |
+| `sortedmap.go` | `SortedMap[K cmp.Ordered, V any]` | sorted slice |
+| `elems.go` | `Elems[T]`, `Elems2[K, V]` | the read-only contract they all satisfy |
+
+`callsites_test.go` holds every stdlib-vs-container comparison. Alongside: `docs/adr/` (accepted
+design decisions, binding on new code) and `experiments/` (measurement harnesses, each its own
+module).
 
 Intent, per the module path `github.com/krelinga/go-containers`: a generic (type-parameterized)
-container library. Still early — the ADRs constrain code not yet written more than they describe
-code that exists, so treat unsettled areas as open.
+container library. Still early — several ADRs constrain code not yet written more than they
+describe code that exists, so treat unsettled areas as open.
 
 ## Commands
 
@@ -47,9 +54,19 @@ to a plain `go test` — a shallow-copy `Clone` that silently shares the underly
 - Single flat package at the repo root — add new container types as sibling files, not subpackages,
   unless there is a reason to split.
 - **Read `docs/adr/` before designing a container type.** Accepted ADRs are binding on new code.
-  `0001` governs when an accessor returns a read-only view rather than a copy; `0002` fixes the
-  shape of a container type — uniform pointer receivers, a usable zero value, a `noCopy` field,
-  and no nil-receiver special cases.
+  `0001` governs when an accessor returns a read-only view rather than a copy. `0002` fixes the
+  shape of a container type — uniform pointer receivers, a usable zero value, a `noCopy` field
+  declared *first*, and no nil-receiver or nil-argument special cases. `0004` and `0006` govern
+  bulk insertion and the sized read-only contract.
+- **A new container should satisfy `Elems[T]` or `Elems2[K, V]`** (`elems.go`) — `Len` plus `All`.
+  Nothing forces it, but every constructor that preallocates takes one, so a container that does
+  not satisfy it silently opts out of that. Both existing set types satisfied it without changes,
+  because the signatures already matched; keep it that way.
+- **The eager-dereference rule from `0002` bites repeatedly.** Every method must dereference its
+  receiver — and every method taking a container or `Elems` argument must dereference that —
+  on a path that *always* executes. Variadic methods, empty iterators, and loops that can run zero
+  times all skip it silently. It has been violated three times so far; assert it with tests that
+  fail without the guard.
 - **Serialization is unsettled library-wide, and currently silently lossy.** Container types
   have only unexported fields, so `json.Marshal` of a populated container returns `{}` with a
   **nil error**, discarding its contents; `json.Unmarshal` fails asymmetrically. This follows from
