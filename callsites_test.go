@@ -493,11 +493,19 @@ func newVersions(ns ...int) Versions {
 // Task H — all versions in order. The baseline is already sorted.
 func versionsInOrderStdlib(v Versions) []int { return v }
 
+func versionsInOrderContainer(s *containers.SortedSet[int]) []int {
+	return slices.Collect(s.All())
+}
+
 // Task I — versions with lo <= n < hi.
 func versionsInRangeStdlib(v Versions, lo, hi int) []int {
 	i, _ := slices.BinarySearch(v, lo)
 	j, _ := slices.BinarySearch(v, hi)
 	return v[i:j]
+}
+
+func versionsInRangeContainer(s *containers.SortedSet[int], lo, hi int) []int {
+	return slices.Collect(s.Range(lo, hi))
 }
 
 // Task J — newest version at or before n.
@@ -510,6 +518,10 @@ func versionAtOrBeforeStdlib(v Versions, n int) (int, bool) {
 		return 0, false
 	}
 	return v[i], true
+}
+
+func versionAtOrBeforeContainer(s *containers.SortedSet[int], n int) (int, bool) {
+	return s.Floor(n)
 }
 
 // The same task using the Set this library already ships. Correct, and
@@ -555,12 +567,16 @@ var versionFloorCases = []struct {
 
 func TestVersionsInOrder(t *testing.T) {
 	if got := versionsInOrderStdlib(newVersions(40, 3, 12, 7, 3)); !slices.Equal(got, releaseVersions) {
-		t.Errorf("got %v, want %v", got, releaseVersions)
+		t.Errorf("stdlib: got %v, want %v", got, releaseVersions)
+	}
+	if got := versionsInOrderContainer(containers.NewSortedSet(40, 3, 12, 7, 3)); !slices.Equal(got, releaseVersions) {
+		t.Errorf("container: got %v, want %v", got, releaseVersions)
 	}
 }
 
 func TestVersionsInRange(t *testing.T) {
 	v := newVersions(releaseVersions...)
+	ss := containers.NewSortedSet(releaseVersions...)
 	for _, tc := range versionRangeCases {
 		t.Run("stdlib/"+tc.name, func(t *testing.T) {
 			lo, hi := tc.lo, tc.hi
@@ -571,12 +587,19 @@ func TestVersionsInRange(t *testing.T) {
 				t.Errorf("got %v, want %v", got, tc.want)
 			}
 		})
+		// No workaround needed: the container treats inverted bounds as empty.
+		t.Run("container/"+tc.name, func(t *testing.T) {
+			if got := versionsInRangeContainer(ss, tc.lo, tc.hi); !slices.Equal(got, tc.want) {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
 func TestVersionAtOrBefore(t *testing.T) {
 	v := newVersions(releaseVersions...)
 	s := containers.NewSet(releaseVersions...)
+	ss := containers.NewSortedSet(releaseVersions...)
 	for _, tc := range versionFloorCases {
 		t.Run("stdlib/"+tc.name, func(t *testing.T) {
 			if got, ok := versionAtOrBeforeStdlib(v, tc.n); got != tc.want || ok != tc.wantOK {
@@ -588,5 +611,23 @@ func TestVersionAtOrBefore(t *testing.T) {
 				t.Errorf("got %v,%v want %v,%v", got, ok, tc.want, tc.wantOK)
 			}
 		})
+		t.Run("container/"+tc.name, func(t *testing.T) {
+			if got, ok := versionAtOrBeforeContainer(ss, tc.n); got != tc.want || ok != tc.wantOK {
+				t.Errorf("got %v,%v want %v,%v", got, ok, tc.want, tc.wantOK)
+			}
+		})
 	}
+}
+
+func ExampleSortedSet_Floor() {
+	deployed := containers.NewSortedSet(3, 7, 12, 40)
+	v, ok := deployed.Floor(9)
+	fmt.Println(v, ok)
+	// Output: 7 true
+}
+
+func ExampleSortedSet_Range() {
+	deployed := containers.NewSortedSet(3, 7, 12, 40)
+	fmt.Println(slices.Collect(deployed.Range(7, 40)))
+	// Output: [7 12]
 }
