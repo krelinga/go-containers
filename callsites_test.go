@@ -666,6 +666,21 @@ func pruneSortedStdlib[K cmp.Ordered, V any](m *containers.SortedMap[K, V], keep
 	}
 }
 
+// The container version: one function body for both backings. It uses the more
+// conservative iteration discipline, so it collects keys where pruneMapStdlib
+// deletes in place -- the cost of working against both.
+func pruneContainer[K comparable, V any](m containers.MutableMap[K, V], keep func(V) bool) {
+	var drop []K
+	for k, v := range m.All() {
+		if !keep(v) {
+			drop = append(drop, k)
+		}
+	}
+	for _, k := range drop {
+		m.Delete(k)
+	}
+}
+
 var pruneCases = []struct {
 	name string
 	in   map[int]int
@@ -692,9 +707,34 @@ func TestPrune(t *testing.T) {
 			sm := containers.NewSortedMap[int, int]()
 			sm.SetAllSeq(maps.All(tc.in))
 			pruneSortedStdlib(sm, keepEven)
-			if got := slices.Collect(maps.Keys(maps.Collect(sm.All()))); !slices.Equal(slices.Sorted(slices.Values(got)), tc.want) {
+			if got := slices.Sorted(maps.Keys(maps.Collect(sm.All()))); !slices.Equal(got, tc.want) {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
+		// One body, both backings.
+		t.Run("container-map/"+tc.name, func(t *testing.T) {
+			m := containers.Map[int, int](maps.Clone(tc.in))
+			pruneContainer[int, int](m, keepEven)
+			if got := slices.Sorted(maps.Keys(m)); !slices.Equal(got, tc.want) {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
+		t.Run("container-sorted/"+tc.name, func(t *testing.T) {
+			sm := containers.NewSortedMap[int, int]()
+			sm.SetAllSeq(maps.All(tc.in))
+			pruneContainer[int, int](sm, keepEven)
+			if got := slices.Sorted(maps.Keys(maps.Collect(sm.All()))); !slices.Equal(got, tc.want) {
 				t.Errorf("got %v, want %v", got, tc.want)
 			}
 		})
 	}
+}
+
+func ExampleMap() {
+	limits := containers.Map[string, int](map[string]int{"cpu": 4, "mem": 16})
+	limits.Set("disk", 100)
+
+	// The conversion aliased the original, and builtin syntax still works.
+	fmt.Println(limits.Len(), limits["cpu"], slices.Sorted(maps.Keys(limits)))
+	// Output: 3 4 [cpu disk mem]
 }
