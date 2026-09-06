@@ -416,6 +416,14 @@ func bulkLoadStdlib(src map[int]string) Table {
 	return t
 }
 
+func bulkLoadContainer(src map[int]string) []Tier {
+	var out []Tier
+	for k, v := range containers.CollectSortedMap(maps.All(src)).All() {
+		out = append(out, Tier{k, v})
+	}
+	return out
+}
+
 var bulkLoadCases = []struct {
 	name string
 	src  map[int]string
@@ -433,5 +441,24 @@ func TestBulkLoad(t *testing.T) {
 				t.Errorf("got %v, want %v", got, tc.want)
 			}
 		})
+		t.Run("container/"+tc.name, func(t *testing.T) {
+			if got := bulkLoadContainer(tc.src); !slices.Equal(got, tc.want) {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
 	}
+}
+
+func ExampleCollectSortedMap() {
+	rates := containers.CollectSortedMap(maps.All(map[int]string{
+		100: "0.60", 1: "1.00", 50: "0.75", 10: "0.90",
+	}))
+	for k, v := range rates.All() {
+		fmt.Println(k, v)
+	}
+	// Output:
+	// 1 1.00
+	// 10 0.90
+	// 50 0.75
+	// 100 0.60
 }
