@@ -1,5 +1,5 @@
-// Package hashdict measures the two costs that decide whether a struct-backed
-// hash dict is worth adding beside the existing defined map type.
+// Package hashdict measures the three questions that decide the shape of a
+// struct-backed hash dict beside the existing defined map type.
 //
 // First: what wrapping a map in a struct costs. Map[K, V] is `map[K]V` with
 // methods, so it cannot carry noCopy, cannot take pointer receivers, and panics
@@ -10,6 +10,12 @@
 // bought only 0-10% end to end, because the sort that followed dominated. A
 // hash dict has no sort, so the same question needs asking again rather than
 // assuming the answer carries over.
+//
+// Third: whether a bulk insert into a non-empty dict can presize after all, by
+// allocating a new map at len(existing)+len(added), copying the existing
+// entries across, and inserting into that. Only a struct-backed dict can do
+// this, since it owns its map and can replace it; a defined map type cannot,
+// because callers hold the same map.
 //
 // The types are replicated here rather than imported: experiments are separate
 // modules.

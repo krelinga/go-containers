@@ -141,3 +141,118 @@ func BenchmarkNoOp(b *testing.B) {
 		sinkI = len(raw)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Can SetAll presize after all, by rebuilding?
+//
+// Go exposes no growth hint for an existing map, so a bulk insert into a
+// non-empty dict cannot presize -- it inserts into a map that grows and rehashes
+// as it goes. A struct-backed dict has an option a defined map type does not:
+// allocate a new map at len(existing)+len(added), copy the existing entries in,
+// then insert. It pays an O(n) copy to buy k inserts that never trigger growth.
+//
+// Measuring this fairly is awkward because the naive path mutates in place while
+// the rebuild path does not, and an in-place benchmark would have to restore its
+// fixture inside the timed loop. So all three variants below PRODUCE a map,
+// leaving the fixture pristine, and cloneOnly isolates the copy that naive and
+// rebuild both perform. In-place naive is then (naive - cloneOnly), and the
+// comparison that matters is rebuild against that.
+// ---------------------------------------------------------------------------
+
+var mergeN = []int{64, 1024, 16384}
+var mergeK = []int{1, 16, 256, 4096}
+
+func baseOf(n int) map[int]int {
+	m := make(map[int]int, n)
+	for i := range n {
+		m[i] = i
+	}
+	return m
+}
+
+// addsOf returns k keys that do not collide with a base of size n.
+func addsOf(n, k int) []int {
+	ks := make([]int, k)
+	for i := range k {
+		ks[i] = n + i
+	}
+	return ks
+}
+
+func BenchmarkMerge(b *testing.B) {
+	for _, n := range mergeN {
+		base := baseOf(n)
+		for _, k := range mergeK {
+			adds := addsOf(n, k)
+
+			// The copy both other variants perform; subtract to get in-place naive.
+			b.Run(fmt.Sprintf("cloneOnly/n=%d/k=%d", n, k), func(b *testing.B) {
+				b.ReportAllocs()
+				for b.Loop() {
+					sinkM = maps.Clone(base)
+				}
+			})
+
+			// What SetAll does today: insert into a map that grows as it goes.
+			b.Run(fmt.Sprintf("naive/n=%d/k=%d", n, k), func(b *testing.B) {
+				b.ReportAllocs()
+				for b.Loop() {
+					m := maps.Clone(base)
+					for _, key := range adds {
+						m[key] = key
+					}
+					sinkM = m
+				}
+			})
+
+			// The proposal: presize to n+k, copy, then insert without growth.
+			b.Run(fmt.Sprintf("rebuild/n=%d/k=%d", n, k), func(b *testing.B) {
+				b.ReportAllocs()
+				for b.Loop() {
+					m := make(map[int]int, len(base)+len(adds))
+					maps.Copy(m, base)
+					for _, key := range adds {
+						m[key] = key
+					}
+					sinkM = m
+				}
+			})
+		}
+	}
+}
+
+// BenchmarkCopyMechanism isolates a confound found while measuring the rebuild
+// strategy: maps.Clone and make+maps.Copy are not equivalent. Clone can
+// duplicate the hash table structure wholesale, while Copy must re-insert and
+// re-hash every key. A rebuild cannot use Clone, because Clone allocates its own
+// map and there is no way to tell it the target size -- so choosing to presize
+// forces the more expensive copy.
+func BenchmarkCopyMechanism(b *testing.B) {
+	for _, n := range []int{64, 1024, 16384} {
+		base := baseOf(n)
+		b.Run(fmt.Sprintf("mapsClone/%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				sinkM = maps.Clone(base)
+			}
+		})
+		b.Run(fmt.Sprintf("makeAndCopy/%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				m := make(map[int]int, n)
+				maps.Copy(m, base)
+				sinkM = m
+			}
+		})
+		b.Run(fmt.Sprintf("makeAndLoop/%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				m := make(map[int]int, n)
+				for k, v := range base {
+					m[k] = v
+				}
+				sinkM = m
+			}
+		})
+	}
+}

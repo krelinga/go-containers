@@ -40,6 +40,52 @@ because hints are weak; it was because an O(n log n) sort followed and dominated
 A hash dict has no sort, so the hint is the whole difference and the saving
 survives intact.
 
+## 3. Rebuilding to presize a bulk insert is not worth it
+
+`SetAll` on a non-empty dict cannot presize, because Go exposes no growth hint
+for an existing map. A struct-backed dict has an option a defined map type does
+not: allocate a new map at `len(existing)+len(added)`, copy across, insert, and
+replace. It buys growth-free inserts for an O(n) copy.
+
+Two findings, and the first is the reason for the second.
+
+### `maps.Clone` is 3-4x faster than any presized copy
+
+| n | `maps.Clone` | `make`+`maps.Copy` | `make`+manual loop |
+|---|---|---|---|
+| 64 | 351 ns | 971 ns | 979 ns |
+| 1 024 | 3 813 ns | 15 153 ns | 14 978 ns |
+| 16 384 | 76 107 ns | 297 753 ns | 295 105 ns |
+
+`Clone` duplicates the hash table structure wholesale; `Copy` re-inserts and
+re-hashes every key, and a manual loop matches it, so the advantage is entirely
+`Clone`'s runtime fast path.
+
+**`Clone` sizes to its source, so there is no way to clone into a presized map.**
+Choosing to presize therefore forces the 3-4x copy. That fixed penalty is what
+the rebuild strategy has to earn back.
+
+### It earns it back only when k is several times n
+
+In-place naive is `naive - cloneOnly`, isolating the inserts from the copy that
+both variants perform:
+
+| n | k=1 | k=16 | k=256 | k=4 096 |
+|---|---|---|---|---|
+| 64 | naive 484x | naive 12x | **rebuild 1.9x** | **rebuild 3.1x** |
+| 1 024 | naive vastly | naive 79x | naive 11x | **rebuild 1.9x** |
+| 16 384 | naive vastly | naive vastly | naive 57x | naive 7.6x |
+
+**Rebuild wins only around k >= 4n.** Below that, in-place insertion wins, often
+by orders of magnitude, because rebuild pays its expensive O(n) copy regardless
+of how few entries are being added.
+
+The regime where rebuild wins — adding several times more entries than the dict
+already holds — is one where a caller would more naturally construct a new dict,
+and `CollectHashDict` already presizes that correctly. Adopting rebuild would
+also mean a size-ratio threshold inside `SetAll`, which is the hidden-constant
+shape ADR 0004 rejected.
+
 ## Conclusions
 
 Durable:
@@ -50,7 +96,10 @@ Durable:
 3. **The sized-constructor argument is much stronger for a hash dict than for
    the sorted containers.** ADR 0006's 0–10% result does not carry over, and
    assuming it would have been wrong.
-4. Presizing only applies at construction. Go exposes no growth hint for an
-   existing map, so a bulk insert into a non-empty dict has nothing to presize.
+4. Presizing only applies at construction. Rebuilding a non-empty dict to
+   presize it is possible for a struct-backed type but pays a 3-4x copy penalty
+   that only k >= 4n recovers, so `SetAll` should insert in place.
+5. `maps.Clone` is 3-4x faster than `make` plus a copy, and cannot be given a
+   target size. Prefer it wherever a same-size duplicate is what you want.
 
 Perishable: every absolute number above.
