@@ -189,3 +189,144 @@ func ExampleSet_Difference() {
 	fmt.Println(slices.Sorted(requested.Difference(granted).All()))
 	// Output: [admin delete]
 }
+
+// ===========================================================================
+// SortedMap tasks, per docs/adr/0003-sorted-map.md.
+//
+// The baseline is a sorted slice with binary search, not `map[K]V` sorted on
+// demand. The map version was written and measured first and is a strawman:
+// every ordered operation re-sorts the key set, so a floor lookup sorts every
+// key to answer one question. Comparing against it would flatter the container.
+//
+// Domain: a rate table. Key = minimum quantity for a tier, value = unit price.
+// ===========================================================================
+
+type Tier struct {
+	MinQty int
+	Price  string
+}
+
+// Table is the scaffolding the baseline needs before any task can be written —
+// and needs again for every key/value type pair.
+type Table []Tier
+
+func (t Table) find(k int) (int, bool) {
+	return slices.BinarySearchFunc(t, k, func(e Tier, k int) int { return e.MinQty - k })
+}
+
+func (t *Table) Set(k int, v string) {
+	if i, found := t.find(k); found {
+		(*t)[i].Price = v
+	} else {
+		*t = slices.Insert(*t, i, Tier{k, v})
+	}
+}
+
+func newTable(tiers ...Tier) Table {
+	var t Table
+	for _, e := range tiers {
+		t.Set(e.MinQty, e.Price)
+	}
+	return t
+}
+
+// ---------------------------------------------------------------------------
+// Task D — all tiers in key order
+//
+// ADR 0003 records this as a task the container CANNOT win: a sorted slice is
+// already ordered, so the baseline is the identity.
+// ---------------------------------------------------------------------------
+
+func tiersInOrderStdlib(t Table) []Tier { return t }
+
+// ---------------------------------------------------------------------------
+// Task E — tiers with lo <= key < hi
+//
+// Note the baseline returns a sub-slice aliasing t's backing array: callers can
+// mutate the table through it. ADR 0003 rejects that shape for the container.
+// ---------------------------------------------------------------------------
+
+func tiersInRangeStdlib(t Table, lo, hi int) []Tier {
+	i, _ := t.find(lo)
+	j, _ := t.find(hi)
+	return t[i:j]
+}
+
+// ---------------------------------------------------------------------------
+// Task F — which tier applies to a quantity (largest key <= qty)
+//
+// The `if !found { i-- }` adjustment and the `i < 0` guard are the off-by-one
+// that hand-rolled ordered lookup gets wrong, rewritten per type.
+// ---------------------------------------------------------------------------
+
+func tierForStdlib(t Table, qty int) (Tier, bool) {
+	i, found := t.find(qty)
+	if !found {
+		i--
+	}
+	if i < 0 {
+		return Tier{}, false
+	}
+	return t[i], true
+}
+
+// ---------------------------------------------------------------------------
+// Cases, shared by the stdlib and (later) container implementations.
+// ---------------------------------------------------------------------------
+
+var rateTable = []Tier{{1, "1.00"}, {10, "0.90"}, {50, "0.75"}, {100, "0.60"}}
+
+var tiersInRangeCases = []struct {
+	name   string
+	lo, hi int
+	want   []Tier
+}{
+	{"middle", 10, 100, []Tier{{10, "0.90"}, {50, "0.75"}}},
+	{"all", 0, 1000, rateTable},
+	{"empty span", 2, 9, nil},
+	{"above everything", 500, 1000, nil},
+	{"exact lower bound only", 100, 101, []Tier{{100, "0.60"}}},
+}
+
+var tierForCases = []struct {
+	name   string
+	qty    int
+	want   Tier
+	wantOK bool
+}{
+	{"below all", 0, Tier{}, false},
+	{"exact first", 1, Tier{1, "1.00"}, true},
+	{"between", 7, Tier{1, "1.00"}, true},
+	{"exact middle", 50, Tier{50, "0.75"}, true},
+	{"above all", 999, Tier{100, "0.60"}, true},
+}
+
+func TestTiersInOrder(t *testing.T) {
+	tbl := newTable(rateTable...)
+	if got := tiersInOrderStdlib(tbl); !slices.Equal(got, rateTable) {
+		t.Errorf("got %v, want %v", got, rateTable)
+	}
+}
+
+func TestTiersInRange(t *testing.T) {
+	tbl := newTable(rateTable...)
+	for _, tc := range tiersInRangeCases {
+		t.Run("stdlib/"+tc.name, func(t *testing.T) {
+			if got := tiersInRangeStdlib(tbl, tc.lo, tc.hi); !slices.Equal(got, tc.want) {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTierFor(t *testing.T) {
+	tbl := newTable(rateTable...)
+	for _, tc := range tierForCases {
+		t.Run("stdlib/"+tc.name, func(t *testing.T) {
+			got, ok := tierForStdlib(tbl, tc.qty)
+			if got != tc.want || ok != tc.wantOK {
+				t.Errorf("got %v,%v want %v,%v", got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
