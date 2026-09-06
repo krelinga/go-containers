@@ -92,14 +92,14 @@ func TestMapOperations(t *testing.T) {
 // The value satisfies, unlike every other container here.
 func TestMapInterfaceSatisfaction(t *testing.T) {
 	var (
-		_ containers.Elems2[int, string]     = containers.Map[int, string]{}
-		_ containers.MutableMap[int, string] = containers.Map[int, string]{}
-		_ containers.MutableMap[int, string] = containers.NewSortedMap[int, string]()
+		_ containers.Elems2[int, string]      = containers.Map[int, string]{}
+		_ containers.MutableDict[int, string] = containers.Map[int, string]{}
+		_ containers.MutableDict[int, string] = containers.NewSortedDict[int, string]()
 	)
 }
 
 // prune, written once, run against both backings -- the point of the contract.
-func prune[K comparable, V any](m containers.MutableMap[K, V], keep func(V) bool) {
+func prune[K comparable, V any](m containers.MutableDict[K, V], keep func(V) bool) {
 	var drop []K
 	for k, v := range m.All() {
 		if !keep(v) {
@@ -111,7 +111,7 @@ func prune[K comparable, V any](m containers.MutableMap[K, V], keep func(V) bool
 	}
 }
 
-func TestMutableMapGenericOverBothBackings(t *testing.T) {
+func TestMutableDictGenericOverBothBackings(t *testing.T) {
 	for _, tc := range pruneCases {
 		t.Run("Map/"+tc.name, func(t *testing.T) {
 			m := containers.Map[int, int](maps.Clone(tc.in))
@@ -120,8 +120,8 @@ func TestMutableMapGenericOverBothBackings(t *testing.T) {
 				t.Errorf("got %v, want %v", got, tc.want)
 			}
 		})
-		t.Run("SortedMap/"+tc.name, func(t *testing.T) {
-			sm := containers.NewSortedMap[int, int]()
+		t.Run("SortedDict/"+tc.name, func(t *testing.T) {
+			sm := containers.NewSortedDict[int, int]()
 			sm.SetAllSeq(maps.All(tc.in))
 			prune[int, int](sm, keepEven)
 			if got := slices.Sorted(maps.Keys(maps.Collect(sm.All()))); !slices.Equal(got, tc.want) {
@@ -158,10 +158,10 @@ func TestMapSerialization(t *testing.T) {
 	}
 
 	// Meanwhile the struct-backed containers silently discard their contents.
-	sm := containers.NewSortedMap[string, int]()
+	sm := containers.NewSortedDict[string, int]()
 	sm.Set("a", 1)
 	sb, err := json.Marshal(sm)
 	if err != nil || string(sb) != "{}" {
-		t.Errorf("SortedMap Marshal = %s, %v; want {}, nil (the known gap)", sb, err)
+		t.Errorf("SortedDict Marshal = %s, %v; want {}, nil (the known gap)", sb, err)
 	}
 }

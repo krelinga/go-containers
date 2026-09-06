@@ -7,7 +7,7 @@ import (
 
 // TestSortedEntryLayout locks the field order in place. Declaring the value
 // field last would pad the struct whenever V is zero-sized, doubling the width
-// of SortedMap[K, struct{}] with no compile error and no failing behaviour test.
+// of SortedDict[K, struct{}] with no compile error and no failing behaviour test.
 //
 // This is an internal test because the property is about an unexported type's
 // layout; there is no way to observe it through the public API.

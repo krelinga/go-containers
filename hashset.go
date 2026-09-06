@@ -14,7 +14,7 @@ func (*noCopy) Unlock() {}
 //
 // The zero value is an empty Set ready to use:
 //
-//	var s containers.Set[string]
+//	var s containers.HashSet[string]
 //	s.Add("read")
 //
 // Every method has a pointer receiver, so calling one on an addressable Set
@@ -29,15 +29,15 @@ func (*noCopy) Unlock() {}
 // `go test` does not run that check: use `go vet ./...` or `go test -vet=all`.
 //
 // A Set is not safe for concurrent use.
-type Set[T comparable] struct {
+type HashSet[T comparable] struct {
 	_ noCopy
 	m map[T]struct{}
 }
 
-// NewSet returns a Set containing vs. It is a convenience for construction with
+// NewHashSet returns a Set containing vs. It is a convenience for construction with
 // initial values; the zero value of Set is equally usable.
-func NewSet[T comparable](vs ...T) *Set[T] {
-	s := &Set[T]{m: make(map[T]struct{}, len(vs))}
+func NewHashSet[T comparable](vs ...T) *HashSet[T] {
+	s := &HashSet[T]{m: make(map[T]struct{}, len(vs))}
 	for _, v := range vs {
 		s.m[v] = struct{}{}
 	}
@@ -45,7 +45,7 @@ func NewSet[T comparable](vs ...T) *Set[T] {
 }
 
 // Add adds vs to the set. Adding a value already present is a no-op.
-func (s *Set[T]) Add(vs ...T) {
+func (s *HashSet[T]) Add(vs ...T) {
 	if s.m == nil {
 		s.m = make(map[T]struct{}, len(vs))
 	}
@@ -55,7 +55,7 @@ func (s *Set[T]) Add(vs ...T) {
 }
 
 // Remove removes vs from the set. Removing a value not present is a no-op.
-func (s *Set[T]) Remove(vs ...T) {
+func (s *HashSet[T]) Remove(vs ...T) {
 	if s.m == nil {
 		// Also forces the nil-receiver panic when vs is empty, which a bare
 		// range over vs would skip.
@@ -67,19 +67,19 @@ func (s *Set[T]) Remove(vs ...T) {
 }
 
 // Has reports whether v is in the set.
-func (s *Set[T]) Has(v T) bool {
+func (s *HashSet[T]) Has(v T) bool {
 	_, ok := s.m[v]
 	return ok
 }
 
 // Len returns the number of values in the set.
-func (s *Set[T]) Len() int { return len(s.m) }
+func (s *HashSet[T]) Len() int { return len(s.m) }
 
 // All returns an iterator over the values in the set, in no particular order.
 //
 // The iterator is bound to the set's contents as of the call to All, not as of
 // iteration. Modifying the set during iteration is not supported.
-func (s *Set[T]) All() iter.Seq[T] {
+func (s *HashSet[T]) All() iter.Seq[T] {
 	m := s.m // read eagerly, so a nil receiver panics here rather than on iteration
 	return func(yield func(T) bool) {
 		for v := range m {
@@ -92,8 +92,8 @@ func (s *Set[T]) All() iter.Seq[T] {
 
 // Clone returns an independent copy of the set. Mutating the result does not
 // affect s.
-func (s *Set[T]) Clone() *Set[T] {
-	out := &Set[T]{m: make(map[T]struct{}, s.Len())}
+func (s *HashSet[T]) Clone() *HashSet[T] {
+	out := &HashSet[T]{m: make(map[T]struct{}, s.Len())}
 	for v := range s.All() {
 		out.m[v] = struct{}{}
 	}
@@ -101,7 +101,7 @@ func (s *Set[T]) Clone() *Set[T] {
 }
 
 // Union returns a new set containing every value in s or o.
-func (s *Set[T]) Union(o *Set[T]) *Set[T] {
+func (s *HashSet[T]) Union(o *HashSet[T]) *HashSet[T] {
 	out := s.Clone()
 	for v := range o.All() {
 		out.m[v] = struct{}{}
@@ -110,13 +110,13 @@ func (s *Set[T]) Union(o *Set[T]) *Set[T] {
 }
 
 // Intersect returns a new set containing the values in both s and o.
-func (s *Set[T]) Intersect(o *Set[T]) *Set[T] {
+func (s *HashSet[T]) Intersect(o *HashSet[T]) *HashSet[T] {
 	// Iterate the smaller set and probe the larger.
 	small, large := s, o
 	if large.Len() < small.Len() {
 		small, large = large, small
 	}
-	out := &Set[T]{m: make(map[T]struct{})}
+	out := &HashSet[T]{m: make(map[T]struct{})}
 	for v := range small.All() {
 		if large.Has(v) {
 			out.m[v] = struct{}{}
@@ -126,10 +126,10 @@ func (s *Set[T]) Intersect(o *Set[T]) *Set[T] {
 }
 
 // Difference returns a new set containing the values in s that are not in o.
-func (s *Set[T]) Difference(o *Set[T]) *Set[T] {
+func (s *HashSet[T]) Difference(o *HashSet[T]) *HashSet[T] {
 	// o.Len() both sizes the result and forces o to be evaluated, so a nil o
 	// panics even when s is empty and the loop below never runs.
-	out := &Set[T]{m: make(map[T]struct{}, max(0, s.Len()-o.Len()))}
+	out := &HashSet[T]{m: make(map[T]struct{}, max(0, s.Len()-o.Len()))}
 	for v := range s.All() {
 		if !o.Has(v) {
 			out.m[v] = struct{}{}
@@ -137,17 +137,3 @@ func (s *Set[T]) Difference(o *Set[T]) *Set[T] {
 	}
 	return out
 }
-
-// SetLike is the container contract shared by set implementations. Algebra is
-// deliberately excluded: Go has no covariant returns, so a method returning a
-// concrete *Set cannot satisfy an interface method returning the interface.
-// Operations generic over containers are free functions over iter.Seq instead.
-//
-// The name is a placeholder; see ADR 0002 follow-ups.
-type SetLike[T comparable] interface {
-	Elems[T]
-	Add(...T)
-	Has(T) bool
-}
-
-var _ SetLike[int] = (*Set[int])(nil)

@@ -7,7 +7,7 @@ import (
 	"github.com/krelinga/go-containers"
 )
 
-func sorted[T interface{ ~string | ~int }](s *containers.Set[T]) []T {
+func sorted[T interface{ ~string | ~int }](s *containers.HashSet[T]) []T {
 	return slices.Sorted(s.All())
 }
 
@@ -23,7 +23,7 @@ func mustPanic(t *testing.T, name string, f func()) {
 
 // ADR 0002, decision 2: the zero value is usable.
 func TestZeroValueIsUsable(t *testing.T) {
-	var s containers.Set[string]
+	var s containers.HashSet[string]
 
 	if s.Len() != 0 || s.Has("read") {
 		t.Errorf("fresh zero value not empty: Len=%d Has=%v", s.Len(), s.Has("read"))
@@ -38,7 +38,7 @@ func TestZeroValueIsUsable(t *testing.T) {
 	}
 
 	// A composite literal behaves identically.
-	c := containers.Set[string]{}
+	c := containers.HashSet[string]{}
 	c.Add("x")
 	if c.Len() != 1 {
 		t.Errorf("composite literal Len = %d, want 1", c.Len())
@@ -48,8 +48,8 @@ func TestZeroValueIsUsable(t *testing.T) {
 // ADR 0002, decision 2: all nine methods panic on a nil receiver, with no
 // special-casing. All must panic at the call, not deferred to iteration.
 func TestNilPointerPanicsUniformly(t *testing.T) {
-	var p *containers.Set[string]
-	other := containers.NewSet("a")
+	var p *containers.HashSet[string]
+	other := containers.NewHashSet("a")
 
 	mustPanic(t, "Add", func() { p.Add("x") })
 	mustPanic(t, "Remove", func() { p.Remove("x") })
@@ -72,17 +72,17 @@ func TestNilPointerPanicsUniformly(t *testing.T) {
 // there explicitly so it is not later "fixed" into treating nil as the empty
 // set; asserted here so it cannot drift silently.
 func TestNilArgumentPanics(t *testing.T) {
-	var nilSet *containers.Set[string]
+	var nilSet *containers.HashSet[string]
 
 	// A populated receiver reaches the argument on its own.
-	full := containers.NewSet("a")
+	full := containers.NewHashSet("a")
 	mustPanic(t, "full.Union(nil)", func() { _ = full.Union(nilSet) })
 	mustPanic(t, "full.Intersect(nil)", func() { _ = full.Intersect(nilSet) })
 	mustPanic(t, "full.Difference(nil)", func() { _ = full.Difference(nilSet) })
 
 	// An empty receiver does not: the loops never run, so the argument must be
 	// evaluated eagerly for these to panic at all.
-	var empty containers.Set[string]
+	var empty containers.HashSet[string]
 	mustPanic(t, "empty.Union(nil)", func() { _ = empty.Union(nilSet) })
 	mustPanic(t, "empty.Intersect(nil)", func() { _ = empty.Intersect(nilSet) })
 	mustPanic(t, "empty.Difference(nil)", func() { _ = empty.Difference(nilSet) })
@@ -92,7 +92,7 @@ func TestNilArgumentPanics(t *testing.T) {
 // Observable when the set is still at its zero value, since the first Add
 // allocates a new map rather than mutating the bound one.
 func TestAllBindsAtCallTime(t *testing.T) {
-	var s containers.Set[string]
+	var s containers.HashSet[string]
 	it := s.All() // binds the nil map
 	s.Add("a")    // allocates a fresh map
 	if got := slices.Sorted(it); len(got) != 0 {
@@ -104,7 +104,7 @@ func TestAllBindsAtCallTime(t *testing.T) {
 }
 
 func TestAddRemoveIdempotent(t *testing.T) {
-	s := containers.NewSet("a")
+	s := containers.NewHashSet("a")
 	s.Add("a")
 	if s.Len() != 1 {
 		t.Errorf("re-Add changed Len to %d, want 1", s.Len())
@@ -118,7 +118,7 @@ func TestAddRemoveIdempotent(t *testing.T) {
 		t.Errorf("Len after Remove = %d, want 0", s.Len())
 	}
 	// Remove on a zero value is a no-op, not a panic.
-	var z containers.Set[string]
+	var z containers.HashSet[string]
 	z.Remove("x")
 }
 
@@ -126,7 +126,7 @@ func TestAddRemoveIdempotent(t *testing.T) {
 // share the map; go vet rejects that at the definition, and this asserts the
 // behaviour callers depend on.
 func TestCloneIsIndependent(t *testing.T) {
-	orig := containers.NewSet("a", "b")
+	orig := containers.NewHashSet("a", "b")
 	clone := orig.Clone()
 	clone.Add("c")
 	orig.Remove("a")
@@ -138,15 +138,15 @@ func TestCloneIsIndependent(t *testing.T) {
 		t.Errorf("clone = %v, want %v", got, want)
 	}
 
-	var zero containers.Set[int]
+	var zero containers.HashSet[int]
 	if zero.Clone().Len() != 0 {
 		t.Error("Clone of zero value should be empty")
 	}
 }
 
 func TestAlgebra(t *testing.T) {
-	a := containers.NewSet("read", "write", "list")
-	b := containers.NewSet("write", "list", "admin")
+	a := containers.NewHashSet("read", "write", "list")
+	b := containers.NewHashSet("write", "list", "admin")
 
 	if got, want := sorted(a.Union(b)), []string{"admin", "list", "read", "write"}; !slices.Equal(got, want) {
 		t.Errorf("Union = %v, want %v", got, want)
@@ -159,8 +159,8 @@ func TestAlgebra(t *testing.T) {
 	}
 
 	// Intersect iterates the smaller operand; the result must not depend on order.
-	big := containers.NewSet("a", "b", "c", "d", "e")
-	small := containers.NewSet("c", "z")
+	big := containers.NewHashSet("a", "b", "c", "d", "e")
+	small := containers.NewHashSet("c", "z")
 	if got, want := sorted(big.Intersect(small)), []string{"c"}; !slices.Equal(got, want) {
 		t.Errorf("big.Intersect(small) = %v, want %v", got, want)
 	}
@@ -186,8 +186,8 @@ func TestAlgebra(t *testing.T) {
 }
 
 func TestAlgebraOnZeroValues(t *testing.T) {
-	var empty containers.Set[string]
-	full := containers.NewSet("a")
+	var empty containers.HashSet[string]
+	full := containers.NewHashSet("a")
 
 	if got := sorted(full.Union(&empty)); !slices.Equal(got, []string{"a"}) {
 		t.Errorf("Union with empty = %v", got)
@@ -201,8 +201,8 @@ func TestAlgebraOnZeroValues(t *testing.T) {
 }
 
 // The interface is satisfied by the pointer, and from a value only via &.
-func TestSetLikeSatisfaction(t *testing.T) {
-	var s containers.Set[int]
-	var _ containers.SetLike[int] = &s
-	var _ containers.SetLike[int] = containers.NewSet[int]()
+func TestMutableSetSatisfaction(t *testing.T) {
+	var s containers.HashSet[int]
+	var _ containers.MutableSet[int] = &s
+	var _ containers.MutableSet[int] = containers.NewHashSet[int]()
 }

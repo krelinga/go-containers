@@ -14,16 +14,16 @@ import (
 // the value does not -- ADR 0002's uniform pointer receivers.
 func TestElemsSatisfaction(t *testing.T) {
 	var (
-		_ containers.Elems[int]          = containers.NewSet[int]()
+		_ containers.Elems[int]          = containers.NewHashSet[int]()
 		_ containers.Elems[int]          = containers.NewSortedSet[int]()
-		_ containers.Elems2[int, string] = containers.NewSortedMap[int, string]()
+		_ containers.Elems2[int, string] = containers.NewSortedDict[int, string]()
 	)
-	var s containers.Set[int]
+	var s containers.HashSet[int]
 	var _ containers.Elems[int] = &s
 
-	// SetLike is now Elems plus the mutating operations, same method set.
-	var _ containers.SetLike[int] = containers.NewSet[int]()
-	var _ containers.SetLike[int] = containers.NewSortedSet[int]()
+	// MutableSet is now Elems plus the mutating operations, same method set.
+	var _ containers.MutableSet[int] = containers.NewHashSet[int]()
+	var _ containers.MutableSet[int] = containers.NewSortedSet[int]()
 }
 
 // lyingElems reports a length that does not match what it yields. ADR 0006
@@ -62,11 +62,11 @@ func TestElemsLenIsOnlyAHint(t *testing.T) {
 		}
 
 		src2 := lyingElems2{vals: map[int]string{5: "e", 1: "a", 9: "i"}, n: n}
-		m := containers.CollectSortedMap(src2)
+		m := containers.CollectSortedDict(src2)
 		if got, wantK := orderedKeys(m), []int{1, 5, 9}; !slices.Equal(got, wantK) {
-			t.Errorf("CollectSortedMap with Len()=%d = %v, want %v", n, got, wantK)
+			t.Errorf("CollectSortedDict with Len()=%d = %v, want %v", n, got, wantK)
 		}
-		var m2 containers.SortedMap[int, string]
+		var m2 containers.SortedDict[int, string]
 		m2.SetAll(src2)
 		if got, wantK := orderedKeys(&m2), []int{1, 5, 9}; !slices.Equal(got, wantK) {
 			t.Errorf("SetAll with Len()=%d = %v, want %v", n, got, wantK)
@@ -76,7 +76,7 @@ func TestElemsLenIsOnlyAHint(t *testing.T) {
 
 // The sized and bare forms must produce identical results.
 func TestSizedAndSeqFormsAgree(t *testing.T) {
-	src := containers.NewSet(5, 1, 9, 3)
+	src := containers.NewHashSet(5, 1, 9, 3)
 
 	sized := containers.CollectSortedSet(src)
 	viaSeq := containers.CollectSortedSetSeq(src.All())
@@ -91,17 +91,17 @@ func TestSizedAndSeqFormsAgree(t *testing.T) {
 		t.Errorf("AddAll %v vs AddAllSeq %v", ssVals(&a), ssVals(&b))
 	}
 
-	msrc := containers.NewSortedMap[int, string]()
+	msrc := containers.NewSortedDict[int, string]()
 	msrc.SetAllSeq(maps.All(map[int]string{2: "b", 1: "a"}))
-	if !slices.Equal(orderedKeys(containers.CollectSortedMap(msrc)),
-		orderedKeys(containers.CollectSortedMapSeq(msrc.All()))) {
-		t.Error("CollectSortedMap and CollectSortedMapSeq disagree")
+	if !slices.Equal(orderedKeys(containers.CollectSortedDict(msrc)),
+		orderedKeys(containers.CollectSortedDictSeq(msrc.All()))) {
+		t.Error("CollectSortedDict and CollectSortedDictSeq disagree")
 	}
 }
 
 // The point of the change: the sized form allocates fewer times.
 func TestSizedFormAllocatesLess(t *testing.T) {
-	src := containers.NewSet[int]()
+	src := containers.NewHashSet[int]()
 	for i := range 4096 {
 		src.Add(i)
 	}
@@ -120,15 +120,15 @@ func TestSizedFormAllocatesLess(t *testing.T) {
 // ADR 0002's nil-argument rule extends to interface arguments.
 func TestElemsNilArgumentPanics(t *testing.T) {
 	var s containers.SortedSet[int]
-	var m containers.SortedMap[int, string]
+	var m containers.SortedDict[int, string]
 
 	mustPanic(t, "AddAll(nil interface)", func() { s.AddAll(nil) })
 	mustPanic(t, "SetAll(nil interface)", func() { m.SetAll(nil) })
 	mustPanic(t, "CollectSortedSet(nil)", func() { _ = containers.CollectSortedSet[int](nil) })
-	mustPanic(t, "CollectSortedMap(nil)", func() { _ = containers.CollectSortedMap[int, string](nil) })
+	mustPanic(t, "CollectSortedDict(nil)", func() { _ = containers.CollectSortedDict[int, string](nil) })
 
 	// A non-nil interface holding a nil pointer panics inside the container.
-	var nilSet *containers.Set[int]
+	var nilSet *containers.HashSet[int]
 	mustPanic(t, "AddAll(typed nil)", func() { s.AddAll(nilSet) })
 }
 
@@ -140,7 +140,7 @@ func TestElemsSelfReference(t *testing.T) {
 		t.Errorf("s.AddAll(s) = %v, want %v", got, want)
 	}
 
-	m := containers.NewSortedMap[int, string]()
+	m := containers.NewSortedDict[int, string]()
 	m.SetAllSeq(maps.All(map[int]string{1: "a", 2: "b"}))
 	m.SetAll(m)
 	if got, want := orderedKeys(m), []int{1, 2}; !slices.Equal(got, want) {
@@ -151,8 +151,75 @@ func TestElemsSelfReference(t *testing.T) {
 // A Set converts to a SortedSet without the caller mentioning iterators, and
 // the length comes along for free.
 func ExampleCollectSortedSet() {
-	seen := containers.NewSet(40, 3, 12, 7)
+	seen := containers.NewHashSet(40, 3, 12, 7)
 	sorted := containers.CollectSortedSet(seen)
 	fmt.Println(slices.Collect(sorted.All()))
 	// Output: [3 7 12 40]
+}
+
+// ---------------------------------------------------------------------------
+// ADR 0008's three layers. The point of the read-only layer is that a function
+// needing Has or Get does not have to accept a contract carrying Add and
+// Delete, which is what the previous two-layer scheme forced.
+// ---------------------------------------------------------------------------
+
+// countPresent takes the read-only contract: it cannot write through m.
+func countPresent[T comparable](s containers.Set[T], probes ...T) int {
+	n := 0
+	for _, p := range probes {
+		if s.Has(p) {
+			n++
+		}
+	}
+	return n
+}
+
+// lookupAll takes the read-only dict contract.
+func lookupAll[K comparable, V any](d containers.Dict[K, V], keys ...K) int {
+	n := 0
+	for _, k := range keys {
+		if _, ok := d.Get(k); ok {
+			n++
+		}
+	}
+	return n
+}
+
+func TestReadOnlyLayerAcceptsEveryContainer(t *testing.T) {
+	hs := containers.NewHashSet(1, 2, 3)
+	ss := containers.NewSortedSet(1, 2, 3)
+	for name, s := range map[string]containers.Set[int]{"HashSet": hs, "SortedSet": ss} {
+		if got := countPresent[int](s, 1, 3, 99); got != 2 {
+			t.Errorf("%s: countPresent = %d, want 2", name, got)
+		}
+		if s.Len() != 3 {
+			t.Errorf("%s: Len = %d, want 3", name, s.Len())
+		}
+	}
+
+	m := containers.Map[string, int]{"a": 1, "b": 2}
+	sd := containers.NewSortedDict[string, int]()
+	sd.SetAllSeq(maps.All(map[string]int{"a": 1, "b": 2}))
+	for name, d := range map[string]containers.Dict[string, int]{"Map": m, "SortedDict": sd} {
+		if got := lookupAll[string, int](d, "a", "b", "zz"); got != 2 {
+			t.Errorf("%s: lookupAll = %d, want 2", name, got)
+		}
+	}
+}
+
+// MutableSet gained Remove in ADR 0008, mirroring MutableDict's Delete.
+func TestMutableSetRemove(t *testing.T) {
+	drop := func(s containers.MutableSet[int], vs ...int) { s.Remove(vs...) }
+
+	hs := containers.NewHashSet(1, 2, 3)
+	drop(hs, 2)
+	if hs.Has(2) || hs.Len() != 2 {
+		t.Errorf("HashSet after Remove: Len=%d Has(2)=%v", hs.Len(), hs.Has(2))
+	}
+
+	ss := containers.NewSortedSet(1, 2, 3)
+	drop(ss, 2)
+	if ss.Has(2) || ss.Len() != 2 {
+		t.Errorf("SortedSet after Remove: Len=%d Has(2)=%v", ss.Len(), ss.Has(2))
+	}
 }

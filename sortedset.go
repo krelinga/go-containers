@@ -13,7 +13,7 @@ import (
 //	var s containers.SortedSet[int]
 //	s.Add(10)
 //
-// As with Set and SortedMap, every method has a pointer receiver, a nil
+// As with Set and SortedDict, every method has a pointer receiver, a nil
 // *SortedSet panics on any method, and copying the struct shares the backing
 // array — use Clone, and prefer a SortedSet field over a *SortedSet field.
 // `go vet` reports struct copies, though `go test` does not run that check: use
@@ -130,7 +130,7 @@ func (s *SortedSet[T]) Remove(vs ...T) {
 //
 // This calls slices.BinarySearch directly rather than searching through a
 // comparator closure, which ADR 0005 measured at roughly 3.4x — the reason
-// SortedSet owns its backing rather than wrapping SortedMap[T, struct{}].
+// SortedSet owns its backing rather than wrapping SortedDict[T, struct{}].
 func (s *SortedSet[T]) Has(v T) bool {
 	_, found := slices.BinarySearch(s.es, v)
 	return found
@@ -256,7 +256,7 @@ func (s *SortedSet[T]) Difference(o *SortedSet[T]) *SortedSet[T] {
 }
 
 // collectSortedValues drains seq into a sorted, distinct slice. Unlike
-// SortedMap's equivalent there is no last-write-wins question: the values are
+// SortedDict's equivalent there is no last-write-wins question: the values are
 // the keys, so duplicates simply collapse.
 // collectSortedValues drains seq into a sorted, distinct slice, preallocating
 // to sizeHint when it is positive. The hint only affects allocation: every

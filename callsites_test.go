@@ -44,7 +44,7 @@ func unauthorizedStdlib(granted, requested []string) []string {
 }
 
 func unauthorizedContainer(granted, requested []string) []string {
-	missing := containers.NewSet(requested...).Difference(containers.NewSet(granted...))
+	missing := containers.NewHashSet(requested...).Difference(containers.NewHashSet(granted...))
 	return slices.Sorted(missing.All())
 }
 
@@ -67,7 +67,7 @@ func sharedStdlib(a, b []string) []string {
 }
 
 func sharedContainer(a, b []string) []string {
-	return slices.Sorted(containers.NewSet(a...).Intersect(containers.NewSet(b...)).All())
+	return slices.Sorted(containers.NewHashSet(a...).Intersect(containers.NewHashSet(b...)).All())
 }
 
 // ---------------------------------------------------------------------------
@@ -84,7 +84,7 @@ func distinctStdlib(in []string) []string {
 }
 
 func distinctContainer(in []string) []string {
-	return slices.Sorted(containers.NewSet(in...).All())
+	return slices.Sorted(containers.NewHashSet(in...).All())
 }
 
 // ---------------------------------------------------------------------------
@@ -175,24 +175,24 @@ func TestDistinct(t *testing.T) {
 
 // Examples, for godoc.
 
-func ExampleSet() {
-	var granted containers.Set[string]
+func ExampleHashSet() {
+	var granted containers.HashSet[string]
 	granted.Add("read", "write")
 
 	fmt.Println(granted.Has("read"), granted.Has("delete"), granted.Len())
 	// Output: true false 2
 }
 
-func ExampleSet_Difference() {
-	requested := containers.NewSet("read", "delete", "admin")
-	granted := containers.NewSet("read", "write")
+func ExampleHashSet_Difference() {
+	requested := containers.NewHashSet("read", "delete", "admin")
+	granted := containers.NewHashSet("read", "write")
 
 	fmt.Println(slices.Sorted(requested.Difference(granted).All()))
 	// Output: [admin delete]
 }
 
 // ===========================================================================
-// SortedMap tasks, per docs/adr/0003-sorted-map.md.
+// SortedDict tasks, per docs/adr/0003-sorted-map.md.
 //
 // The baseline is a sorted slice with binary search, not `map[K]V` sorted on
 // demand. The map version was written and measured first and is a strawman:
@@ -240,7 +240,7 @@ func newTable(tiers ...Tier) Table {
 
 func tiersInOrderStdlib(t Table) []Tier { return t }
 
-func tiersInOrderContainer(m *containers.SortedMap[int, string]) []Tier {
+func tiersInOrderContainer(m *containers.SortedDict[int, string]) []Tier {
 	var out []Tier
 	for k, v := range m.All() {
 		out = append(out, Tier{k, v})
@@ -261,7 +261,7 @@ func tiersInRangeStdlib(t Table, lo, hi int) []Tier {
 	return t[i:j]
 }
 
-func tiersInRangeContainer(m *containers.SortedMap[int, string], lo, hi int) []Tier {
+func tiersInRangeContainer(m *containers.SortedDict[int, string], lo, hi int) []Tier {
 	var out []Tier
 	for k, v := range m.Range(lo, hi) {
 		out = append(out, Tier{k, v})
@@ -287,7 +287,7 @@ func tierForStdlib(t Table, qty int) (Tier, bool) {
 	return t[i], true
 }
 
-func tierForContainer(m *containers.SortedMap[int, string], qty int) (Tier, bool) {
+func tierForContainer(m *containers.SortedDict[int, string], qty int) (Tier, bool) {
 	k, v, ok := m.Floor(qty)
 	return Tier{k, v}, ok
 }
@@ -298,8 +298,8 @@ func tierForContainer(m *containers.SortedMap[int, string], qty int) (Tier, bool
 
 var rateTable = []Tier{{1, "1.00"}, {10, "0.90"}, {50, "0.75"}, {100, "0.60"}}
 
-func newSortedMap(tiers ...Tier) *containers.SortedMap[int, string] {
-	m := containers.NewSortedMap[int, string]()
+func newSortedDict(tiers ...Tier) *containers.SortedDict[int, string] {
+	m := containers.NewSortedDict[int, string]()
 	for _, e := range tiers {
 		m.Set(e.MinQty, e.Price)
 	}
@@ -335,14 +335,14 @@ func TestTiersInOrder(t *testing.T) {
 	if got := tiersInOrderStdlib(newTable(rateTable...)); !slices.Equal(got, rateTable) {
 		t.Errorf("stdlib: got %v, want %v", got, rateTable)
 	}
-	if got := tiersInOrderContainer(newSortedMap(rateTable...)); !slices.Equal(got, rateTable) {
+	if got := tiersInOrderContainer(newSortedDict(rateTable...)); !slices.Equal(got, rateTable) {
 		t.Errorf("container: got %v, want %v", got, rateTable)
 	}
 }
 
 func TestTiersInRange(t *testing.T) {
 	tbl := newTable(rateTable...)
-	sm := newSortedMap(rateTable...)
+	sm := newSortedDict(rateTable...)
 	for _, tc := range tiersInRangeCases {
 		t.Run("stdlib/"+tc.name, func(t *testing.T) {
 			if got := tiersInRangeStdlib(tbl, tc.lo, tc.hi); !slices.Equal(got, tc.want) {
@@ -359,7 +359,7 @@ func TestTiersInRange(t *testing.T) {
 
 func TestTierFor(t *testing.T) {
 	tbl := newTable(rateTable...)
-	sm := newSortedMap(rateTable...)
+	sm := newSortedDict(rateTable...)
 	for _, tc := range tierForCases {
 		t.Run("stdlib/"+tc.name, func(t *testing.T) {
 			got, ok := tierForStdlib(tbl, tc.qty)
@@ -376,8 +376,8 @@ func TestTierFor(t *testing.T) {
 	}
 }
 
-func ExampleSortedMap_Floor() {
-	rates := containers.NewSortedMap[int, string]()
+func ExampleSortedDict_Floor() {
+	rates := containers.NewSortedDict[int, string]()
 	rates.Set(1, "1.00")
 	rates.Set(10, "0.90")
 	rates.Set(50, "0.75")
@@ -387,8 +387,8 @@ func ExampleSortedMap_Floor() {
 	// Output: 10 0.90 true
 }
 
-func ExampleSortedMap_Range() {
-	rates := containers.NewSortedMap[int, string]()
+func ExampleSortedDict_Range() {
+	rates := containers.NewSortedDict[int, string]()
 	for k, v := range map[int]string{1: "1.00", 10: "0.90", 50: "0.75", 100: "0.60"} {
 		rates.Set(k, v)
 	}
@@ -419,7 +419,7 @@ func bulkLoadStdlib(src map[int]string) Table {
 
 func bulkLoadContainer(src map[int]string) []Tier {
 	var out []Tier
-	for k, v := range containers.CollectSortedMapSeq(maps.All(src)).All() {
+	for k, v := range containers.CollectSortedDictSeq(maps.All(src)).All() {
 		out = append(out, Tier{k, v})
 	}
 	return out
@@ -450,8 +450,8 @@ func TestBulkLoad(t *testing.T) {
 	}
 }
 
-func ExampleCollectSortedMapSeq() {
-	rates := containers.CollectSortedMapSeq(maps.All(map[int]string{
+func ExampleCollectSortedDictSeq() {
+	rates := containers.CollectSortedDictSeq(maps.All(map[int]string{
 		100: "0.60", 1: "1.00", 50: "0.75", 10: "0.90",
 	}))
 	for k, v := range rates.All() {
@@ -470,8 +470,8 @@ func ExampleCollectSortedMapSeq() {
 // Domain: deployed release version numbers.
 //
 // Two baselines are plausible and both appear below. The fair one, matching the
-// standard ADR 0003 held SortedMap to, is a hand-maintained sorted []int. The
-// other is what a user of THIS library would reach for today -- Set[int] plus
+// standard ADR 0003 held SortedDict to, is a hand-maintained sorted []int. The
+// other is what a user of THIS library would reach for today -- HashSet[int] plus
 // slices.Sorted -- which is O(n log n) per query because it re-sorts every time.
 // ===========================================================================
 
@@ -527,7 +527,7 @@ func versionAtOrBeforeContainer(s *containers.SortedSet[int], n int) (int, bool)
 
 // The same task using the Set this library already ships. Correct, and
 // O(n log n) per call because it re-sorts the whole set to answer one question.
-func versionAtOrBeforeViaSet(s *containers.Set[int], n int) (int, bool) {
+func versionAtOrBeforeViaSet(s *containers.HashSet[int], n int) (int, bool) {
 	vs := slices.Sorted(s.All())
 	i, found := slices.BinarySearch(vs, n)
 	if !found {
@@ -599,7 +599,7 @@ func TestVersionsInRange(t *testing.T) {
 
 func TestVersionAtOrBefore(t *testing.T) {
 	v := newVersions(releaseVersions...)
-	s := containers.NewSet(releaseVersions...)
+	s := containers.NewHashSet(releaseVersions...)
 	ss := containers.NewSortedSet(releaseVersions...)
 	for _, tc := range versionFloorCases {
 		t.Run("stdlib/"+tc.name, func(t *testing.T) {
@@ -640,7 +640,7 @@ func ExampleSortedSet_Range() {
 // operation written once per backing, because a builtin map has no methods.
 //
 // Note the two are NOT the same code. The Go spec permits deleting from a map
-// while ranging over it, so the map version deletes in place. SortedMap.All
+// while ranging over it, so the map version deletes in place. SortedDict.All
 // binds its backing slice and Delete shifts within it, so doing the same there
 // corrupts the iteration -- it revisits keys and skips others. The sorted
 // version must collect first.
@@ -654,7 +654,7 @@ func pruneMapStdlib[K comparable, V any](m map[K]V, keep func(V) bool) {
 	}
 }
 
-func pruneSortedStdlib[K cmp.Ordered, V any](m *containers.SortedMap[K, V], keep func(V) bool) {
+func pruneSortedStdlib[K cmp.Ordered, V any](m *containers.SortedDict[K, V], keep func(V) bool) {
 	var drop []K
 	for k, v := range m.All() {
 		if !keep(v) {
@@ -669,7 +669,7 @@ func pruneSortedStdlib[K cmp.Ordered, V any](m *containers.SortedMap[K, V], keep
 // The container version: one function body for both backings. It uses the more
 // conservative iteration discipline, so it collects keys where pruneMapStdlib
 // deletes in place -- the cost of working against both.
-func pruneContainer[K comparable, V any](m containers.MutableMap[K, V], keep func(V) bool) {
+func pruneContainer[K comparable, V any](m containers.MutableDict[K, V], keep func(V) bool) {
 	var drop []K
 	for k, v := range m.All() {
 		if !keep(v) {
@@ -704,7 +704,7 @@ func TestPrune(t *testing.T) {
 			}
 		})
 		t.Run("stdlib-sorted/"+tc.name, func(t *testing.T) {
-			sm := containers.NewSortedMap[int, int]()
+			sm := containers.NewSortedDict[int, int]()
 			sm.SetAllSeq(maps.All(tc.in))
 			pruneSortedStdlib(sm, keepEven)
 			if got := slices.Sorted(maps.Keys(maps.Collect(sm.All()))); !slices.Equal(got, tc.want) {
@@ -720,7 +720,7 @@ func TestPrune(t *testing.T) {
 			}
 		})
 		t.Run("container-sorted/"+tc.name, func(t *testing.T) {
-			sm := containers.NewSortedMap[int, int]()
+			sm := containers.NewSortedDict[int, int]()
 			sm.SetAllSeq(maps.All(tc.in))
 			pruneContainer[int, int](sm, keepEven)
 			if got := slices.Sorted(maps.Keys(maps.Collect(sm.All()))); !slices.Equal(got, tc.want) {

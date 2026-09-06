@@ -9,10 +9,19 @@ beside it:
 
 | file | type | backing |
 |---|---|---|
-| `set.go` | `Set[T comparable]` | map, unordered |
+| `hashset.go` | `HashSet[T comparable]` | map, unordered |
 | `sortedset.go` | `SortedSet[T cmp.Ordered]` | sorted slice |
-| `sortedmap.go` | `SortedMap[K cmp.Ordered, V any]` | sorted slice |
-| `elems.go` | `Elems[T]`, `Elems2[K, V]` | the read-only contract they all satisfy |
+| `map.go` | `Map[K comparable, V any]` | a defined `map[K]V`, unordered |
+| `sorteddict.go` | `SortedDict[K cmp.Ordered, V any]` | sorted slice |
+| `contracts.go` | the interfaces below | — |
+
+Contracts come in three layers (ADR `0008`), each building on the one beneath:
+
+| layer | set side | dict side | adds |
+|---|---|---|---|
+| universal | `Elems[T]` | `Elems2[K, V]` | `Len`, `All` |
+| read-only | `Set[T]` | `Dict[K, V]` | `Has` / `Get` |
+| mutation | `MutableSet[T]` | `MutableDict[K, V]` | `Add`+`Remove` / `Set`+`Delete` |
 
 `callsites_test.go` holds every stdlib-vs-container comparison. Alongside: `docs/adr/` (accepted
 design decisions, binding on new code) and `experiments/` (measurement harnesses, each its own
@@ -58,10 +67,15 @@ to a plain `go test` — a shallow-copy `Clone` that silently shares the underly
   shape of a container type — uniform pointer receivers, a usable zero value, a `noCopy` field
   declared *first*, and no nil-receiver or nil-argument special cases. `0004` and `0006` govern
   bulk insertion and the sized read-only contract.
-- **A new container should satisfy `Elems[T]` or `Elems2[K, V]`** (`elems.go`) — `Len` plus `All`.
-  Nothing forces it, but every constructor that preallocates takes one, so a container that does
-  not satisfy it silently opts out of that. Both existing set types satisfied it without changes,
-  because the signatures already matched; keep it that way.
+- **A new container should satisfy its whole contract column** (`contracts.go`). At minimum
+  `Elems`/`Elems2`, since every preallocating constructor takes one and a container that does not
+  satisfy it silently opts out. Add `Has` or `Get` to reach the read-only layer, and the writes to
+  reach the mutation layer. Every existing container satisfied these without changes, because the
+  signatures already matched; keep it that way.
+- **Name new types per ADR `0008`.** Implementations are `<Ordering><Concept>` — `HashSet`,
+  `SortedDict`. Contracts are `Mutable<Concept>` for writes and the bare concept for reads. The one
+  exception is `Map`, which keeps the builtin's name because it is a thin naming of the builtin;
+  a future `Slice[T] []T` would take the same exception.
 - **The eager-dereference rule from `0002` bites repeatedly.** Every method must dereference its
   receiver — and every method taking a container or `Elems` argument must dereference that —
   on a path that *always* executes. Variadic methods, empty iterators, and loops that can run zero
@@ -73,9 +87,10 @@ to a plain `go test` — a shallow-copy `Clone` that silently shares the underly
   the shape ADR `0002` fixes, so it will recur for every container added. **Handle it once across
   the library in its own ADR — do not add `MarshalJSON`/`UnmarshalJSON` to a single container in
   the meantime**, or the types will diverge before the decision is made.
-- **`SetLike` is a placeholder name**, not a settled one. The container-contract interface in
-  `set.go` still needs a real name (ADR `0002` follow-ups). Rename it deliberately rather than
-  propagating it to a second container.
+- **ADRs `0001`-`0007` use the pre-`0008` names** and are deliberately left that way, since they
+  record decisions as they were made. ADR `0008` section 2 has the old-to-new mapping. In
+  particular `Set` there means today's `HashSet`, and `SortedMap` means `SortedDict`; `Set` now
+  names the read-only set contract instead.
 
 ## Experiments
 
