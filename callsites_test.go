@@ -719,6 +719,16 @@ func TestPrune(t *testing.T) {
 				t.Errorf("got %v, want %v", got, tc.want)
 			}
 		})
+		// HashDict takes the pointer, like every other container -- the
+		// asymmetry ADR 0007 recorded for Map, now avoidable.
+		t.Run("container-hashdict/"+tc.name, func(t *testing.T) {
+			hd := containers.NewHashDict[int, int]()
+			hd.SetAllSeq(maps.All(tc.in))
+			pruneContainer[int, int](hd, keepEven)
+			if got := slices.Sorted(maps.Keys(maps.Collect(hd.All()))); !slices.Equal(got, tc.want) {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
 		t.Run("container-sorted/"+tc.name, func(t *testing.T) {
 			sm := containers.NewSortedDict[int, int]()
 			sm.SetAllSeq(maps.All(tc.in))
@@ -737,4 +747,24 @@ func ExampleMap() {
 	// The conversion aliased the original, and builtin syntax still works.
 	fmt.Println(limits.Len(), limits["cpu"], slices.Sorted(maps.Keys(limits)))
 	// Output: 3 4 [cpu disk mem]
+}
+
+func ExampleHashDict() {
+	// The zero value is usable, unlike Map's.
+	var limits containers.HashDict[string, int]
+	limits.Set("cpu", 4)
+	limits.Set("mem", 16)
+
+	fmt.Println(limits.Len(), slices.Sorted(maps.Keys(maps.Collect(limits.All()))))
+	// Output: 2 [cpu mem]
+}
+
+func ExampleCollectHashDict() {
+	// Building one dict from another presizes from the source's length.
+	src := containers.NewSortedDict[string, int]()
+	src.SetAllSeq(maps.All(map[string]int{"b": 2, "a": 1, "c": 3}))
+
+	byHash := containers.CollectHashDict(src)
+	fmt.Println(byHash.Len(), slices.Sorted(maps.Keys(maps.Collect(byHash.All()))))
+	// Output: 3 [a b c]
 }
