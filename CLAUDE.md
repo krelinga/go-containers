@@ -19,8 +19,9 @@ code that exists, so treat unsettled areas as open.
 
 ```sh
 go build ./...
-go vet ./...
+go vet ./...                           # REQUIRED before pushing -- see note below
 go test ./...
+go test -vet=all ./...                 # tests plus the FULL vet set, incl. copylocks
 go test -run '^TestName$' ./...        # single test
 go test -run '^TestName$/^subtest$' ./...
 go test -race ./...
@@ -30,6 +31,12 @@ gofmt -l .                             # list unformatted files; -w to rewrite
 cd experiments/<name> && ./run.sh      # regenerate that experiment's bench.txt
 COUNT=20 BENCHTIME=1s ./run.sh         # more samples
 ```
+
+**`go test` does not run copylocks.** It runs only a high-confidence subset of vet
+(`atomic, bool, buildtags, directive, errorsas, ifaceassert, nilfunc, printf, stringintconv,
+tests`). The `noCopy` protection that container types rely on (ADR `0002`) is therefore invisible
+to a plain `go test` — a shallow-copy `Clone` that silently shares the underlying map passes both
+`go test ./...` and `go build ./...`. Run `go vet ./...` or `go test -vet=all ./...`.
 
 ## Conventions
 
@@ -43,6 +50,12 @@ COUNT=20 BENCHTIME=1s ./run.sh         # more samples
   `0001` governs when an accessor returns a read-only view rather than a copy; `0002` fixes the
   shape of a container type — uniform pointer receivers, a usable zero value, a `noCopy` field,
   and no nil-receiver special cases.
+- **Serialization is unsettled library-wide, and currently silently lossy.** Container types
+  have only unexported fields, so `json.Marshal` of a populated container returns `{}` with a
+  **nil error**, discarding its contents; `json.Unmarshal` fails asymmetrically. This follows from
+  the shape ADR `0002` fixes, so it will recur for every container added. **Handle it once across
+  the library in its own ADR — do not add `MarshalJSON`/`UnmarshalJSON` to a single container in
+  the meantime**, or the types will diverge before the decision is made.
 - **`SetLike` is a placeholder name**, not a settled one. The container-contract interface in
   `set.go` still needs a real name (ADR `0002` follow-ups). Rename it deliberately rather than
   propagating it to a second container.
