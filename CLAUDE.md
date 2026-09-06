@@ -4,14 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-Still greenfield: there is no library source and no tests yet, so `go build ./...` at the root
-matches no packages. Treat design decisions as open and do not assume a prior structure exists.
+`package containers` at the repo root is the library. `Set[T]` (`set.go`) is the first and
+currently only container; `set_test.go` covers it and `callsites_test.go` holds the stdlib-vs-
+container comparison.
 
-What does exist: `docs/adr/` (accepted design decisions), `experiments/` (measurement harnesses,
-each its own module), and this file.
+Alongside it: `docs/adr/` (accepted design decisions, binding on new code) and `experiments/`
+(measurement harnesses, each its own module).
 
 Intent, per the module path `github.com/krelinga/go-containers`: a generic (type-parameterized)
-container library.
+container library. Still early — the ADRs constrain code not yet written more than they describe
+code that exists, so treat unsettled areas as open.
 
 ## Commands
 
@@ -38,7 +40,12 @@ COUNT=20 BENCHTIME=1s ./run.sh         # more samples
 - Single flat package at the repo root — add new container types as sibling files, not subpackages,
   unless there is a reason to split.
 - **Read `docs/adr/` before designing a container type.** Accepted ADRs are binding on new code.
-  `0001` governs when an accessor returns a read-only view rather than a copy.
+  `0001` governs when an accessor returns a read-only view rather than a copy; `0002` fixes the
+  shape of a container type — uniform pointer receivers, a usable zero value, a `noCopy` field,
+  and no nil-receiver special cases.
+- **`SetLike` is a placeholder name**, not a settled one. The container-contract interface in
+  `set.go` still needs a real name (ADR `0002` follow-ups). Rename it deliberately rather than
+  propagating it to a second container.
 
 ## Experiments
 
