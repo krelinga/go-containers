@@ -25,7 +25,8 @@ func (*noCopy) Unlock() {}
 //
 // A Set holds a map internally, so copying the struct produces two Sets sharing
 // one map, exactly as copying a map produces two names for one map. Use Clone
-// to make an independent copy. `go vet` reports struct copies.
+// to make an independent copy. `go vet` reports struct copies, but note that
+// `go test` does not run that check: use `go vet ./...` or `go test -vet=all`.
 //
 // A Set is not safe for concurrent use.
 type Set[T comparable] struct {
@@ -43,7 +44,7 @@ func NewSet[T comparable](vs ...T) *Set[T] {
 	return s
 }
 
-// Add adds v to the set. Adding a value already present is a no-op.
+// Add adds vs to the set. Adding a value already present is a no-op.
 func (s *Set[T]) Add(vs ...T) {
 	if s.m == nil {
 		s.m = make(map[T]struct{}, len(vs))
@@ -53,8 +54,13 @@ func (s *Set[T]) Add(vs ...T) {
 	}
 }
 
-// Remove removes v from the set. Removing a value not present is a no-op.
+// Remove removes vs from the set. Removing a value not present is a no-op.
 func (s *Set[T]) Remove(vs ...T) {
+	if s.m == nil {
+		// Also forces the nil-receiver panic when vs is empty, which a bare
+		// range over vs would skip.
+		return
+	}
 	for _, v := range vs {
 		delete(s.m, v)
 	}
@@ -121,7 +127,9 @@ func (s *Set[T]) Intersect(o *Set[T]) *Set[T] {
 
 // Difference returns a new set containing the values in s that are not in o.
 func (s *Set[T]) Difference(o *Set[T]) *Set[T] {
-	out := &Set[T]{m: make(map[T]struct{})}
+	// o.Len() both sizes the result and forces o to be evaluated, so a nil o
+	// panics even when s is empty and the loop below never runs.
+	out := &Set[T]{m: make(map[T]struct{}, max(0, s.Len()-o.Len()))}
 	for v := range s.All() {
 		if !o.Has(v) {
 			out.m[v] = struct{}{}
