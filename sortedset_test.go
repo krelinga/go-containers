@@ -35,8 +35,8 @@ func TestSortedSetNilPanicsUniformly(t *testing.T) {
 	mustPanic(t, "Add", func() { p.Add(1) })
 	mustPanic(t, "Add() no args", func() { p.Add() })
 	mustPanic(t, "Add multi", func() { p.Add(1, 2) })
-	mustPanic(t, "AddAll", func() { p.AddAll(slices.Values([]int{1})) })
-	mustPanic(t, "AddAll empty", func() { p.AddAll(func(func(int) bool) {}) })
+	mustPanic(t, "AddAll", func() { p.AddAllSeq(slices.Values([]int{1})) })
+	mustPanic(t, "AddAll empty", func() { p.AddAllSeq(func(func(int) bool) {}) })
 	mustPanic(t, "Remove", func() { p.Remove(1) })
 	mustPanic(t, "Remove() no args", func() { p.Remove() })
 	mustPanic(t, "Has", func() { _ = p.Has(1) })
@@ -77,8 +77,8 @@ func TestSortedSetAddPathsAgree(t *testing.T) {
 	multi := containers.NewSortedSet[int]()
 	multi.Add(40, 3, 12, 7, 3, 40)
 	viaAddAll := containers.NewSortedSet[int]()
-	viaAddAll.AddAll(slices.Values([]int{40, 3, 12, 7, 3, 40}))
-	collected := containers.CollectSortedSet(slices.Values([]int{40, 3, 12, 7, 3, 40}))
+	viaAddAll.AddAllSeq(slices.Values([]int{40, 3, 12, 7, 3, 40}))
+	collected := containers.CollectSortedSetSeq(slices.Values([]int{40, 3, 12, 7, 3, 40}))
 
 	want := []int{3, 7, 12, 40}
 	for _, tc := range []struct {
@@ -93,13 +93,13 @@ func TestSortedSetAddPathsAgree(t *testing.T) {
 
 func TestSortedSetAddAllMergesWithExisting(t *testing.T) {
 	s := containers.NewSortedSet(10, 30, 50)
-	s.AddAll(slices.Values([]int{20, 30, 60}))
+	s.AddAllSeq(slices.Values([]int{20, 30, 60}))
 	if got, want := ssVals(s), []int{10, 20, 30, 50, 60}; !slices.Equal(got, want) {
 		t.Errorf("= %v, want %v", got, want)
 	}
 
 	var z containers.SortedSet[int]
-	z.AddAll(func(func(int) bool) {})
+	z.AddAllSeq(func(func(int) bool) {})
 	if z.Len() != 0 {
 		t.Error("empty AddAll on zero value should stay empty")
 	}

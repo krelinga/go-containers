@@ -264,8 +264,8 @@ func TestSetAllLastWriteWins(t *testing.T) {
 	}
 
 	bulk := containers.NewSortedMap[int, string]()
-	bulk.SetAll(seq)
-	collected := containers.CollectSortedMap(seq)
+	bulk.SetAllSeq(seq)
+	collected := containers.CollectSortedMapSeq(seq)
 
 	for _, tc := range []struct {
 		name string
@@ -297,7 +297,7 @@ func TestSetAllMergesWithExisting(t *testing.T) {
 	for _, k := range []int{10, 30, 50} {
 		m.Set(k, "old")
 	}
-	m.SetAll(maps.All(map[int]string{20: "new", 30: "replaced", 60: "new"}))
+	m.SetAllSeq(maps.All(map[int]string{20: "new", 30: "replaced", 60: "new"}))
 
 	if got, want := orderedKeys(m), []int{10, 20, 30, 50, 60}; !slices.Equal(got, want) {
 		t.Errorf("keys = %v, want %v", got, want)
@@ -315,48 +315,48 @@ func TestSetAllEdgeCases(t *testing.T) {
 
 	// Zero value receiver.
 	var z containers.SortedMap[int, string]
-	z.SetAll(maps.All(map[int]string{2: "b", 1: "a"}))
+	z.SetAllSeq(maps.All(map[int]string{2: "b", 1: "a"}))
 	if got, want := orderedKeys(&z), []int{1, 2}; !slices.Equal(got, want) {
 		t.Errorf("zero value SetAll = %v, want %v", got, want)
 	}
 
 	// Empty input leaves the map alone.
-	z.SetAll(empty)
+	z.SetAllSeq(empty)
 	if got, want := orderedKeys(&z), []int{1, 2}; !slices.Equal(got, want) {
 		t.Errorf("after empty SetAll = %v, want %v", got, want)
 	}
 
-	if containers.CollectSortedMap(empty).Len() != 0 {
+	if containers.CollectSortedMapSeq(empty).Len() != 0 {
 		t.Error("CollectSortedMap of an empty seq should be empty")
 	}
 
 	// ADR 0002's eager-dereference rule: an EMPTY seq must still panic on a nil
 	// receiver, which a bare range over seq would skip.
 	var p *containers.SortedMap[int, string]
-	mustPanic(t, "SetAll nil receiver, empty seq", func() { p.SetAll(empty) })
+	mustPanic(t, "SetAll nil receiver, empty seq", func() { p.SetAllSeq(empty) })
 	mustPanic(t, "SetAll nil receiver, non-empty seq", func() {
-		p.SetAll(maps.All(map[int]string{1: "a"}))
+		p.SetAllSeq(maps.All(map[int]string{1: "a"}))
 	})
 }
 
 // The iter.Seq2 choice exists so these compose with no adapter.
 func TestSetAllComposes(t *testing.T) {
 	src := containers.NewSortedMap[int, string]()
-	src.SetAll(maps.All(map[int]string{1: "a", 10: "b", 50: "c", 100: "d"}))
+	src.SetAllSeq(maps.All(map[int]string{1: "a", 10: "b", 50: "c", 100: "d"}))
 
-	fromAll := containers.CollectSortedMap(src.All())
+	fromAll := containers.CollectSortedMap(src)
 	if got, want := orderedKeys(fromAll), []int{1, 10, 50, 100}; !slices.Equal(got, want) {
 		t.Errorf("CollectSortedMap(src.All()) = %v, want %v", got, want)
 	}
 
-	fromRange := containers.CollectSortedMap(src.Range(10, 100))
+	fromRange := containers.CollectSortedMapSeq(src.Range(10, 100))
 	if got, want := orderedKeys(fromRange), []int{10, 50}; !slices.Equal(got, want) {
 		t.Errorf("CollectSortedMap(src.Range(10,100)) = %v, want %v", got, want)
 	}
 
 	dst := containers.NewSortedMap[int, string]()
-	dst.SetAll(src.Range(1, 11))
+	dst.SetAllSeq(src.Range(1, 11))
 	if got, want := orderedKeys(dst), []int{1, 10}; !slices.Equal(got, want) {
-		t.Errorf("dst.SetAll(src.Range(1,11)) = %v, want %v", got, want)
+		t.Errorf("dst.SetAllSeq(src.Range(1,11)) = %v, want %v", got, want)
 	}
 }

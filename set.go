@@ -145,10 +145,9 @@ func (s *Set[T]) Difference(o *Set[T]) *Set[T] {
 //
 // The name is a placeholder; see ADR 0002 follow-ups.
 type SetLike[T comparable] interface {
+	Elems[T]
 	Add(...T)
 	Has(T) bool
-	Len() int
-	All() iter.Seq[T]
 }
 
 var _ SetLike[int] = (*Set[int])(nil)

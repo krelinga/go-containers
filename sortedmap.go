@@ -165,11 +165,14 @@ func (m *SortedMap[K, V]) Clone() *SortedMap[K, V] {
 	return &SortedMap[K, V]{entries: slices.Clone(m.entries)}
 }
 
-// SetAll adds every entry in seq, replacing existing values for keys already
-// present. Where seq yields the same key more than once, the last wins — the
+// SetAll adds every entry in src, replacing existing values for keys already
+// present. Where src yields the same key more than once, the last wins — the
 // same result as calling Set for each entry in order.
 //
-// SetAll sorts seq once and merges, which is O(k log k + n + k) for k entries
+// src.Len() sizes the working slice; it is a hint, and a wrong one costs only a
+// worse allocation.
+//
+// SetAll sorts the input once and merges, which is O(k log k + n + k) for k entries
 // against a map of n. Calling Set in a loop is O(kn), because each out-of-order
 // insert memmoves half the backing array. experiments/bulkinsert measured the
 // crossover at roughly four to sixteen entries, nearly independent of n, with
@@ -177,29 +180,57 @@ func (m *SortedMap[K, V]) Clone() *SortedMap[K, V] {
 // marginally cheaper**, so prefer Set when adding one or two entries; SetAll is
 // the better choice for anything more.
 //
-// seq is fully consumed before the map is modified.
-func (m *SortedMap[K, V]) SetAll(seq iter.Seq2[K, V]) {
+// src is fully consumed before the map is modified, so m.SetAll(m) is well
+// defined, if pointless.
+func (m *SortedMap[K, V]) SetAll(src Elems2[K, V]) {
+	base := m.entries              // eager, so a nil receiver panics even for an empty src
+	seq, n := src.All(), src.Len() // eager, so a nil src panics too
+	m.setAll(base, collectSortedEntries(seq, n))
+}
+
+// SetAllSeq is SetAll for a bare iterator, which cannot report its length.
+// Prefer SetAll when the source knows it.
+func (m *SortedMap[K, V]) SetAllSeq(seq iter.Seq2[K, V]) {
 	base := m.entries // eager, so a nil receiver panics even when seq is empty
-	add := collectSortedEntries(seq)
+	m.setAll(base, collectSortedEntries(seq, 0))
+}
+
+func (m *SortedMap[K, V]) setAll(base, add []sortedEntry[K, V]) {
 	if len(add) == 0 {
 		return
 	}
 	m.entries = mergeSortedEntries(base, add)
 }
 
-// CollectSortedMap returns a SortedMap holding every entry in seq. Where seq
+// CollectSortedMap returns a SortedMap holding every entry in src. Where src
 // yields the same key more than once, the last wins.
 //
-// It is cheaper than NewSortedMap followed by SetAll: with nothing to merge
-// against, the merge degenerates to the sort alone.
-func CollectSortedMap[K cmp.Ordered, V any](seq iter.Seq2[K, V]) *SortedMap[K, V] {
-	return &SortedMap[K, V]{entries: collectSortedEntries(seq)}
+// src.Len() is used to size the working slice, so this allocates once where
+// CollectSortedMapSeq must grow as it goes. The saving is allocation volume
+// rather than wall-clock time: the sort that follows dominates. See ADR 0006.
+//
+// It is also cheaper than NewSortedMap followed by SetAll, since with nothing
+// to merge against the merge degenerates to the sort alone.
+func CollectSortedMap[K cmp.Ordered, V any](src Elems2[K, V]) *SortedMap[K, V] {
+	return &SortedMap[K, V]{entries: collectSortedEntries(src.All(), src.Len())}
+}
+
+// CollectSortedMapSeq returns a SortedMap holding every entry in seq.
+//
+// Prefer CollectSortedMap when the source knows its length. Use this for bare
+// iterators — maps.All, or another container's Range — which cannot report one.
+func CollectSortedMapSeq[K cmp.Ordered, V any](seq iter.Seq2[K, V]) *SortedMap[K, V] {
+	return &SortedMap[K, V]{entries: collectSortedEntries(seq, 0)}
 }
 
 // collectSortedEntries drains seq into a slice sorted by key, keeping the last
-// entry for any repeated key.
-func collectSortedEntries[K cmp.Ordered, V any](seq iter.Seq2[K, V]) []sortedEntry[K, V] {
+// entry for any repeated key. It preallocates to sizeHint when that is
+// positive; the hint only affects allocation, never which entries are kept.
+func collectSortedEntries[K cmp.Ordered, V any](seq iter.Seq2[K, V], sizeHint int) []sortedEntry[K, V] {
 	var es []sortedEntry[K, V]
+	if sizeHint > 0 {
+		es = make([]sortedEntry[K, V], 0, sizeHint)
+	}
 	for k, v := range seq {
 		es = append(es, sortedEntry[K, V]{k: k, v: v})
 	}

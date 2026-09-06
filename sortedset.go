@@ -46,12 +46,25 @@ func NewSortedSet[T cmp.Ordered](vs ...T) *SortedSet[T] {
 	return s
 }
 
-// CollectSortedSet returns a SortedSet holding every value in seq.
+// CollectSortedSet returns a SortedSet holding every value in src.
 //
-// It is cheaper than NewSortedSet followed by AddAll: with nothing to merge
-// against, the merge degenerates to the sort.
-func CollectSortedSet[T cmp.Ordered](seq iter.Seq[T]) *SortedSet[T] {
-	return &SortedSet[T]{es: collectSortedValues(seq)}
+// src.Len() is used to size the working slice, so this allocates once where
+// CollectSortedSetSeq must grow as it goes. The saving is allocation volume
+// rather than wall-clock time: the sort that follows dominates. See ADR 0006.
+//
+// It is also cheaper than NewSortedSet followed by AddAll, since with nothing
+// to merge against the merge degenerates to the sort.
+func CollectSortedSet[T cmp.Ordered](src Elems[T]) *SortedSet[T] {
+	return &SortedSet[T]{es: collectSortedValues(src.All(), src.Len())}
+}
+
+// CollectSortedSetSeq returns a SortedSet holding every value in seq.
+//
+// Prefer CollectSortedSet when the source knows its length. Use this for bare
+// iterators — maps.Keys, slices.Values, or another container's Range — which
+// cannot report one.
+func CollectSortedSetSeq[T cmp.Ordered](seq iter.Seq[T]) *SortedSet[T] {
+	return &SortedSet[T]{es: collectSortedValues(seq, 0)}
 }
 
 // Add adds vs to the set. Values already present are ignored.
@@ -73,13 +86,26 @@ func (s *SortedSet[T]) Add(vs ...T) {
 	s.es = mergeSortedValues(base, sortDistinct(slices.Clone(vs)))
 }
 
-// AddAll adds every value in seq, sorting once and merging rather than
+// AddAll adds every value in src, sorting once and merging rather than
 // inserting one at a time. See Add for the cost comparison.
 //
-// seq is fully consumed before the set is modified.
-func (s *SortedSet[T]) AddAll(seq iter.Seq[T]) {
+// src.Len() sizes the working slice; it is a hint, and a wrong one costs only a
+// worse allocation. src is fully consumed before the set is modified, so
+// s.AddAll(s) is well defined, if pointless.
+func (s *SortedSet[T]) AddAll(src Elems[T]) {
+	base := s.es                   // eager, so a nil receiver panics even for an empty src
+	seq, n := src.All(), src.Len() // eager, so a nil src panics too
+	s.addAll(base, collectSortedValues(seq, n))
+}
+
+// AddAllSeq is AddAll for a bare iterator, which cannot report its length.
+// Prefer AddAll when the source knows it.
+func (s *SortedSet[T]) AddAllSeq(seq iter.Seq[T]) {
 	base := s.es // eager, so a nil receiver panics even when seq is empty
-	add := collectSortedValues(seq)
+	s.addAll(base, collectSortedValues(seq, 0))
+}
+
+func (s *SortedSet[T]) addAll(base, add []T) {
 	if len(add) == 0 {
 		return
 	}
@@ -232,8 +258,14 @@ func (s *SortedSet[T]) Difference(o *SortedSet[T]) *SortedSet[T] {
 // collectSortedValues drains seq into a sorted, distinct slice. Unlike
 // SortedMap's equivalent there is no last-write-wins question: the values are
 // the keys, so duplicates simply collapse.
-func collectSortedValues[T cmp.Ordered](seq iter.Seq[T]) []T {
+// collectSortedValues drains seq into a sorted, distinct slice, preallocating
+// to sizeHint when it is positive. The hint only affects allocation: every
+// value seq yields is appended regardless of how many that turns out to be.
+func collectSortedValues[T cmp.Ordered](seq iter.Seq[T], sizeHint int) []T {
 	var vs []T
+	if sizeHint > 0 {
+		vs = make([]T, 0, sizeHint)
+	}
 	for v := range seq {
 		vs = append(vs, v)
 	}
