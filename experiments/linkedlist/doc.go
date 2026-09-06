@@ -1,4 +1,4 @@
-// Package list measures whether a doubly-linked list earns a place in this
+// Package linkedlist measures whether a doubly-linked list earns a place in this
 // package, and what it costs to make its cursors safe.
 //
 // Three questions.
@@ -18,5 +18,5 @@
 // cursor case.
 //
 // Run ./run.sh to regenerate bench.txt. See RESULTS.md for the findings and
-// docs/adr/0010-list.md for the decision they informed.
-package list
+// docs/adr/0010-linkedlist.md for the decision they informed.
+package linkedlist
