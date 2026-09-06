@@ -239,6 +239,14 @@ func newTable(tiers ...Tier) Table {
 
 func tiersInOrderStdlib(t Table) []Tier { return t }
 
+func tiersInOrderContainer(m *containers.SortedMap[int, string]) []Tier {
+	var out []Tier
+	for k, v := range m.All() {
+		out = append(out, Tier{k, v})
+	}
+	return out
+}
+
 // ---------------------------------------------------------------------------
 // Task E — tiers with lo <= key < hi
 //
@@ -250,6 +258,14 @@ func tiersInRangeStdlib(t Table, lo, hi int) []Tier {
 	i, _ := t.find(lo)
 	j, _ := t.find(hi)
 	return t[i:j]
+}
+
+func tiersInRangeContainer(m *containers.SortedMap[int, string], lo, hi int) []Tier {
+	var out []Tier
+	for k, v := range m.Range(lo, hi) {
+		out = append(out, Tier{k, v})
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -270,11 +286,24 @@ func tierForStdlib(t Table, qty int) (Tier, bool) {
 	return t[i], true
 }
 
+func tierForContainer(m *containers.SortedMap[int, string], qty int) (Tier, bool) {
+	k, v, ok := m.Floor(qty)
+	return Tier{k, v}, ok
+}
+
 // ---------------------------------------------------------------------------
 // Cases, shared by the stdlib and (later) container implementations.
 // ---------------------------------------------------------------------------
 
 var rateTable = []Tier{{1, "1.00"}, {10, "0.90"}, {50, "0.75"}, {100, "0.60"}}
+
+func newSortedMap(tiers ...Tier) *containers.SortedMap[int, string] {
+	m := containers.NewSortedMap[int, string]()
+	for _, e := range tiers {
+		m.Set(e.MinQty, e.Price)
+	}
+	return m
+}
 
 var tiersInRangeCases = []struct {
 	name   string
@@ -302,17 +331,25 @@ var tierForCases = []struct {
 }
 
 func TestTiersInOrder(t *testing.T) {
-	tbl := newTable(rateTable...)
-	if got := tiersInOrderStdlib(tbl); !slices.Equal(got, rateTable) {
-		t.Errorf("got %v, want %v", got, rateTable)
+	if got := tiersInOrderStdlib(newTable(rateTable...)); !slices.Equal(got, rateTable) {
+		t.Errorf("stdlib: got %v, want %v", got, rateTable)
+	}
+	if got := tiersInOrderContainer(newSortedMap(rateTable...)); !slices.Equal(got, rateTable) {
+		t.Errorf("container: got %v, want %v", got, rateTable)
 	}
 }
 
 func TestTiersInRange(t *testing.T) {
 	tbl := newTable(rateTable...)
+	sm := newSortedMap(rateTable...)
 	for _, tc := range tiersInRangeCases {
 		t.Run("stdlib/"+tc.name, func(t *testing.T) {
 			if got := tiersInRangeStdlib(tbl, tc.lo, tc.hi); !slices.Equal(got, tc.want) {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
+		t.Run("container/"+tc.name, func(t *testing.T) {
+			if got := tiersInRangeContainer(sm, tc.lo, tc.hi); !slices.Equal(got, tc.want) {
 				t.Errorf("got %v, want %v", got, tc.want)
 			}
 		})
@@ -321,6 +358,7 @@ func TestTiersInRange(t *testing.T) {
 
 func TestTierFor(t *testing.T) {
 	tbl := newTable(rateTable...)
+	sm := newSortedMap(rateTable...)
 	for _, tc := range tierForCases {
 		t.Run("stdlib/"+tc.name, func(t *testing.T) {
 			got, ok := tierForStdlib(tbl, tc.qty)
@@ -328,5 +366,35 @@ func TestTierFor(t *testing.T) {
 				t.Errorf("got %v,%v want %v,%v", got, ok, tc.want, tc.wantOK)
 			}
 		})
+		t.Run("container/"+tc.name, func(t *testing.T) {
+			got, ok := tierForContainer(sm, tc.qty)
+			if got != tc.want || ok != tc.wantOK {
+				t.Errorf("got %v,%v want %v,%v", got, ok, tc.want, tc.wantOK)
+			}
+		})
 	}
+}
+
+func ExampleSortedMap_Floor() {
+	rates := containers.NewSortedMap[int, string]()
+	rates.Set(1, "1.00")
+	rates.Set(10, "0.90")
+	rates.Set(50, "0.75")
+
+	minQty, price, ok := rates.Floor(37)
+	fmt.Println(minQty, price, ok)
+	// Output: 10 0.90 true
+}
+
+func ExampleSortedMap_Range() {
+	rates := containers.NewSortedMap[int, string]()
+	for k, v := range map[int]string{1: "1.00", 10: "0.90", 50: "0.75", 100: "0.60"} {
+		rates.Set(k, v)
+	}
+	for k, v := range rates.Range(10, 100) {
+		fmt.Println(k, v)
+	}
+	// Output:
+	// 10 0.90
+	// 50 0.75
 }
