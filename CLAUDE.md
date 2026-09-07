@@ -15,6 +15,7 @@ beside it:
 | `sorteddict.go` | `SortedDict[K cmp.Ordered, V any]` | sorted slice |
 | `map.go` | `Map[K comparable, V any]` | a defined `map[K]V` — an **adapter**, not a default |
 | `contracts.go` | the interfaces below | — |
+| `views.go` | `<Container>View` for each of the above | read-only handles (ADR `0011`) |
 
 Contracts come in three layers (ADR `0008`), each building on the one beneath:
 
@@ -73,6 +74,12 @@ to a plain `go test` — a shallow-copy `Clone` that silently shares the underly
   satisfy it silently opts out. Add `Has` or `Get` to reach the read-only layer, and the writes to
   reach the mutation layer. Every existing container satisfied these without changes, because the
   signatures already matched; keep it that way.
+- **A view is a struct holding a container pointer plus a projection** (ADR `0011`, `views.go`).
+  `c.View()` gives the identity view; `View<Container>(c, f)` projects elements through `f`.
+  Returning a *concrete struct* is the point — a bare contract interface prevents nothing, since
+  containers satisfy the read contracts structurally and a holder can assert back and mutate.
+  A view is not a snapshot, is not proof against `reflect`+`unsafe`, and is not automatic: a
+  provider can still hand out the container, so a view is applied at boundaries deliberately.
 - **`HashDict` is the default hash dict; `Map` is an adapter** (ADR `0009`). Reach for `Map` only
   when you need a free conversion from an existing `map[K]V`, builtin syntax, to pass the result
   where a `map[K]V` is expected, or working `encoding/json`. Everything else should use `HashDict`,
