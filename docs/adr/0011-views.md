@@ -313,6 +313,38 @@ All three options are cheap relative to the problem they address.
 
 ## Follow-ups
 
+- **More capable views, starting with keys.** A dict view projects *values* only,
+  so a mutable key type passes straight through. `K` is `comparable` and pointers
+  are comparable, so `HashDict[*Item, string]` is legal and its view hands back
+  the raw `*Item`:
+
+  ```
+  key type from All(): *Item
+  original key after iterating the view: "MUTATED THROUGH A VIEW"
+  ```
+
+  The value projection closes half the hole. The shape of a fix is visible but
+  was not worth settling here:
+
+  - **Project on the way out, not on the way in.** `Get(K)`, `Floor(K)` and
+    `Range(lo, hi K)` take keys as *arguments*, which leaks nothing — a caller
+    must already hold one to call them. The leak is `All`, `Min`, `Max`, `Floor`
+    and `Ceil` *yielding* keys. Projecting only the outbound direction is
+    sufficient, and is the same asymmetry already accepted for projecting set
+    views, where `Has` takes the element type and `All` yields the projection.
+  - **It costs contract satisfaction.** A view whose `Get` takes `K` while its
+    `All` yields `NK` satisfies neither `Dict[K, R]` nor `Dict[NK, R]`. Today
+    only projecting *set* views have that problem; extending it to dicts makes
+    the identity view the only one that composes with generic code.
+  - **It costs a third word and a second call.** `HashDictView[K, V, NK, R]`
+    carries two functions, so 24 bytes, and every yielded pair pays two
+    projections instead of one.
+
+  Related capability gaps worth considering in the same pass: a view of a view,
+  so projections compose; a `Range` that returns a restricted *view* rather than
+  an iterator; and views over `LinkedList`, whose `All` yields cursors rather
+  than values.
+
 - An ordered tier for the contracts — `OrderedSet`, `OrderedDict` — which is the
   expressiveness half of the problem and is already a follow-up in ADR `0008`.
 - Naming: `View` as the method, and what the view types are called.
