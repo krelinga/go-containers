@@ -69,6 +69,38 @@ returns `(K, bool)`. A failure must read as "not present" rather than panicking
 or producing a wrong answer, so that `Get` on a converted view behaves exactly
 like `Get` on the container.
 
+## 6. How the conversion is carried
+
+Three shapes, same behaviour, measured against each other:
+
+| | size | `Get` | boxing as a contract |
+|---|---|---|---|
+| three loose `func` fields | 32 B | 6.52 ns | 13.52 ns, 1 alloc |
+| **one interface field** | **24 B** | **6.50 ns** | 13.24 ns, 1 alloc |
+| the same interface as a type parameter | **8 B** | 6.44 ns | **0.37 ns, 0 allocs** |
+
+**One interface value replaces three function pointers**, so the interface field
+is 25% narrower than loose funcs — 24 bytes against 32. Calling cost is a wash:
+a `func` field is already an indirect call, so an itab lookup adds nothing
+measurable.
+
+The type-parameter form is dramatically better on width and boxing, and it uses
+**the identical interface definition** — only where the viewer lives changes. It
+is not free, though: materialising the zero value forecloses a stateful viewer,
+which is the capability ADR 0011 chose the field form to keep.
+
+A viewer composed by embedding two halves is **0 bytes**:
+
+```go
+type itemViewer struct {
+	itemKeys    // ToKeyView, FromKeyView
+	itemValues  // ToValueView
+}
+```
+
+Each half satisfies `KeyViewer` or `ValueViewer` on its own, and the composition
+satisfies `KeyValueViewer`, so a view takes whichever of the three it needs.
+
 ## Conclusions
 
 Durable:
@@ -80,8 +112,12 @@ Durable:
    views, which ADR 0011 recorded as lost.
 4. Relaxing the contracts from `comparable` to `any` compiles and passes with no
    other changes; the constraint was never needed at the interface.
-5. Two-way conversion costs a doubled struct (16 to 32 bytes) and ~24% on a
-   lookup, ~10% on iteration.
+5. Two-way conversion costs a wider struct and ~24% on a lookup, ~10% on
+   iteration.
+6. Carrying the conversion as one interface value is narrower than three func
+   fields (24 B against 32) at identical call cost, and the same interface
+   hoisted to a type parameter reaches 8 bytes with allocation-free boxing —
+   at the price of forbidding stateful viewers.
 
 Perishable: every absolute number above.
 

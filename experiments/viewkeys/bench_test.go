@@ -253,3 +253,156 @@ func TestSetContracts(t *testing.T) {
 	t.Log("outbound-only set view satisfies Elems[NT] but NOT Set[NT] (Has takes T)")
 	t.Log("two-way set view satisfies Set[NT]: Has takes NT and All yields NT")
 }
+
+// ===========================================================================
+// How the conversion is carried: three functions, one interface, or a type.
+// ===========================================================================
+
+type KeyViewer[K, NK any] interface {
+	ToKeyView(K) NK
+	FromKeyView(NK) (K, bool)
+}
+type ValueViewer[V, NV any] interface {
+	ToValueView(V) NV
+}
+type KeyValueViewer[K, NK, V, NV any] interface {
+	KeyViewer[K, NK]
+	ValueViewer[V, NV]
+}
+
+// Callers write the halves separately and compose by embedding.
+type itemKeys struct{}
+
+func (itemKeys) ToKeyView(k string) string           { return k }
+func (itemKeys) FromKeyView(s string) (string, bool) { return s, true }
+
+type itemValues struct{}
+
+func (itemValues) ToValueView(v *Item) ItemView { return ItemView{v} }
+
+type itemViewer struct {
+	itemKeys
+	itemValues
+}
+
+// Shape A: three loose function fields.
+type funcsView[K comparable, V, NK, NV any] struct {
+	d      *HashDict[K, V]
+	keyOut func(K) NK
+	keyIn  func(NK) (K, bool)
+	valOut func(V) NV
+}
+
+func (v funcsView[K, V, NK, NV]) Get(nk NK) (NV, bool) {
+	k, ok := v.keyIn(nk)
+	if !ok {
+		var z NV
+		return z, false
+	}
+	raw, ok := v.d.Get(k)
+	if !ok {
+		var z NV
+		return z, false
+	}
+	return v.valOut(raw), true
+}
+
+// Shape B: one interface field.
+type ifaceView[K comparable, V, NK, NV any] struct {
+	d      *HashDict[K, V]
+	viewer KeyValueViewer[K, NK, V, NV]
+}
+
+func (v ifaceView[K, V, NK, NV]) Get(nk NK) (NV, bool) {
+	k, ok := v.viewer.FromKeyView(nk)
+	if !ok {
+		var z NV
+		return z, false
+	}
+	raw, ok := v.d.Get(k)
+	if !ok {
+		var z NV
+		return z, false
+	}
+	return v.viewer.ToValueView(raw), true
+}
+
+// Shape C: the same interface, hoisted to a type parameter.
+type witnessView[K comparable, V, NK, NV any, W KeyValueViewer[K, NK, V, NV]] struct {
+	d *HashDict[K, V]
+}
+
+func (v witnessView[K, V, NK, NV, W]) Get(nk NK) (NV, bool) {
+	var w W
+	k, ok := w.FromKeyView(nk)
+	if !ok {
+		var z NV
+		return z, false
+	}
+	raw, ok := v.d.Get(k)
+	if !ok {
+		var z NV
+		return z, false
+	}
+	return w.ToValueView(raw), true
+}
+
+type anyGetter interface{ Get(string) (ItemView, bool) }
+
+var sinkGetter anyGetter
+
+func TestCarrierShapes(t *testing.T) {
+	t.Logf("A three func fields:        %d bytes", unsafe.Sizeof(funcsView[string, *Item, string, ItemView]{}))
+	t.Logf("B one interface field:      %d bytes", unsafe.Sizeof(ifaceView[string, *Item, string, ItemView]{}))
+	t.Logf("C interface as type param:  %d bytes", unsafe.Sizeof(witnessView[string, *Item, string, ItemView, itemViewer]{}))
+	t.Logf("the composed viewer value:  %d bytes", unsafe.Sizeof(itemViewer{}))
+	t.Log("a viewer composed by embedding satisfies KeyValueViewer, and each half")
+	t.Log("satisfies KeyViewer or ValueViewer on its own")
+}
+
+func BenchmarkCarrier(b *testing.B) {
+	d := &HashDict[string, *Item]{m: map[string]*Item{"a": {Name: "x"}}}
+	fv := funcsView[string, *Item, string, ItemView]{
+		d:      d,
+		keyOut: func(k string) string { return k },
+		keyIn:  func(nk string) (string, bool) { return nk, true },
+		valOut: func(i *Item) ItemView { return ItemView{i} },
+	}
+	iv := ifaceView[string, *Item, string, ItemView]{d, itemViewer{}}
+	wv := witnessView[string, *Item, string, ItemView, itemViewer]{d}
+
+	b.Run("get/A-funcs", func(b *testing.B) {
+		for b.Loop() {
+			sinkIV, sinkB = fv.Get("a")
+		}
+	})
+	b.Run("get/B-interface", func(b *testing.B) {
+		for b.Loop() {
+			sinkIV, sinkB = iv.Get("a")
+		}
+	})
+	b.Run("get/C-typeparam", func(b *testing.B) {
+		for b.Loop() {
+			sinkIV, sinkB = wv.Get("a")
+		}
+	})
+
+	b.Run("box/A-funcs", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkGetter = fv
+		}
+	})
+	b.Run("box/B-interface", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkGetter = iv
+		}
+	})
+	b.Run("box/C-typeparam", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkGetter = wv
+		}
+	})
+}
