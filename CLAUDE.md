@@ -74,8 +74,9 @@ to a plain `go test` — a shallow-copy `Clone` that silently shares the underly
   satisfy it silently opts out. Add `Has` or `Get` to reach the read-only layer, and the writes to
   reach the mutation layer. Every existing container satisfied these without changes, because the
   signatures already matched; keep it that way.
-- **A view is a struct holding a container pointer plus a projection** (ADR `0011`, `views.go`).
-  `c.View()` gives the identity view; `View<Container>(c, f)` projects elements through `f`.
+- **Every container has a view, and a new one is not finished without it** (ADR `0011`,
+  `views.go`). A view is a struct holding a container pointer plus a projection: `c.View()` gives
+  the identity view; `View<Container>(c, f)` projects elements through `f`.
   Returning a *concrete struct* is the point — a bare contract interface prevents nothing, since
   containers satisfy the read contracts structurally and a holder can assert back and mutate.
   A view is not a snapshot, is not proof against `reflect`+`unsafe`, and is not automatic: a

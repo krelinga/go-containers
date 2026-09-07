@@ -129,8 +129,13 @@ func TestZeroViewPanics(t *testing.T) {
 	mustPanic(t, "SortedDictView.Range", func() { _ = sdv.Range(1, 2) })
 }
 
-// Identity views satisfy the read contracts, so they compose with generic code.
-func TestIdentityViewsSatisfyContracts(t *testing.T) {
+// TestEveryContainerHasAView is the guardrail for ADR 0011's rule that a new
+// container is not finished until it has one. Adding a container without a View
+// method breaks this file rather than being noticed later at a boundary.
+//
+// It also checks that identity views satisfy the read contracts, so they
+// compose with generic code.
+func TestEveryContainerHasAView(t *testing.T) {
 	hs := containers.NewHashSet(1)
 	ss := containers.NewSortedSet(1)
 	hd := containers.NewHashDict[string, int]()

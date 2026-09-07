@@ -130,6 +130,15 @@ with generic code; it is simply not handed out as one.
 
 `*View` is the naming pattern for these types.
 
+**Every container gets one.** Not only those with a boundary in sight today:
+any of them may be handed across one sooner or later, and a container missing a
+view is a hole a caller discovers at exactly the wrong moment. A consistent
+pattern is also cheaper to teach than a rule about which containers qualify.
+
+The cost is bounded and mechanical — a struct, a free function, a `View` method,
+and one forwarding method per read operation — so there is no size at which this
+stops being worth it.
+
 ## Alternatives considered
 
 Both remain viable and could be added later alongside option B. They are recorded
@@ -288,6 +297,11 @@ All three options are cheap relative to the problem they address.
 - **A projection is not a snapshot.** It denies writes through the view. The
   underlying element can still change beneath it, exactly as ADR `0001` recorded
   for the container itself.
+- **A new container is not finished until it has a view.** This is now part of
+  the shape a container must have, alongside ADR `0002`'s rules. `LinkedList`
+  (ADR `0010`) will need one when it is implemented; its `All` yields cursors,
+  which are handles rather than values, so a view over it hands out cursors that
+  are inert without the list they came from.
 - **Sealing stays forgettable.** Containers satisfy the read contracts inherently,
   so a provider can always pass the container instead of a view. The view is a
   tool the provider applies at boundaries they care about, not a guarantee the
@@ -301,5 +315,4 @@ All three options are cheap relative to the problem they address.
 
 - An ordered tier for the contracts — `OrderedSet`, `OrderedDict` — which is the
   expressiveness half of the problem and is already a follow-up in ADR `0008`.
-- Whether views are added to every container or only where a boundary exists.
 - Naming: `View` as the method, and what the view types are called.
