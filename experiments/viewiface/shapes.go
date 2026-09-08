@@ -1,5 +1,7 @@
 package viewiface
 
+import "iter"
+
 // The container, and the mutable element type that makes conversion necessary.
 
 type Item struct{ Name string }
@@ -18,6 +20,17 @@ func (d *Dict[K, V]) Set(k K, v V) { d.m[k] = v }
 func (d *Dict[K, V]) Get(k K) (V, bool) {
 	v, ok := d.m[k]
 	return v, ok
+}
+
+func (d *Dict[K, V]) All() iter.Seq2[K, V] {
+	m := d.m
+	return func(yield func(K, V) bool) {
+		for k, v := range m {
+			if !yield(k, v) {
+				return
+			}
+		}
+	}
 }
 
 // Viewer is ADR 0012's shape: keys convert both ways, values outbound only.

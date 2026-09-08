@@ -267,12 +267,52 @@ Working assumption in this ADR: `IsZero`. Flipping it is a rename.
 
 A third consideration surfaced in review, which cuts across the choice rather
 than settling it: **views would still use `== nil`.** They are sealed interfaces
-after ADR `0013`, so a nil view is spellable and `IsZero` would be redundant on
-them. The package would therefore carry two spellings for "is this handle
-empty" — `c.IsZero()` for containers, `v == nil` for views — which is the same
-kind of split this ADR exists to remove. Whether the view interfaces should also
-declare `IsZero() bool` for one spelling everywhere is part of this choice, and
-`IsNil` reads better than `IsZero` if they do.
+after ADR `0013`, so a nil view is spellable. Declaring `IsNil()` on the view
+*interfaces* does not fix it — calling a method on a nil interface panics, so a
+caller would need `v != nil && !v.IsNil()`, which is worse than either spelling
+alone. The only way to give views the container's spelling is to make views
+structs wrapping a sealed interface.
+
+Measured in `experiments/viewiface` §9. Dispatch is not what that costs:
+
+| | construct | `Get` | `All` | pass to a foreign interface |
+|---|---|---|---|---|
+| bare interface (today) | 13.17 ns, 1 alloc | 13.22 ns | 569 ns, 4 allocs | **2.210 ns, 0 allocs** |
+| `struct{iface}` | 13.21 ns, 1 alloc | 13.58 ns | 572 ns, 4 allocs | **14.93 ns, 1 alloc** |
+| `struct{ptr}` | 23.70 ns, **2 allocs** | 13.36 ns | 566 ns, 4 allocs | 2.775 ns, 0 allocs |
+
+`Get` through a wrapper is +2.7%, construction is identical, and iteration is
+unchanged. Two real costs:
+
+- **Passing a view to a foreign interface boxes.** `Elems2` is the case that
+  matters, since every sized constructor takes it: 6.8x and an allocation,
+  because a two-word struct is not pointer-shaped. The one-word `struct{ptr}`
+  form avoids it and pays a second allocation at construction instead.
+- **ADR `0013`'s hierarchy does not survive.** Struct embedding is not subtyping:
+  `cannot use sv (variable of struct type WrapSortedView[...]) as
+  WrapIface[...]`. Decision 2 of `0013` — an ordered view usable wherever the
+  base is wanted — depends on interface embedding. Substitution becomes an
+  explicit `sv.Dict()` conversion, which is **free at 2.74 ns and 0 allocations**
+  but must be written at every ordered-to-base call site, and a `SortedDictView`
+  cannot enter a `[]DictView` without one.
+
+Something does get simpler: a struct whose only field is unexported cannot be
+built populated outside the package, so `sealedView()` becomes unnecessary and
+`v.(*HashDict[K, V])` fails to compile because `v` is not an interface.
+
+So the choice is between **two spellings** (`c.IsNil()` for containers, `v == nil`
+for views) and **one spelling** bought with an allocation on the `Elems2` path
+and an explicit conversion wherever an ordered view feeds a base-typed boundary.
+
+Worth weighing how much the check is actually used. A container's zero value is
+reachable by declaration — `var c HashSet[int]` — so its check is load-bearing.
+A view only ever comes from a constructor, which never returns nil, so a nil view
+means someone declared one and never assigned it. The uniformity is real; the
+thing being unified may be rare on the view side.
+
+Go itself splits the same way, which is either a precedent or an excuse:
+`time.Time` is a struct and uses `IsZero`, while maps, slices and interfaces use
+`== nil`.
 
 ### B. What `Map` must gain before `HashDict` can be removed
 

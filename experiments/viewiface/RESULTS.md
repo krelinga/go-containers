@@ -257,7 +257,75 @@ boxed once, or one word pointing at a heap body, the total is the same single
 allocation — and behind an interface the choice is invisible to callers, so it
 can be made per container and revisited without an API change.
 
-## 9. What none of this decides
+## 9. Wrapping the interface in a struct: dispatch is free, the hierarchy is not
+
+ADR `0014` wants one spelling for "is this handle empty". Containers will be
+structs, so theirs is `IsZero()`/`IsNil()`; views are interfaces, so theirs is
+`== nil`. Adding `IsNil()` to a view *interface* does not help — calling it on a
+nil interface panics, so a caller would need `v != nil && !v.IsNil()`. The only
+way to give views the same spelling is to make them structs.
+
+Two wrappings, both keeping a sealed interface inside so nothing about ADR
+`0013`'s spelling or encapsulation regresses:
+
+```go
+type WrapIface[NK, NV any] struct{ impl innerView[NK, NV] }   // 16 B, two words
+type WrapPtr[NK, NV any]   struct{ b *viewBody[NK, NV] }      //  8 B, one word
+```
+
+| | construct | `Get` | `All` (64) | pass to a **foreign** interface |
+|---|---|---|---|---|
+| bare interface (ADR 0013) | 13.17 ns, 1 alloc | 13.22 ns | 569.1 ns, 4 allocs | **2.210 ns, 0 allocs** |
+| `struct{iface}` | 13.21 ns, 1 alloc | 13.58 ns | 572.1 ns, 4 allocs | **14.93 ns, 1 alloc** |
+| `struct{ptr}` | **23.70 ns, 2 allocs** | 13.36 ns | 565.6 ns, 4 allocs | 2.775 ns, 0 allocs |
+
+**Dispatch is not the cost.** `Get` through a wrapper is +2.7%: the outer method
+inlines and the one dynamic call remains. Construction is identical for
+`struct{iface}`. Iteration is unchanged — the wrapper neither causes nor cures
+the four allocations, which come from returning a closure through the inner
+dynamic call.
+
+**Two things do cost.**
+
+The first is passing a view onward to a *foreign* interface — `Elems2` in the
+real library, which every sized constructor takes. Today that is an
+interface-to-interface conversion at 2.2 ns and no allocation. A two-word struct
+is not pointer-shaped, so it boxes: **6.8x and an allocation**. The one-word
+`struct{ptr}` avoids it, at the price of a second allocation at construction and
+nearly 2x construction time.
+
+The second has no price because it is not available at all.
+
+### Struct views cannot subtype, so ADR 0013's hierarchy dies
+
+```
+cannot use sv (variable of struct type WrapSortedView[string, ItemView])
+as WrapIface[string, ItemView] value in argument to takesBase
+```
+
+Struct embedding is not subtyping. ADR `0013` decision 2 — an ordered view is
+usable wherever the base is wanted, which is what makes a consumer independent of
+the implementation — depends on *interface* embedding and does not survive the
+change.
+
+Substitution becomes an explicit conversion, and that part is free:
+
+```go
+func (v WrapSorted[K, NV]) Dict() WrapIface[K, NV] { return WrapIface[K, NV]{v.impl} }
+```
+
+**2.74 ns, 0 allocations** — it re-wraps an already-boxed interface value. So the
+capability survives; the *implicitness* does not. Every ordered-to-base call site
+names the conversion, and a `SortedDictView` cannot go into a `[]DictView`
+without one.
+
+### What gets simpler
+
+The seal stops needing a method. A struct whose only field is unexported cannot
+be built populated outside the package, so `sealedView()` is redundant; and
+`v.(*HashDict[K, V])` fails to compile because `v` is not an interface at all.
+
+## 10. What none of this decides
 
 Cost separates the concrete struct from the other two, but it does not separate
 the sealed interface from the pointer-shaped struct — they are within 3% of each
@@ -302,7 +370,11 @@ Durable:
    view's shape, not on the interface: a one-word view behind a sealed interface
    costs 0.32 ns and no allocation. A view that carries no viewer therefore does
    not regress behind an interface.
-10. A one-word wrapper struct and a bare pointer to the same body are
+10. Wrapping a view interface in a struct costs +2.7% on dispatch and nothing on
+    construction or iteration, but boxes with an allocation when passed to a
+    foreign interface, and **forfeits interface subtyping** — the ordered/base
+    hierarchy becomes an explicit 2.74 ns conversion instead of an implicit one.
+11. A one-word wrapper struct and a bare pointer to the same body are
    indistinguishable in time and allocations on every axis measured. A
    single-field struct is flattened, so choosing between them is an API
    question, not a cost one.
