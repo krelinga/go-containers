@@ -120,3 +120,33 @@ func (v PtrView[K, V, NK, NV]) Get(nk NK) (NV, bool) {
 	}
 	return v.b.viewer.ToValueView(raw), true
 }
+
+// ---- D2: methods directly on a pointer to the view, with no wrapper struct.
+//
+// PtrView above wraps a pointer to a body in a one-word struct. The obvious
+// question is what the wrapper buys over handing out the body pointer itself,
+// which is already pointer-shaped. This is that form, for comparison.
+
+type DirectView[K comparable, V, NK, NV any] struct {
+	d      *Dict[K, V]
+	viewer Viewer[K, NK, V, NV]
+}
+
+func ViewDirect[K comparable, V, NK, NV any](d *Dict[K, V], vw Viewer[K, NK, V, NV]) *DirectView[K, V, NK, NV] {
+	return &DirectView[K, V, NK, NV]{d, vw}
+}
+
+func (v *DirectView[K, V, NK, NV]) Len() int { return v.d.Len() }
+func (v *DirectView[K, V, NK, NV]) Get(nk NK) (NV, bool) {
+	k, ok := v.viewer.FromKeyView(nk)
+	if !ok {
+		var zero NV
+		return zero, false
+	}
+	raw, ok := v.d.Get(k)
+	if !ok {
+		var zero NV
+		return zero, false
+	}
+	return v.viewer.ToValueView(raw), true
+}

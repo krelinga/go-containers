@@ -424,3 +424,83 @@ func BenchmarkReuse(b *testing.B) {
 		}
 	})
 }
+
+// ---- 10. what does the one-word WRAPPER buy over the bare pointer? --------
+//
+// PtrView is a struct holding a pointer to a body. DirectView is the body, with
+// methods on *DirectView. Both are one word and both are pointer-shaped, so the
+// question is whether the wrapper earns its extra named type and its extra
+// indirection -- v.b.d.Get versus v.d.Get.
+
+type directForm = *DirectView[*Item, *Item, string, ItemView]
+
+var sinkDirect directForm
+
+//go:noinline
+func passDirect(v directForm) int { return 1 }
+
+//go:noinline
+func useDirect(v directForm, k string) ItemView { r, _ := v.Get(k); return r }
+
+func BenchmarkWrapperVsBarePointer(b *testing.B) {
+	d, vw, probe := fixture()
+	pv := ViewPtr[*Item, *Item, string, ItemView](d, vw)
+	dv := ViewDirect[*Item, *Item, string, ItemView](d, vw)
+
+	b.Run("Construct/Wrapper", func(b *testing.B) {
+		for b.Loop() {
+			sinkPtr = ViewPtr[*Item, *Item, string, ItemView](d, vw)
+		}
+	})
+	b.Run("Construct/Bare", func(b *testing.B) {
+		for b.Loop() {
+			sinkDirect = ViewDirect[*Item, *Item, string, ItemView](d, vw)
+		}
+	})
+	// Built and used in one frame: escape analysis should elide both.
+	b.Run("Local/Wrapper", func(b *testing.B) {
+		for b.Loop() {
+			v := ViewPtr[*Item, *Item, string, ItemView](d, vw)
+			sinkItemView, sinkBool = v.Get(probe)
+		}
+	})
+	b.Run("Local/Bare", func(b *testing.B) {
+		for b.Loop() {
+			v := ViewDirect[*Item, *Item, string, ItemView](d, vw)
+			sinkItemView, sinkBool = v.Get(probe)
+		}
+	})
+	// Passing to a concrete parameter.
+	b.Run("Pass/Wrapper", func(b *testing.B) {
+		for b.Loop() {
+			sinkInt = passPtr(pv)
+		}
+	})
+	b.Run("Pass/Bare", func(b *testing.B) {
+		for b.Loop() {
+			sinkInt = passDirect(dv)
+		}
+	})
+	// Calling through a concrete parameter -- where the extra indirection lives.
+	b.Run("Call/Wrapper", func(b *testing.B) {
+		for b.Loop() {
+			sinkItemView = usePtr(pv, probe)
+		}
+	})
+	b.Run("Call/Bare", func(b *testing.B) {
+		for b.Loop() {
+			sinkItemView = useDirect(dv, probe)
+		}
+	})
+	// Boxing into a contract, then dispatching.
+	b.Run("Boxed/Wrapper", func(b *testing.B) {
+		for b.Loop() {
+			sinkItemView = useContract(pv, probe)
+		}
+	})
+	b.Run("Boxed/Bare", func(b *testing.B) {
+		for b.Loop() {
+			sinkItemView = useContract(dv, probe)
+		}
+	})
+}

@@ -213,7 +213,31 @@ holds one, and `views_test.go` in the library does the same. **Adding inbound
 key conversion is what closed the witness off**, which is worth recording because
 the `views` experiment left it open as the cheapest shape.
 
-## 7. What none of this decides
+## 7. A one-word wrapper buys nothing over the bare pointer
+
+The pointer-shaped option can be built two ways: a struct holding a pointer to a
+body, or the body itself with methods on `*Body`. Both are one word and both are
+pointer-shaped, so the only question is whether the wrapper's extra indirection
+— `v.b.d.Get` against `v.d.Get` — costs anything.
+
+| | wrapper struct | bare pointer |
+|---|---|---|
+| construct | 11.83 ns, 1 alloc | 11.79 ns, 1 alloc |
+| construct + use locally | 11.87 ns, 0 allocs | 11.78 ns, 0 allocs |
+| pass, callee ignores it | 0.936 ns, 0 allocs | 0.924 ns, 0 allocs |
+| pass + call, concrete parameter | 12.62 ns, 0 allocs | 12.37 ns, 0 allocs |
+| pass + call, interface parameter | 13.73 ns, 0 allocs | 13.89 ns, 0 allocs |
+
+Indistinguishable on every axis, allocations included. The compiler flattens a
+single-field struct, so the wrapper's second hop is free. Escape analysis elides
+the construction allocation for both when the view does not escape.
+
+**The choice between them is therefore not a performance question.** What
+separates them is that the wrapper's constructor returns a value, so signatures
+carry no `*` and `nil` is not a spellable argument; against that, a bare pointer
+adds no type and matches how containers themselves are passed.
+
+## 8. What none of this decides
 
 Cost separates the concrete struct from the other two, but it does not separate
 the sealed interface from the pointer-shaped struct — they are within 3% of each
@@ -254,5 +278,9 @@ Durable:
    that never cross a boundary. A pointer-shaped struct avoids this: escape
    analysis elides its allocation when it does not escape.
 8. Stateful viewers rule out the type-parameter witness shape entirely.
+9. A one-word wrapper struct and a bare pointer to the same body are
+   indistinguishable in time and allocations on every axis measured. A
+   single-field struct is flattened, so choosing between them is an API
+   question, not a cost one.
 
 Perishable: every absolute number above.

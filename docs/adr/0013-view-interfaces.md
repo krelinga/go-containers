@@ -291,22 +291,35 @@ audit(w)    // 0 allocs
 
 ### D. Pointer-shaped view structs
 
-Keep concrete types; move the fields behind one pointer so a view is one word.
+Keep concrete types; hand out a pointer, so a view is one word.
 
 ```go
-// sketch
-type HashDictView[K comparable, V, NK, NV any] struct {
-	b *hashDictViewBody[K, V, NK, NV]   // one word -- pointer-shaped
-}
+// sketch -- the view struct is unchanged from 0012; only the constructor's
+// return type moves from a value to a pointer.
+func ViewHashDict[K comparable, V, NK, NV any](
+	d *HashDict[K, V], vw CanViewHashDict[K, NK, V, NV],
+) *HashDictView[K, V, NK, NV]
 
-v := containers.ViewHashDict(d, viewer)   // allocates the body, elided when v does not escape
+v := containers.ViewHashDict(d, viewer)   // allocates once, elided when v does not escape
 render(v)                                 // 0 allocs
-audit(v)                                  // 0 allocs -- pointer-shaped, so boxing is free
+audit(v)                                  // 0 allocs -- a pointer is pointer-shaped, boxing is free
 
-// Both signatures are exactly as they were under A. Only the cost changed.
-func render(v containers.HashDictView[*Item, *Item, string, ItemView]) error
+// Signatures are as they were under A, plus a star. Only the cost changed.
+func render(v *containers.HashDictView[*Item, *Item, string, ItemView]) error
 func audit(v containers.Dict[string, ItemView]) error   // still unsealed
 ```
+
+A one-word *wrapper* — a struct whose only field is a pointer to a body — is the
+same option with an extra named type, and measures identical on every axis:
+construct 11.83 against 11.79 ns, call 12.62 against 12.37 ns, boxed 13.73
+against 13.89 ns, same allocations throughout. The compiler flattens a
+single-field struct, so `v.b.d` costs no more than `v.d`.
+
+What the wrapper buys is narrow: the constructor keeps returning a **value**, so
+signatures stay star-free and `nil` is not a spellable argument — the only way to
+write a broken view is `HashDictView{}`, which panics like any zero view. Against
+that, the bare pointer adds no type and matches how containers themselves are
+passed (`*HashDict`). Neither is a performance question.
 
 - Fixes the whole allocation story — free to box, amortises like the interface
   (13.02 ns and 0 allocations into an interface parameter), and escape analysis
