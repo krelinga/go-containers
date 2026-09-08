@@ -1,7 +1,9 @@
 # 14. Containers as reference types
 
-- **Status:** Proposed. The direction is settled; specific choices are reserved
-  and listed under "Choices still to make".
+- **Status:** **Rejected.** The status quo stands: ADR `0002`'s container shape
+  and ADR `0009`'s `HashDict` are unchanged. See "Why this was rejected". The
+  document is kept in full because the measurements and the dead ends are the
+  valuable part.
 - **Date:** 2026-09-08
 - **Evidence:** `experiments/reftypes/` (`RESULTS.md`), with context from
   `experiments/copycost/`, `dispatch/`, `hashdict/` and `viewiface/`.
@@ -10,9 +12,9 @@
   removes), `0013` (views as sealed interfaces, which this aligns containers
   with), `0004` and `0006` (bulk insert and sized construction, which the
   removal of `HashDict` disturbs).
-- **Supersedes, if accepted:** ADR `0002`'s `noCopy` field, uniform pointer
+- **Would have superseded:** ADR `0002`'s `noCopy` field, uniform pointer
   receivers, usable-zero-value rule and prohibition on nil special cases; ADR
-  `0009` entirely.
+  `0009` entirely. **None of that happened — those ADRs remain binding.**
 
 ## Context
 
@@ -121,7 +123,10 @@ If the container **is** the interface the two types coincide and it compiles. A
 ceiling standing since `0002` would disappear — and it is the only thing on that
 side of the ledger.
 
-## Decision
+## What was proposed
+
+Rejected — recorded as proposed, not as decided. Nothing below is binding.
+
 
 ### 1. Every container is a reference type
 
@@ -206,7 +211,7 @@ for nil-comparability and the set-algebra ceiling. ADR `0013` accepted dispatch
 for *views* because a view is a boundary object; a container is not, and the same
 trade does not transfer.
 
-## Consequences
+## Consequences that would have followed
 
 - **The library becomes uniform in how a handle is held.** Containers and views
   are both one-word, freely-copied, reference-semantic values. A caller stops
@@ -247,9 +252,68 @@ trade does not transfer.
 - **The copy hazard is dissolved rather than policed**, which removes a class of
   bug and a class of tooling caveat together.
 
-## Choices still to make
+## Why this was rejected
 
-Recorded for a decision, not resolved here.
+**There is no way to give containers reference semantics without ending up with
+two spellings of "is this handle empty", or a worse hazard than the one being
+fixed.**
+
+The chain is short and every link is measured.
+
+1. A reference container must be a struct wrapping a pointer, because the two
+   representations that would be nil-comparable are unavailable: methods cannot
+   be declared on a defined pointer type, and a defined slice type needs a
+   pointer receiver to grow, which forfeits the reference semantics that
+   motivated it.
+2. **A struct cannot be compared to nil.** So a container's emptiness check has
+   to be a method — `IsZero()` or `IsNil()`.
+3. Views are sealed interfaces after ADR `0013`, and theirs is `== nil`. Adding
+   `IsNil()` to a view interface does not unify anything, because calling a
+   method on a nil interface panics: a caller would need
+   `v != nil && !v.IsNil()`, which is worse than either spelling alone.
+4. Making views structs to match costs ADR `0013`'s hierarchy — struct embedding
+   is not subtyping — plus an allocation whenever a view is passed to `Elems2`,
+   which is what every sized constructor takes.
+5. The hybrid recovers the hierarchy, because a struct *satisfies* an interface
+   even though it cannot subtype one. But it keeps the two spellings, merely
+   relocating the split inside the view vocabulary, **and** reintroduces Go's
+   typed-nil trap: a zero ordered view reports `IsNil() == true`, yet held as the
+   base interface reports `== nil` as **false** while panicking on use.
+
+So the options are: two spellings, two spellings plus a trap, or one spelling
+bought with a lost hierarchy and a per-call allocation on the constructor path.
+The status quo has exactly one spelling for containers (`*HashSet[T]` is a
+pointer; `== nil` works) and one for views (`== nil`), and it needs no method at
+all. **The change would have added nil semantics rather than unified them**,
+which is the opposite of the reason for making it.
+
+The container-side benefits were real and are not disputed: the representation
+is free, `noCopy` and the copylocks caveat would have gone, `HashDict` would have
+collapsed into `Map`, and the copy-divergence hazard would have been dissolved
+rather than policed. They were not worth buying a second nil vocabulary.
+
+## What survives the rejection
+
+- **`experiments/reftypes/` stands as evidence** and its conclusions are durable
+  regardless: a reference struct is free relative to a pointer; a nil check costs
+  ~8.5% of a point read; the check must sit inside the closure `All` returns or
+  it costs two allocations; a container interface costs 23% on reads and three
+  allocations per `All`.
+- **ADR `0013` gained an erratum** that has nothing to do with this proposal and
+  everything to do with shipped code: iterating a view allocates three times per
+  call, because `All` returns a closure through a dynamic call. That was found
+  here and is recorded against `0013`.
+- **`experiments/viewiface/` §9 now covers the struct-wrapped view shapes**,
+  which is the material any future attempt to unify the two vocabularies will
+  need.
+- **ADR `0002`'s rules are re-affirmed rather than merely left alone.** The
+  usable zero value and the ban on nil special cases were examined directly
+  against a designed alternative and kept.
+
+## Choices that would have needed making
+
+Moot now. Recorded because they are the questions any future attempt at this
+must answer, and two of them were nearly settled.
 
 ### A. `IsZero()` or `IsNil()`
 
@@ -263,7 +327,7 @@ Both were argued when this was raised, and the argument is genuinely balanced.
   a zero reference. It also reads consistently with `Map`, where the
   implementation genuinely *is* `m == nil`.
 
-Working assumption in this ADR: `IsZero`. Flipping it is a rename.
+Working assumption while this was proposed: `IsZero`.
 
 A third consideration surfaced in review, which cuts across the choice rather
 than settling it: **views would still use `== nil`.** They are sealed interfaces
@@ -359,7 +423,10 @@ introduces the opposite hazard — sharing where a caller expected a copy — wh
 no tool checks. Whether that wants a documented `Clone()` convention, or nothing
 at all, is open.
 
-## Rejected alternatives
+## Alternatives weighed inside the proposal
+
+All moot, since the proposal itself was rejected. Kept because the reasoning
+separating them is the part worth re-reading.
 
 ### Keep ADR `0002`'s shape
 
@@ -385,10 +452,23 @@ reference semantics that motivated it.
 
 ## Follow-ups
 
+Two of the three survive the rejection, because they were never about this
+proposal.
+
 - **ADR `0013` understated the cost of views.** Iterating a view allocates three
   times per call, because `All` returns a closure through a dynamic call;
-  `viewiface` measured `Get` and never `All`. That is live in the shipped
-  library and wants recording against `0013` whatever happens here.
-- **`LinkedList` (ADR `0010`) inherits this** before it is written.
-- **Serialization** remains owed a library-wide ADR, now with `Map` as the
-  default hash dict changing the picture for half the containers.
+  `viewiface` measured `Get` and never `All`. Live in the shipped library, and
+  now recorded against `0013`.
+- **Serialization** remains owed a library-wide ADR. Unchanged by the rejection:
+  `Map` round-trips because it is a map, and every other container is still
+  silently lossy.
+- ~~`LinkedList` (ADR `0010`) inherits this~~ — moot. `LinkedList` follows ADR
+  `0002`'s shape like every other container.
+
+## If this is revisited
+
+The blocker is nil semantics, not cost, so a future attempt needs a new answer to
+one question: **how does a caller ask "is this handle empty" with one spelling
+across containers and views?** Anything that leaves two spellings, or that boxes
+a zero struct into an interface, lands back here. `experiments/reftypes/` and
+`experiments/viewiface/` §9 hold the measurements; nothing needs re-running.

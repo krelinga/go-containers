@@ -34,9 +34,10 @@ and writes. Read-only is expressed by the sealed view interfaces instead. A func
 write takes `SetView`/`DictView`; a caller holding a container wraps it with
 `View<Container>Identity`, which converts nothing and allocates nothing.
 
-`callsites_test.go` holds every stdlib-vs-container comparison. Alongside: `docs/adr/` (accepted
-design decisions, binding on new code) and `experiments/` (measurement harnesses, each its own
-module).
+`callsites_test.go` holds every stdlib-vs-container comparison. Alongside: `docs/adr/` (design
+decisions) and `experiments/` (measurement harnesses, each its own module). **Check an ADR's
+status before treating it as binding** — most are Accepted, `0010` is Proposed, and `0014` is
+**Rejected**, so its contents describe a road not taken.
 
 Intent, per the module path `github.com/krelinga/go-containers`: a generic (type-parameterized)
 container library. Still early — several ADRs constrain code not yet written more than they
@@ -73,7 +74,15 @@ to a plain `go test` — a shallow-copy `Clone` that silently shares the underly
   The devcontainer's Go feature supplies it; a host Go older than 1.26.7 will refuse to build.
 - Single flat package at the repo root — add new container types as sibling files, not subpackages,
   unless there is a reason to split.
-- **Read `docs/adr/` before designing a container type.** Accepted ADRs are binding on new code.
+- **Read `docs/adr/` before designing a container type.** Accepted ADRs are binding on new code;
+  `0014` is Rejected and is not.
+- **Containers stay pointers to non-copyable structs** (ADR `0002`), and `0014` re-affirmed that
+  after designing the alternative in full. Reference-type containers were measured to be *free*
+  at the representation level, but a reference container cannot be compared to nil, so it needs
+  an `IsZero`/`IsNil` method while views — sealed interfaces since `0013` — use `== nil`. Every
+  route to one spelling either kept two or reintroduced Go's typed-nil trap. **Do not reopen this
+  without a new answer to that question**; the cost measurements are already done in
+  `experiments/reftypes/`.
   `0001` governs when an accessor returns a read-only view rather than a copy. `0002` fixes the
   shape of a container type — uniform pointer receivers, a usable zero value, a `noCopy` field
   declared *first*, and no nil-receiver or nil-argument special cases. `0004` and `0006` govern
