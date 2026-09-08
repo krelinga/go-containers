@@ -5,13 +5,16 @@
   proposal to add a view and no type. The rejected adapter is kept in full below.
 - **Date:** 2026-09-08
 - **Evidence:** `experiments/sliceadapter/` (`RESULTS.md`), with context from
-  `experiments/vectorcost/` and `sizedcollect/`.
-- **Relates to:** ADR `0015` (`Vector`, whose follow-up proposed this, and whose
-  non-variadic `Append` creates the gap this fills), `0009` (`Map`, the model),
-  `0007` (the value/pointer asymmetry an adapter accepts), `0006` (sized
-  construction, which is the measured win), `0002` (the shape rules an adapter
-  deliberately does not follow), `0008` (naming — `Slice` is the exception this
-  ADR was pre-authorised to take).
+  `experiments/vectorcost/`, `copycost/` and `views/`.
+- **Relates to:** ADR `0001` (views against defensive copies — the justification
+  that survived), `0011` and `0013` (what a view is, and the sealed interfaces
+  this adds a producer to), `0015` (`Vector`, whose follow-up proposed the
+  adapter, and whose decision 5 named the interface this renames), `0010`
+  (`LinkedList`, whose reservation of `List` decides the new name), `0009`
+  (`Map`, the model the adapter was drawn from), `0006` and `0008` (sized
+  construction and naming, both of which bore on the rejected adapter).
+- **Supersedes, if accepted:** ADR `0015` decision 5's name for the sequence view
+  interface. `VectorView` becomes `IndexedView`; nothing else in `0015` changes.
 
 ## Context
 
@@ -24,10 +27,12 @@ ADR `0015` recorded the parallel as a follow-up: `Slice` would be to `Vector`
 what `Map` is to `HashDict`. ADR `0008` had already pre-authorised the name,
 saying a future `Slice[T] []T` would take the same exception `Map` does.
 
-The parallel holds in outline and breaks in one specific place, which shapes
-everything below.
+The parallel holds in outline and breaks in one specific place. Following that
+break, and then measuring what was left, moved this ADR off proposing an adapter
+entirely — it proposes a view and no new type. The adapter analysis is kept as
+the primary rejected alternative.
 
-## The wall in the analogy
+## The wall in the analogy, and why the adapter was dropped
 
 **A map is a reference type. A slice is not.**
 
@@ -46,7 +51,8 @@ semantics that make an adapter an adapter, and would mean `Slice[T]` no longer
 satisfies anything a `[]T` can be passed to.
 
 **So a slice adapter can read and can write in place, but cannot change its own
-length.** That is the whole shape of what follows.
+length.** A `Slice[T]` would have had no `Append` — which is the first sign it
+was not the thing `Map` is.
 
 It also fixes nothing:
 
@@ -57,6 +63,9 @@ appends off a shared adapter header still alias=true
 Naming a slice type changes no slice semantics. Every hazard ADR `0015` records
 survives. An adapter is an ergonomic convenience, exactly as `0009` says of
 `Map`; `Vector` remains the answer where the hazards matter.
+
+What killed it was not either of these, but the measurements below: everything an
+adapter was wanted for turned out to be better served without one.
 
 ## Call sites
 
@@ -84,7 +93,7 @@ Proposed:
 // sketch -- the field does not change at all
 type Config struct{ hosts []string }
 
-func (c *Config) Hosts() containers.VectorView[string] {
+func (c *Config) Hosts() containers.IndexedView[string] {
 	return containers.ViewSliceIdentity(&c.hosts)
 }
 ```
@@ -185,58 +194,67 @@ and does not stop appends off a shared header aliasing. **Recorded so that
 
 From `experiments/sliceadapter/`.
 
-### It costs nothing to use
+### A view over a plain slice costs nothing, and needs no adapter
+
+| | construct | `At` | `All` sum of 1024 |
+|---|---|---|---|
+| over a bare `*[]int` | **0.375 ns** | 1.10 ns | 1.150 µs |
+| over a `*Slice[int]` | 0.370 ns | 1.05 ns | — |
+| over a `*Vector[int]` | 0.375 ns | 0.98 ns | 1.144 µs |
+
+Indistinguishable, all allocation-free. **The adapter contributes nothing to the
+one thing it was most wanted for**, and going without leaves the caller's field a
+plain slice.
+
+### It must hold the address, not the header
+
+| construct a view | | allocs |
+|---|---|---|
+| over `*[]T` / `*Slice` / `*Vector` | ~0.375 ns | 0 |
+| over a `Slice` **by value** | **12.25 ns** | **1** |
+
+A slice header is three words, so holding one by value is not pointer-shaped and
+boxes with an allocation. It is also a *snapshot*: a view holding a copy of the
+header goes stale the moment the owner appends. `Map` has neither problem — its
+header is one word and a map is a reference type.
+
+### Evidence that bore on the adapter, and did not save it
+
+**It would have cost nothing to use.** A defined slice type keeps bounds-check
+elimination, through its accessor as well as through builtin syntax:
 
 | indexed sum of 1024 | | vs raw |
 |---|---|---|
 | `raw[i]` on a `[]int` | 197.5 ns | — |
-| `ad[i]` on a `Slice[int]` | 202.5 ns | +2.5% |
 | `ad.At(i)` through the accessor | **196.8 ns** | **±0%** |
 | `vec.At(i)` on the struct wrapper | 242.9 ns | +23% |
 
-**A defined slice type keeps bounds-check elimination**, through its accessor as
-well as through builtin syntax, where `Vector` loses it. The accessor inlines to
-an index into the slice the loop bound came from, so the check stays provable.
-
-(The compiler's own BCE report does not separate the two, because an inlined body
+(The compiler's BCE report does not separate the two, because an inlined body
 keeps its original source position and both accessors show a check. The timings
-do, across three groups at ±3%.)
+do, across three groups at ±3%.) Costing nothing is not a reason to exist.
 
-### The sizing win is real, and largest where construction happens
+**Its `Len` beat a bare iterator, and lost to a variadic.** `AppendAll(Slice[int](s))`
+is 2.375 µs and 6 allocations against `AppendAllSeq(slices.Values(s))` at 4.070 µs
+and 15 — but `AppendMany(s...)` is **1.124 µs and one allocation**, the raw
+`append` floor. See Task L; this is the finding that removed the adapter's
+headline justification.
 
-| append 1024 into an **empty** Vector | | allocs |
-|---|---|---|
-| `AppendAll(Slice[int](s))` | **2.375 µs** | **6** |
-| `AppendAllSeq(slices.Values(s))` | 4.070 µs | 15 |
+**It could not serve the index/value case at all.** A type has one `All`, and one
+yielding values satisfies `Elems[T]` rather than `Elems2[int, T]`:
 
-| append 1024 onto one already holding 1024 | | allocs |
-|---|---|---|
-| `AppendAll(Slice[int](s))` | 4.451 µs | 7 |
-| `AppendAllSeq(slices.Values(s))` | 5.250 µs | 6 |
-
-1.71x empty, 1.18x not — and one allocation *more* in the second case, because a
-populated vector already has capacity to absorb most of the growth. The headline
-number is the empty case, which is the one `Collect`-style construction hits.
-
-### A view over it must hold a pointer
-
-| construct a sequence view | | allocs |
-|---|---|---|
-| over a `*Vector` | 0.371 ns | 0 |
-| over a `Slice` **by value** | **12.25 ns** | **1** |
-| over a `*Slice` | 0.377 ns | 0 |
-
-A slice header is three words, so holding one by value is not pointer-shaped and
-boxes with an allocation. `Map` has no such problem: its header is one word, so
-`ViewMapIdentity` takes a `Map` by value and allocates nothing.
+```
+Slice[string] does not implement Elems2[int, string] (wrong type for method All)
+        have All() iter.Seq[string]
+        want All() iter.Seq2[int, string]
+```
 
 ## Decision
 
 ### 1. Add `ViewSlice` and `ViewSliceIdentity` over `*[]T`. Add no new type.
 
 ```go
-func ViewSlice[T, NT any](s *[]T, viewer CanViewVector[T, NT]) VectorView[NT]
-func ViewSliceIdentity[T any](s *[]T) VectorView[T]
+func ViewSlice[T, NT any](s *[]T, viewer CanViewSlice[T, NT]) IndexedView[NT]
+func ViewSliceIdentity[T any](s *[]T) IndexedView[T]
 ```
 
 That is the whole change. A `[]T` field gains the one thing it could not have —
@@ -245,13 +263,19 @@ being handed out read-only — and gains it without becoming a different type:
 ```go
 type Config struct{ hosts []string } // unchanged
 
-func (c *Config) Hosts() containers.VectorView[string] {
+func (c *Config) Hosts() containers.IndexedView[string] {
 	return containers.ViewSliceIdentity(&c.hosts)
 }
 ```
 
 `append`, `range`, indexing and `encoding/json` all keep working on the field,
 because it is still a slice.
+
+`CanViewSlice[T, NT]` is a new requirement interface, identical in structure to
+`CanViewVector` and separate from it for ADR `0012`'s stated reason: these are
+named per *constructor*, so that failing to satisfy one names the operation you
+cannot perform. `CanViewHashDict` and `CanViewMap` are already identical to each
+other on the same grounds.
 
 ### 2. `*[]T`, not `[]T`
 
