@@ -635,6 +635,16 @@ since a view held once stops paying while today's struct re-boxes forever.
 
 ## Follow-ups
 
+- **Iterating a view allocates, which this ADR did not measure.** `All` returns
+  an `iter.Seq`, and a closure returned through a dynamic call cannot be
+  stack-allocated at the range site: **3 allocations per call**, against 0
+  calling the container directly. `Get` is unaffected. `experiments/viewiface`
+  measured point reads through an interface and never iteration, so the
+  consequence above — "at most one allocation per view, at construction,
+  amortised over every use" — holds for `Get` and not for `All`. Measured against
+  the shipped library in `experiments/reftypes`. Whether it changes anything is
+  open; the concrete-struct alternative allocated on every boundary crossing
+  instead, so this is not obviously worse, only unrecorded.
 - **Should `Range` return a view rather than an iterator?** ADR `0011` listed
   this as a capability gap, and this decision makes it cheap to express —
   `Range(lo, hi K) SortedDictView[K, NV]` returns an interface like everything
