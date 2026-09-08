@@ -207,6 +207,57 @@ exactly direction 1A below, arrived at from semantics rather than from matching
 the stdlib. That two independent routes reach the same shape is the strongest
 argument either of them has.
 
+## Problem 5: there is no way to build one container from another's keys
+
+Orthogonal to problem 2, which is about the bulk API being *ragged*. This one is
+about it being *combinatorial*.
+
+Putting a `HashDict`'s keys into a `Vector` has no spelling today. The
+constructors take either an `Elems[T]` or an `iter.Seq[T]`, and a `HashDict` is
+an `Elems2[K, V]`, so the caller writes the adapter by hand:
+
+```go
+// sketch -- today
+v := containers.CollectVectorSeq(func(yield func(K) bool) {
+	for k := range d.All() {
+		if !yield(k) {
+			return
+		}
+	}
+})
+```
+
+That works and loses two things: the **length**, which `CollectVectorSeq` cannot
+take, and the **value**, which is copied into every yield and immediately thrown
+away.
+
+### What it costs, measured
+
+Building a `Vector` of a dict's 256 string keys:
+
+| | | memory | allocs |
+|---|---|---|---|
+| **narrow (`int`) values** | | | |
+| today, by hand | 2.002 µs | 9.30 KiB | 15 |
+| keeping the length | 1.304 µs (**1.54x**) | 4.98 KiB | 9 |
+| length **and** a native key walk | **950.0 ns (2.1x)** | 4.89 KiB | 6 |
+| **wide (1 KiB) values** | | | |
+| today, by hand | 6.080 µs | 9.30 KiB | 15 |
+| keeping the length | 5.830 µs (1.04x) | 4.98 KiB | 9 |
+| length **and** a native key walk | **970.9 ns (6.3x)** | 4.89 KiB | 6 |
+
+The fully-adapted form is **flat in value width** — 950 ns against 971 ns —
+because it never touches a value. Both partial forms scale with it.
+
+### The naive fix, sized
+
+Add constructors that read the other shapes: `CollectVectorFromKeys`,
+`CollectVectorFromValues`, and the `Seq` twin of each. Counting it honestly:
+three single-element targets (`HashSet`, `SortedSet`, `Vector`), three source
+shapes (an `Elems`, an `Elems2`'s keys, an `Elems2`'s values), and a sized and an
+unsized form of each is **eighteen functions**, before `LinkedList` or any dict
+target. It grows as containers × shapes × 2.
+
 ## Findings
 
 From `experiments/iteration/`.
@@ -408,6 +459,96 @@ views can be reversed, and the ordered tier declares both.
 This is the most speculative direction and the only one that does not multiply
 methods.
 
+## Directions for problem 4
+
+Problem 4 carries its proposal inline — the three-category taxonomy of caller
+key, position and value — because it is a definition rather than a menu. The
+choice it presents is narrower: **adopt that taxonomy and fix the one thing that
+contradicts it**, which is ordered containers treating caller keys as positions,
+or **keep the current four treatments** and record that "key" means different
+things in different corners of the package.
+
+The second is a real option. Converting ordered keys costs the `SortedDictView`
+embedding that ADR `0016` depends on, and buys abstraction for key types that are
+already immutable and mostly already named.
+
+## Directions for problem 5
+
+### 5A. Add the constructors
+
+Eighteen or more functions, each trivial, each needing a doc comment and a test,
+and each a thing to forget when a container is added. Recorded so that "just add
+them" is a weighed option rather than the default — it is not obviously wrong,
+only large.
+
+### 5B. Shape adapters that preserve the length
+
+```go
+// sketch
+func Keys[K, V any](e Elems2[K, V]) Elems[K]
+func Values[K, V any](e Elems2[K, V]) Elems[V]
+```
+
+`CollectVector(containers.Keys(d))` then works with the constructor that already
+exists. Two free functions instead of eighteen, composing with every present and
+future container, and they keep the length — worth **1.54x** and half the memory.
+
+They cannot fix the wasted value copy on their own: deriving keys from an `All`
+pays it, which is 6x at 1 KiB values.
+
+### 5C. 5B, upgrading to a native walk when the source has one
+
+```go
+// sketch
+func Keys[K, V any](e Elems2[K, V]) Elems[K] {
+	if n, ok := e.(interface{ Keys() iter.Seq[K] }); ok {
+		return sized[K]{e.Len(), n.Keys()}   // never touches a value
+	}
+	return sized[K]{e.Len(), dropValue(e.All())}
+}
+```
+
+The `io.WriterTo` pattern: an optional interface, used when present. Measured
+**2.1x at narrow values and 6.3x at wide ones**, and flat in value width.
+
+It only pays off if containers offer `Keys()`/`Values()` natively — which is
+direction 1A. **Problem 5's best answer is downstream of problem 1's**, and this
+is the clearest evidence for 1A yet: the same method that fixes the naming
+mismatch also removes a 6x cost here.
+
+### 5D. Source-side methods, and no adapters at all
+
+If a container's `Keys()` returns an `Elems[K]` rather than a bare `iter.Seq[K]`,
+the free functions are unnecessary:
+
+```go
+// sketch
+containers.CollectVector(d.Keys())
+containers.CollectHashSet(d.Values())
+```
+
+One constructor per container, no adapters, no explosion, and the length travels
+with the shape. This is where 1A and 1C together lead, and it is the smallest
+final surface of any option here.
+
+Against: it needs every container to grow shape methods that return a sized
+thing, which is the largest change in this ADR, and it depends on whether `Elems`
+stays an interface — decision-blocker 2.
+
+### 5E. Element transformation is a different axis, and should not be conflated
+
+A caller who wants `Vector[string]` from `HashDict[int, User]` needs a function,
+not a shape:
+
+```go
+// sketch
+func TransformSeq[A, B any](seq iter.Seq[A], f func(A) B) iter.Seq[B]
+```
+
+None of 5A–5D address that, and none should. Recorded so the two are not solved
+together by accident — shape adaptation is mechanical and can preserve a length;
+transformation is arbitrary and cannot in general.
+
 ## What this ADR does not do
 
 It does not decide. Five things should be settled before it becomes a decision,
@@ -417,6 +558,7 @@ order, not importance order:
 0. **What a key and a value are** (problem 4), which is logically prior to the
    rest: it decides whether `Vector` is an `Elems2[int, T]`, whether ordered
    containers should convert their keys, and whether a position is a key at all.
+   Problem 5's answer is downstream of it too.
 
 1. **Whether `All` should mean `Seq2`**, matching the stdlib. Everything in
    problem 1 follows from that answer — and the corrected finding means the
