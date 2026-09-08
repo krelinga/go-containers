@@ -80,10 +80,12 @@ sealed view asserts back to container:    false
 ```
 
 The scope of the improvement is worth stating precisely: **forgetting becomes a
-compile error only where the boundary is declared with the sealed type.** A
-function still declared `func render(d containers.Dict[K, V])` accepts the
-container as happily as ever. This does not make views unforgettable; it moves
-the remembering from every call site to one signature, where it is checked.
+compile error only where the boundary is declared with the sealed type.** Decision
+3 removes `Dict`, but `Elems2` survives and is deliberately unsealed (decision 4),
+and `DictView` embeds it — so a function declared `func render(d Elems2[K, V])`
+accepts the container as happily as ever. This does not make views unforgettable;
+it moves the remembering from every call site to one signature, where it is
+checked.
 
 ### Boxing is linear in boundary crossings today, and constant behind an interface
 
@@ -253,13 +255,17 @@ type SortedDictView[K cmp.Ordered, NV any] interface {
 ```
 
 The structs stay one per container, unexported — `hashSetView`, `sortedSetView`,
-`hashDictView`, `sortedDictView`, `mapView` — so five structs behind four
-interfaces:
+`hashDictView`, `sortedDictView`, `mapView` — plus an identity form for each,
+per decision 7:
 
 ```go
 type hashDictView[K comparable, V, NK, NV any] struct {   // unexported
 	d      *HashDict[K, V]
 	viewer CanViewHashDict[K, NK, V, NV]
+}
+
+type hashDictIdentityView[K comparable, V any] struct {   // one word
+	d *HashDict[K, V]
 }
 
 func ViewHashDict[K comparable, V, NK, NV any](
@@ -268,6 +274,8 @@ func ViewHashDict[K comparable, V, NK, NV any](
 
 func ViewHashDictIdentity[K comparable, V any](d *HashDict[K, V]) DictView[K, V]
 ```
+
+Both constructors return `DictView`, and no caller can tell them apart.
 
 **There is no `HashDictView`, `HashSetView` or `MapView`.** A hash container's
 view adds nothing to the base, so the base *is* its view type; only the ordered
@@ -290,6 +298,18 @@ cannot use fake{} ... : fake does not implement proto.DictView[string, int]
 The second is a type outside the package supplying every exported method. The
 seal blocks the container from being passed *as* a view, and blocks anyone else
 from claiming to be one.
+
+Two further consequences, both stronger than the concrete-struct design managed:
+
+- **Asserting back to the container does not compile.** `v.(*HashDict[K, V])` on
+  a sealed interface is rejected statically — `impossible type assertion` — since
+  `*HashDict` cannot implement `DictView`. `experiments/viewiface` only measured
+  the laundered form, `any(v).(*Dict[...])`, which compiles and returns false.
+  Under this decision a caller has to route through `any` to even ask.
+- **The concrete type is unnameable outside the package.** The experiment
+  recorded `sealed view asserts back to view struct: true`; that holds only
+  inside `containers`, because the struct is now unexported. Outside code cannot
+  spell `hashDictView[...]`, so the last assertion that succeeded no longer can.
 
 ### 2. The ordered views embed the unordered ones
 
@@ -315,16 +335,25 @@ sidestep order preservation, not to enable a hierarchy. **ADR `0003`'s
 
 ### 3. `Set` and `Dict` are removed
 
-ADR `0008`'s read-only tier goes away. The view interfaces subsume it, and
-keeping both would leave two spellings of "read-only dict" where one is a decoy:
-a container satisfies `Dict[K, V]` structurally, which is precisely the hole ADR
-`0011` recorded as unclosable and this ADR closes.
+ADR `0008`'s read-only tier goes away. The view interfaces take its place **at
+boundaries**, and keeping both would leave two spellings of "read-only dict"
+where one is a decoy: a container satisfies `Dict[K, V]` structurally, which is
+precisely the hole ADR `0011` recorded as unclosable and this ADR closes.
+
+What the view interfaces do *not* take over is reading from a container without
+building a view. That capability is lost, deliberately, and the consequences
+below say what it costs.
 
 ### 4. `Elems` and `Elems2` stay, and stay unsealed
 
 The sized constructors take them, so they are a capability check rather than a
 boundary — `CollectHashSet(anythingIterable)` has to keep working. They were
 never load-bearing for read-only-ness, and are not asked to be.
+
+The cost is the escape noted in the findings: `SetView` and `DictView` embed
+them, and so do the containers, so a boundary declared `Elems2[K, V]` accepts
+either and seals nothing. That is the deliberate limit of the seal, not an
+oversight — a function that only iterates has no business demanding a view.
 
 ### 5. `MutableSet` and `MutableDict` absorb their read methods
 
@@ -338,14 +367,60 @@ The concrete struct keeps value receivers, so the representation can change to a
 pointer, to a body pointer, or to a type-parameter witness later without touching
 a caller.
 
+### 7. Identity views carry no viewer, and cost nothing
+
+`View<Container>Identity` returns a struct holding only the container pointer. It
+converts nothing, so it needs no viewer field, which makes it one word and free
+to box:
+
+```
+identity view as a 3-word viewer field: 1 alloc
+identity view as a 1-word pointer:      0 allocs
+```
+
+The two constructors return the same interface and differ in representation, and
+no caller can tell. This is the private representation earning its keep on the
+first day rather than someday — and it is what makes the identity wrap in the
+consequences below free.
+
+`SortedSetView` is already this shape for every construction, since ADR `0012`
+gives it no viewer at all.
+
+The cost is four more unexported types — an identity form for `HashSet`,
+`HashDict`, `SortedDict` and `Map`; `SortedSet` needs none, having only that
+form. **Nine structs behind four interfaces**, each identity form being three
+forwarding methods and the seal. That is mechanical rather than subtle, and it is
+worth doing rather than deferring because decision 3 makes the identity wrap the
+standard way to read from a container, which puts it on hot paths by
+construction.
+
+It is also the clearest demonstration of what option B bought: if the duplication
+ever reads worse than the allocation, the identity forms can be deleted and
+folded back into the general struct **without an API change**, because no caller
+ever named them.
+
+### 8. A nil view panics, and nothing checks for one
+
+A view is an interface now, so `var v DictView[K, V]` is nil, `v == nil` compiles
+and is true, and calling a method gives an uncontrolled nil dereference rather
+than the deliberate panic ADR `0002` asks for. That is new: a zero
+`HashDictView{}` was a non-nil struct, and nil was not spellable.
+
+Consistent with `0002`'s rule against nil special cases, **no method and no
+constructor tests a view for nil.** A nil view panics on use, exactly as a zero
+container does, and `TestZeroViewPanics` is restated to assert the panic rather
+than its kind.
+
 ## Consequences
 
-- **One allocation per view, at construction, amortised over every use.** Not one
-  per boundary crossing, which is what `0012` pays today and cannot amortise: a
-  view held in a field costs 13.42 ns and 0 allocations per call against today's
-  28.99 ns and an allocation *per call*.
-- **A view that converts nothing costs nothing.** `SortedSetView` is one word, so
-  it constructs behind its interface in 0.32 ns with no allocation.
+- **At most one allocation per view, at construction, amortised over every use.**
+  Not one per boundary crossing, which is what `0012` pays today and cannot
+  amortise: a view held in a field costs 13.42 ns and 0 allocations per call
+  against today's 28.99 ns and an allocation *per call*.
+- **A view that converts nothing costs nothing at all.** Every identity view and
+  every `SortedSetView` is one word, so it constructs behind its interface in
+  0.32 ns with no allocation. The allocation is the price of carrying a viewer,
+  not of the interface.
 - **A view used only locally pays 2.5x** and gains nothing. This is the accepted
   cost. A view exists to cross a boundary; one that never crosses one did not
   need to be built.
@@ -359,10 +434,31 @@ a caller.
   shipping the field-carrying struct first.
 - **Option E stays available and gets better.** A caller-side alias now names an
   interface with two type parameters instead of a struct with four.
-- **Consumers stop naming the implementation entirely.** A consumer taking
+- **Unordered consumers stop naming the implementation.** A consumer taking
   `DictView[string, ItemView]` names neither the container's key and value types
   nor which container it came from. A `Map` view and a `HashDict` view are the
-  same type, and a `SortedDict` view substitutes for either.
+  same type, and a `SortedDict` view substitutes for either. A consumer needing
+  `Range` or `Floor` must still name `SortedDictView`, which couples it to
+  ordered containers — inherent, since it is asking for ordered operations.
+- **Reading from a container now requires naming that you are reading.** ADR
+  `0008` added `Set` and `Dict` so a function needing only `Has` or `Get` would
+  not have to accept one carrying `Add` and `Delete`;
+  `TestReadOnlyLayerAcceptsEveryContainer` asserts precisely that. After decision
+  3 **no type accepts both a container and a view.** A read-only function takes
+  the view, and a caller holding a container wraps it:
+
+  ```go
+  // before: countPresent(hs, 1, 3, 99)
+  countPresent(containers.ViewHashSetIdentity(hs), 1, 3, 99)
+  ```
+
+  Taking `MutableSet` instead would hand back the write access `0008` removed, so
+  it is not an alternative. The wrap is the migration; it is explicit at the call
+  site, and by decision 7 it allocates nothing. This is a real narrowing of what
+  `0008` bought, and it is accepted rather than overlooked: the read-only tier
+  was never enforceable, because a container satisfied it structurally, and a
+  seal that only works when spelled is worth more than a contract that never
+  worked at all.
 - **ADR `0008`'s contract table changes**, and `CLAUDE.md` describes the old one.
 - **`views_test.go` and `callsites_test.go` are rewritten**, and the identity
   constructors change return type. `TestEveryContainerHasAView` becomes a check
@@ -521,6 +617,13 @@ type-parameter witness, the cheapest shape measured there — is closed today on
 because `0012`'s `FromKeyView` is generally stateful; behind an interface the
 library can adopt it per container wherever the viewer *is* stateless, and
 callers never learn. Under option C of this ADR, both would be breaking changes.
+
+There is a second thing sealing buys that is easy to miss. **Because nothing
+outside the package can implement `DictView`, adding a method to it later is not
+a breaking change.** Extending an exported interface normally breaks every
+implementer; here there are none and there cannot be. That is what makes the
+`Range`-returns-a-view follow-up safe to defer rather than a change that would
+have to be got right now.
 
 The cost of buying that is precise and bounded: 2.5x on views that never cross a
 boundary, nothing on views that carry no viewer, and a cheaper profile than
