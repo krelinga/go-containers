@@ -1,7 +1,6 @@
 # 15. Vector[T]: a container that owns its slice
 
-- **Status:** Accepted. Not yet implemented, so this constrains the change
-  rather than describing it.
+- **Status:** Accepted and implemented.
 - **Date:** 2026-09-08
 - **Evidence:** `experiments/vectorcost/` (`RESULTS.md`), plus the call-site
   sketches below. Context from `experiments/copycost/` (what an accessor that

@@ -14,8 +14,9 @@ beside it:
 | `hashdict.go` | `HashDict[K comparable, V any]` | map, unordered |
 | `sorteddict.go` | `SortedDict[K cmp.Ordered, V any]` | sorted slice |
 | `map.go` | `Map[K comparable, V any]` | a defined `map[K]V` — an **adapter**, not a default |
+| `vector.go` | `Vector[T any]` | an owned slice, insertion-ordered (ADR `0015`) |
 | `contracts.go` | the interfaces below | — |
-| `views.go` | `SetView`, `DictView`, `SortedSetView`, `SortedDictView` | sealed read-only interfaces (ADRs `0011`, `0012`, `0013`) |
+| `views.go` | `SetView`, `DictView`, `SortedSetView`, `SortedDictView`, `VectorView` | sealed read-only interfaces (ADRs `0011`, `0012`, `0013`, `0015`) |
 | `viewers.go` | `KeyViewer`, `ValueViewer`, the `CanView<Container>` set | the conversions a view applies (ADR `0012`) |
 
 Contracts come in two layers (ADR `0008`, narrowed by `0013`):
@@ -95,8 +96,9 @@ to a plain `go test` — a shallow-copy `Clone` that silently shares the underly
 - **Every container has a view, and a new one is not finished without it** (ADRs `0011`, `0012`
   and `0013`; `views.go`, `viewers.go`). Build one with `View<Container>(c, viewer)`, or
   `View<Container>Identity(c)` to convert nothing. A constructor returns a **sealed interface** —
-  `SetView[NT]` or `DictView[NK, NV]`, or the `Sorted*` forms which embed those and add the
-  ordered reads. The concrete structs are unexported and may change.
+  `SetView[NT]` or `DictView[NK, NV]`, the `Sorted*` forms which embed those and add the ordered
+  reads, or `VectorView[NT]`, which stands alone because a sequence's reads are positional. The
+  concrete structs are unexported and may change.
   The seal is one unexported method, and it works in both directions at compile time: a container
   cannot be passed where a view is expected (`missing method sealedView`), and a view cannot be
   asserted back to its container (`impossible type assertion`).
@@ -125,6 +127,19 @@ to a plain `go test` — a shallow-copy `Clone` that silently shares the underly
   admits only immutable value types, so their keys need no protection: `Range`/`Floor`/`Ceil` take
   `K` directly and `SortedSetView` carries no viewer at all. This is what sidesteps
   order-preservation entirely — **revisit it if sorted containers ever sort by a function.**
+- **`Vector` is not a replacement for `[]T`** (ADR `0015`). It earns its place at an API
+  boundary, where a `[]T` field cannot be handed out read-only and an accessor over one must copy
+  — O(n) per call, O(n²) in a caller's loop — or return a mutable interior. A `Vector` field hands
+  out a `VectorView` at O(1) and no allocation. It is *worse* than a slice for local code:
+  an indexed loop costs ~24% because bounds-check elimination does not survive `At`, and ranging
+  `All` costs ~6x a raw range. Two of ADR `0015`'s four call-site tasks are recorded as
+  explicitly **not** wins so they are not cited as motivation later.
+- **`Vector.Append` takes one element and is not variadic**, unlike `HashSet.Add(...T)`. This is
+  deliberate and measured: the `...T` signature is 41 of the 62 points of overhead on an append,
+  which is noise against a ~5 ns map insert and half the operation again against a 0.57 ns slice
+  append. `AppendAll`/`AppendAllSeq` cover bulk. **Making the rest of the package consistent with
+  this is an open follow-up in `0015`** — the dicts already match, the sets do not, and `HashSet`
+  has no bulk forms at all.
 - **`HashDict` is the default hash dict; `Map` is an adapter** (ADR `0009`). Reach for `Map` only
   when you need a free conversion from an existing `map[K]V`, builtin syntax, to pass the result
   where a `map[K]V` is expected, or working `encoding/json`. Everything else should use `HashDict`,
