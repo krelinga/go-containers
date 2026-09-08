@@ -60,33 +60,41 @@ survives. An adapter is an ergonomic convenience, exactly as `0009` says of
 
 Phase 1 sketches. These do not compile.
 
-### Task J — feeding a plain `[]T` to a sized bulk operation
-
-ADR `0015` made `Vector.Append` non-variadic, so bulk-appending a slice goes
-through either a length-carrying `Elems` or a bare iterator with none. Today only
-the second is available:
+### Task J — handing out read-only access to a slice you already have
 
 ```go
-// sketch
-v.AppendAllSeq(slices.Values(names)) // no length, so append regrows ~11 times
+// sketch -- today
+type Config struct{ hosts []string }
+
+// Copy on every call: O(n), and O(n²) in a caller's loop...
+func (c *Config) Hosts() []string { return slices.Clone(c.hosts) }
+
+// ...or hand out the interior and let the caller write into it.
+func (c *Config) Hosts() []string { return c.hosts }
+
+// Or migrate the field to a Vector, which copies once at construction and
+// changes how every other line in the type reads.
 ```
 
 Proposed:
 
 ```go
 // sketch
-v.AppendAll(containers.Slice[string](names)) // Len is available; Grow allocates once
+type Config struct{ hosts containers.Slice[string] } // still a []string underneath
+
+func (c *Config) Hosts() containers.VectorView[string] {
+	return containers.ViewSliceIdentity(&c.hosts)
+}
 ```
 
-**Not shorter — 1.71x faster and 6 allocations against 15.** This is a
-performance win rather than an ergonomic one, and the call-site convention asks
-about shorter or safer. Recorded as the honest position: this task justifies the
-type on ADR `0006`'s grounds, which this library already treats as sufficient,
-and not on the convention's usual two.
+**Zero copy, O(1), and the caller cannot write.** The field is still a slice —
+builtin syntax, `append`, `range`, `encoding/json` all keep working — and it
+gained the ability to be handed out read-only, which a `[]T` cannot do at any
+price short of copying.
 
-The same gap exists at `SortedSet.AddAll`, `CollectSortedSet`, `CollectVector`
-and `CollectSortedDict` — every operation taking `Elems`. A plain slice cannot
-supply one today.
+This is ADR `0001`'s accessor problem again, and it is the justification Task L
+was supposed to provide and does not. It is a *safety* win, which is what the call-site
+convention actually asks for.
 
 ### Task K — a sequence field that round-trips through JSON
 
@@ -114,7 +122,49 @@ A narrow win, and the only one available: no struct-shaped container in this
 library can round-trip, and that is not fixable without the serialization ADR
 `0002` has been owing since the beginning.
 
-### Task L — anything `Vector` exists for. **Not a win.**
+### Task L — feeding a plain `[]T` to a sized bulk operation. **Not a win.**
+
+This was proposed as the justification for the type. It is not one.
+
+ADR `0015` made `Vector.Append` non-variadic, so bulk-appending a slice today
+goes through a bare iterator with no length:
+
+```go
+// sketch
+v.AppendAllSeq(slices.Values(names)) // no length, so append regrows ~11 times
+```
+
+The adapter improves on that — `v.AppendAll(containers.Slice[string](names))` is
+1.71x faster with 6 allocations against 15. But a third form beats both, and it
+needs no new type at all:
+
+```go
+// sketch
+v.AppendMany(names...) // 1.124 µs, ONE allocation -- the raw append floor
+```
+
+| appending 1024 into an empty Vector | | allocs |
+|---|---|---|
+| `AppendMany(s...)` | **1.124 µs** | **1** |
+| raw `append(es, s...)` | 1.169 µs | 1 |
+| `AppendAll(Slice[T](s))` | 2.409 µs | 6 |
+| `AppendAllSeq(slices.Values(s))` | 4.266 µs | 15 |
+
+Variadic expansion reaches `append`'s own variadic form — one memmove with a
+known length — so it is **2.1x the adapter**. And it is not the cost ADR `0015`
+measured: that was `Append(e T)` against `Append(es ...T)` for *one* element,
+paid per call, where a bulk method expands once per batch.
+
+`Elems` still wins the other direction. Appending from another *container* is
+2.388 µs and 5 allocations via `Elems`, against 4.518 µs and 13 if the caller
+must materialise a slice for a variadic. The two are complementary and neither
+subsumes the other.
+
+**So this task argues for adding `Vector.AppendMany(es ...T)`, not for adding
+`Slice`.** Recorded as a follow-up below and struck from this ADR's
+justification.
+
+### Task M — anything `Vector` exists for. **Not a win.**
 
 ```go
 // sketch
@@ -200,11 +250,16 @@ or reach for `Vector` when they want that hidden.
 `s[i] = e` works on a defined slice type regardless. Denying the method would
 buy nothing and cost consistency with `Vector`.
 
-### 2. It exists to let a plain `[]T` satisfy `Elems[T]`
+### 2. It exists so a slice can be handed out read-only, and can satisfy `Elems[T]`
 
-That is the justification, and it should be the first line of its doc comment. A
-free conversion turns any slice into something the sized constructors and bulk
-mutators can take with a length in hand.
+The first is the justification and belongs in the first line of its doc comment:
+a `[]T` field converts for free into something that has a view, which is the one
+thing a slice cannot otherwise do without copying.
+
+Satisfying `Elems[T]` is a secondary convenience. It is **not** the reason —
+Task L shows a variadic bulk method beats the adapter 2.1x for that job — but it
+is still the right way to feed a slice to an operation that has no variadic
+form.
 
 ### 3. It is an adapter, not a default — `Vector` is the default
 
@@ -215,39 +270,56 @@ where a `[]T` is expected, or for working `encoding/json`. Everything else uses
 This is the same division `0009` draws between `Map` and `HashDict`, and it
 should be stated the same way.
 
-### 4. Its view takes a pointer
+### 4. It has a view, sharing the sequence view interface, and that view takes a pointer
+
+Every container has one (ADR `0011`), adapters included — `Map` has `ViewMap`.
+The need is not theoretical here: handing out read-only access to a slice is
+Task J, this ADR's primary justification.
 
 ```go
 func ViewSlice[T, NT any](s *Slice[T], viewer CanViewVector[T, NT]) VectorView[NT]
 func ViewSliceIdentity[T any](s *Slice[T]) VectorView[T]
 ```
 
-`*Slice[T]`, not `Slice[T]`, on the measurement above: by value it costs an
-allocation on every construction. This is an asymmetry with `ViewMapIdentity`,
-which takes its `Map` by value, and it is forced by the width of a slice header.
+**It shares the interface rather than declaring a `SliceView` of its own.** That
+follows ADR `0013` decision 1 exactly: a `Map`'s view is a `DictView`, not a
+`MapView`, because it adds nothing to the base. A `Slice`'s view adds nothing to
+a `Vector`'s, so a second identical interface would only mean a slice view could
+not be passed where a vector view is wanted.
+
+**`*Slice[T]`, not `Slice[T]`.** Measured: by value a view costs 12.25 ns and an
+allocation, because a slice header is three words and so not pointer-shaped; by
+pointer it is 0.377 ns and none. `Map` avoids this only because a map header is
+one word. The cost is that `ViewSliceIdentity` needs an addressable `Slice`, so
+it cannot be applied directly to a function's return value.
+
+### 5. No `CollectSlice`
+
+`slices.Collect` already returns a `[]T`, which converts to a `Slice[T]` for
+free. A `CollectSlice` would be a rename of a stdlib function, which is not what
+the `Collect<Container>` family is for.
 
 ## Open questions
 
-### A. Whether `Slice` should have a view at all
+### A. What the sequence view interface should be called
 
-ADR `0011`'s rule is that every container has one, and `Map` — also an adapter —
-has `ViewMap`. But decision 4's pointer requirement means `ViewSliceIdentity(&s)`
-cannot be applied to a function's return value, which is exactly where a caller
-holding a `[]T` would want it. The alternative is accepting the allocation and
-taking the value.
+Decision 4 shares one interface between `Vector` and `Slice`, which is right. But
+it is currently called `VectorView`, and naming it after one of its two
+implementations was already flagged in ADR `0015` decision 5 as an inconsistency
+— the set and dict views are named for the *concept*. A second implementation
+makes it actively misleading.
 
-### B. Whether `CollectSlice` belongs
+`SeqView` or `ListView` would be concept-shaped and correct for both. Renaming
+touches shipped code, so it is left to the naming review ADR `0015` opened rather
+than taken here. **If that review is not happening soon, this is the argument for
+doing it now**, since every new caller of `VectorView` makes the rename bigger.
 
-Every other container has `Collect<Container>`. For a slice, `slices.Collect`
-already exists and returns `[]T`, which converts for free. A `CollectSlice`
-would be a rename of a stdlib function.
+### B. Whether `Vector.AppendAll` is the odd one out
 
-### C. Whether this makes `Vector.AppendAll` the odd one out
-
-If a plain slice can now supply `Elems`, the argument for `Vector.Append` being
-non-variadic gets stronger — `AppendAll(Slice[T](s))` covers the bulk case
-cleanly. Worth re-reading `0015`'s follow-up on mutator consistency with this in
-hand.
+Left open deliberately, pending the bulk-mutator consistency work ADR `0015`
+recorded. The finding in Task L is an input to it: a variadic bulk form and an
+`Elems` form are complementary, each optimal for its own source, so the answer is
+probably "offer both everywhere" rather than picking one.
 
 ## Rejected alternatives
 
@@ -259,11 +331,19 @@ the type is for: a `*Slice[T]` cannot be produced by a free conversion from a
 mixed-receiver problem ADR `0002` decision 2 rejected. A type that needs a
 pointer is `Vector`, which already exists.
 
-### Do not build it; tell callers to use `slices.Values`
+### Do not build it
 
-Costs nothing. Rejected on the measurement: it forgoes 1.71x and nine
-allocations on every `Collect`-shaped construction from a slice, and leaves the
-library with no sequence type that round-trips through `encoding/json`.
+Costs nothing, and Task L no longer argues against it — a variadic bulk method
+covers that case better than the adapter does, with no new type.
+
+Rejected on Task J alone. Without `Slice`, a `[]T` field cannot be handed out
+read-only at any price short of copying it, and migrating the field to `Vector`
+changes how every other line touching it reads — `append`, `range`, indexing and
+`encoding/json` all stop working on it. `Slice` is the only way to keep a slice a
+slice and still give it a view.
+
+The JSON round-trip in Task K is a second, narrower reason, and would not have
+been sufficient alone.
 
 ### Make `Slice` the default and drop `Vector`
 
@@ -274,8 +354,13 @@ anything here.
 ## Consequences
 
 - **Two sequence types, and the difference is not obvious from the names.**
-  `Vector` hides reallocation; `Slice` does not. This needs saying wherever
-  either is documented, as `0009` does for `Map` and `HashDict`.
+  `Vector` hides reallocation; `Slice` does not. `Slice` exists so an existing
+  slice can be given a view without ceasing to be a slice. This needs saying
+  wherever either is documented, as `0009` does for `Map` and `HashDict`.
+- **The adapter is not the fast path for bulk appends**, despite carrying `Len`.
+  A variadic form beats it 2.1x when the source is already a slice. Reaching for
+  `Slice[T](s)` to feed a bulk operation is a mistake the doc comment should name
+  outright.
 - **`Slice` is the only sequence in the library that round-trips through
   `encoding/json`**, which makes the missing serialization ADR more visible, not
   less.
@@ -285,3 +370,17 @@ anything here.
 - **`Slice[T]` has no `Append` while `Vector` does**, which will read as an
   omission until the reason is given. It is the same asymmetry `Map` has with
   nothing, and stems from a language property rather than a choice.
+
+## Follow-ups
+
+### Add `Vector.AppendMany(es ...T)`
+
+Task L's real conclusion, and it is independent of whether this ADR is accepted.
+Appending a plain slice is 2.1x faster and five allocations cheaper through a
+variadic bulk method than through any other form available today, and it reaches
+the raw `append` floor. ADR `0015`'s measurement does not argue against it: that
+was the per-call cost of a variadic *single* append, where a bulk method expands
+once per batch.
+
+It belongs in the mutator-consistency work rather than here, because the same
+question applies to `SortedSet.AddAll` and every other `*All` in the package.
