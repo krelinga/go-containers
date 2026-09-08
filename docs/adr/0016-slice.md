@@ -270,25 +270,62 @@ The cost is that `ViewSliceIdentity` needs an addressable slice, so it cannot be
 applied directly to a function's return value. One local variable fixes it, and
 the same is true of `Vector`.
 
-### 3. The view is a `VectorView`, not a new interface
+### 3. One shared interface, renamed from `VectorView` to `IndexedView`
 
-A slice's view adds nothing to a `Vector`'s. Declaring a second identical
-interface would only mean a slice view could not be passed where a vector view is
-wanted. This is ADR `0013` decision 1's reasoning applied unchanged: a `Map`'s
-view is a `DictView`, not a `MapView`.
+A slice's view adds nothing to a `Vector`'s, so they share one interface.
+Declaring a second identical one would only mean a slice view could not be passed
+where a vector view is wanted — ADR `0013` decision 1's reasoning applied
+unchanged, as a `Map`'s view is a `DictView` rather than a `MapView`.
+
+But the shared interface cannot keep the name `VectorView`, because after this
+ADR one of its two producers is not a `Vector`. ADR `0015` decision 5 already
+recorded naming it after an implementation as an inconsistency; a second producer
+makes it an error.
+
+```go
+type IndexedView[NT any] interface {
+	Elems[NT]
+	At(int) NT
+	AllIndexed() iter.Seq2[int, NT]
+	sealedView()
+}
+```
+
+**`IndexedView` names the specialisation, and `ListView` is the declared
+destination.** A list is a bag of position/value pairs, and the position type
+varies — an `int` for contiguous storage, an opaque cursor for a linked list.
+The general contract is therefore two-parameter:
+
+```go
+// sketch -- not built here
+type ListView[P, NT any] interface {
+	Elems[NT]
+	At(P) NT
+	AllPositions() iter.Seq2[P, NT]
+	sealedView()
+}
+
+type IndexedView[NT any] = ListView[int, NT] // generic alias, Go 1.24+
+```
+
+Prototyped and compiling: one interface covers both a slice view at `P = int` and
+a linked-list view at `P = LinkedListCursor[V]`.
+
+**It is deliberately not built now, and `ListView` is deliberately not taken
+now.** ADR `0010` named itself `LinkedList` precisely so `List` and `MutableList`
+stayed free, on the grounds that spending the bare concept word on an
+implementation "is what forced ADR `0008`'s whole vocabulary change, when `Map`
+blocked `MutableMap`". Claiming `ListView` for an interface that only covers
+integer positions would be that mistake one level down.
+
+The migration costs nothing when the general contract does land:
+`IndexedView[NT]` becomes `= ListView[int, NT]`, and `experiments/views`
+verified that a generic alias and its long form are interchangeable in both
+directions. No caller breaks.
 
 ## Open questions
 
-### A. What the sequence view interface should be called
-
-`VectorView` now names an interface with two producers, one of which is not a
-`Vector` at all. ADR `0015` decision 5 already flagged naming it after an
-implementation as inconsistent; this makes it wrong. `SeqView` or `ListView`
-would be correct.
-
-Renaming touches shipped code, so it belongs to the naming review ADR `0015`
-opened — but **this decision is the argument for doing that review now**, because
-`ViewSlice` is a second caller and every one makes the rename bigger.
+None. The naming question this ADR opened is settled by decision 3.
 
 ## Rejected alternatives
 
@@ -362,8 +399,11 @@ line touching it reads.
   container has a view, not that every view has a container, so nothing needs
   restating — but `CLAUDE.md` describes views as belonging to containers and will
   need a word.
-- **`VectorView` acquires a second producer that is not a `Vector`**, which turns
-  a naming inconsistency into a naming error. See the open question.
+- **`VectorView` is renamed to `IndexedView`**, which touches shipped code:
+  `views.go`, `views_test.go`, `callsites_test.go`, `CLAUDE.md`, and ADR `0015`
+  decision 5, which named it. The rename lands with this ADR rather than before
+  it, because `VectorView` is not yet wrong — it becomes wrong the moment
+  `ViewSlice` exists.
 - **A slice field can now be exposed read-only without changing its type**, which
   is a cheaper migration than any other container in this library offers — there
   is nothing to migrate.
@@ -389,3 +429,40 @@ once per batch.
 
 It belongs in the mutator-consistency work rather than here, because the same
 question applies to `SortedSet.AddAll` and every other `*All` in the package.
+
+### The iteration contracts want their own ADR
+
+Several findings across ADRs `0013`, `0015` and this one point at the same place,
+and they are collected here so the ADR that takes them on does not have to
+rediscover them.
+
+**A type has one `All`, so `Elems[T]` and `Elems2[K, V]` are mutually
+exclusive.** This is the root of most of the rest:
+
+- `Vector` satisfies `Elems[T]`, so it cannot also satisfy `Elems2[int, T]`, and
+  `AllIndexed` exists under a second name only because `All` is taken.
+- A slice adapter could not have served the index/value case for the same reason
+  — verified as a compile error in `experiments/sliceadapter`.
+- `LinkedList` (ADR `0010`) spends its `All` on cursor/value pairs, so it
+  satisfies `Elems2` and not `Elems`. **The two sequence containers disagree about
+  what `All` means**, which is what stops `ListView[P, NT]` being built today:
+  whichever way it goes, one container ends up with a view whose `All` does not
+  mirror its own.
+
+**ADR `0006` records the cause**: "Go has no higher-kinded types: `iter.Seq` and
+`iter.Seq2` cannot be unified."
+
+Two cost findings belong with it:
+
+- **Iterating a view allocates three times per call** (ADR `0013` follow-up),
+  because `All` returns a closure through a dynamic call. `Get` is unaffected.
+- **`iter.Seq` costs ~6x raw ranging over a slice** (`experiments/vectorcost`),
+  and ~5.8x of that is the stdlib's own price — `slices.Values` pays it too. For
+  `LinkedList` the same abstraction *hides* a 3.9x pointer-chasing penalty
+  entirely (`experiments/linkedlist`).
+
+And one soundness finding:
+
+- **A boundary declared `Elems2[K, V]` seals nothing**, since containers satisfy
+  it too (ADR `0013` decision 4). That is deliberate, but it is the one hole left
+  in the view seal.
