@@ -68,7 +68,7 @@ type AuditLog struct{ entries containers.Vector[Entry] }
 
 func (l *AuditLog) Record(e Entry) { l.entries.Append(e) }
 
-func (l *AuditLog) Entries() containers.SeqView[Entry] {
+func (l *AuditLog) Entries() containers.VectorView[Entry] {
 	return containers.ViewVectorIdentity(&l.entries)
 }
 ```
@@ -231,11 +231,11 @@ sequence and a type cannot have both.
 ### 5. It satisfies `Elems[T]`, and gets a view
 
 Per ADR `0011`, a container is not finished without a view; per `0013`, that view
-is a sealed interface. A sequence fits none of the existing four, so it needs a
-fifth:
+is a sealed interface. A sequence fits none of the existing four, so it needs a fifth, named
+`VectorView`:
 
 ```go
-type SeqView[NT any] interface {
+type VectorView[NT any] interface {
 	Elems[NT]
 	At(int) NT
 	AllIndexed() iter.Seq2[int, NT]
@@ -243,35 +243,36 @@ type SeqView[NT any] interface {
 }
 ```
 
-## Open questions
+Note this names the implementation where `SetView` and `DictView` name the
+concept — `Vector` is the only sequence, so there is no concept/implementation
+split to express yet. It is one of the inconsistencies the naming review below
+should look at.
 
-### A. The name
+### 6. The name is `Vector`, as a deliberate exception to ADR `0008`
 
-ADR `0008` names implementations `<Ordering><Concept>` and reserves bare concept
+`0008` names implementations `<Ordering><Concept>` and reserves bare concept
 names for contracts. A sequence has no ordering axis — it is insertion-ordered by
-definition — so `Vector` is a bare concept name in an implementation slot. The
-alternatives are no better: `ArrayList` and `SliceList` are noise, `List` collides
-with `LinkedList`'s concept, and `Slice` is wanted for the adapter (below).
-`Vector` has the C++/Rust precedent. Recorded as a deliberate exception to be
-confirmed, like `Map`'s.
+definition — so there is no ordering to put in front, and `Vector` lands in an
+implementation slot with a contract-shaped name.
 
-### B. Whether a `Slice[T] []T` adapter follows
+Taken anyway, because every alternative is worse: `ArrayList` and `SliceList` add
+a word that carries no information, `List` collides with `LinkedList`'s concept,
+and `Slice` is wanted for the adapter that will likely follow. `Vector` has the
+C++ and Rust precedent, and `Map` is already an exception to `0008` on the same
+kind of grounds — it keeps the builtin's name because renaming it would cost more
+than the inconsistency does.
 
-`CLAUDE.md` already anticipates one, and the parallel is exact: `Slice` would be
-to `Vector` what `Map` is to `HashDict` — free conversion from `[]T`, builtin
-syntax, working `encoding/json`, at the cost of the shape rules. Not proposed
-here; one at a time.
+This is the second exception to a scheme with five entries. That is a signal, and
+it is recorded as a follow-up rather than pretended away.
 
-### C. Whether a sequence contract belongs alongside `MutableSet`/`MutableDict`
+### 7. `At` panics; there is no comma-ok sibling
 
-`MutableSeq[T]` with `At`, `Set` and `Append` would complete the pattern, but
-nothing needs it yet and ADR `0008`'s layers were narrowed by `0013` rather than
-extended. Deferring.
+`At(i)` panics out of range, like `s[i]`, and there is no `Get(i) (T, bool)`.
+Matching the builtin is the point of an index accessor, and a caller who needs to
+test has `Len()`.
 
-### D. Whether `At` should have a comma-ok sibling
-
-`Get(i) (T, bool)` would let a caller test without a length check, matching
-`Dict.Get`. Against: `s[i]` panics, and matching the builtin is the point.
+Recorded as revisitable at low cost: adding `Get` later is purely additive and
+breaks nothing, so deciding "no" now forecloses nothing.
 
 ## Rejected alternatives
 
@@ -314,3 +315,54 @@ container exists to remove.
   a reader most expects to round-trip through `encoding/json`, and `Vector` will
   marshal as `{}` like every other container here. The library-wide ADR that
   `0002` called for is now more overdue, not less.
+
+## Follow-ups
+
+### Make bulk mutators consistent across the map-backed containers
+
+Proposing `Append`/`AppendAll`/`AppendAllSeq` exposed that the existing
+containers already disagree with each other:
+
+| container | single | from `Elems` | from `iter.Seq` | variadic |
+|---|---|---|---|---|
+| `HashSet` | — | **missing** | **missing** | `Add(...T)`, `Remove(...T)` |
+| `SortedSet` | — | `AddAll` | `AddAllSeq` | `Add(...T)`, `Remove(...T)` |
+| `HashDict` | `Set(K, V)` | `SetAll` | `SetAllSeq` | — |
+| `SortedDict` | `Set(K, V)` | `SetAll` | `SetAllSeq` | — |
+| `Map` | `Set(K, V)` | **missing** | **missing** | — |
+| `Vector` (proposed) | `Append(e)` | `AppendAll` | `AppendAllSeq` | — |
+
+The dicts already do what this ADR proposes for `Vector`. **The sets are the
+outliers**: variadic-primary, and `HashSet` has no bulk forms at all while
+`SortedSet` has both. `Map` lacks them too, which may be correct — ADR `0009`
+makes it a deliberately thin adapter.
+
+Worth being precise about the reason, because it is not the one that drove
+decision 3. The 41% measured there is a real cost on a 0.57 ns append and **noise
+on a ~5 ns map insert**, so performance does not argue for changing the sets.
+Consistency does, and that is a weaker argument that should be made on its own
+terms rather than borrowed.
+
+At minimum `HashSet` should gain `AddAll`/`AddAllSeq` to match `SortedSet`, since
+that gap is an oversight rather than a decision.
+
+### Review the naming scheme as a whole
+
+ADR `0008` has now taken two exceptions out of five container names — `Map`, and
+`Vector` per decision 6 — and the view interfaces mix concept names (`SetView`,
+`DictView`) with implementation names (`SortedDictView`, and `VectorView` per
+decision 5). Individually each is defensible; together they suggest the scheme
+does not fit what the library turned out to be. Worth one pass over every
+exported name at once, rather than another exception per ADR.
+
+### A `Slice[T] []T` adapter will likely follow
+
+The parallel is exact: `Slice` would be to `Vector` what `Map` is to `HashDict` —
+free conversion from `[]T`, builtin syntax, working `encoding/json`, at the cost
+of the shape rules. Deferred to its own ADR rather than bundled here.
+
+### A sequence contract, once there is a second sequence
+
+`MutableSeq[T]` with `At`, `Set` and `Append` would complete ADR `0008`'s
+pattern, but one implementation cannot show what the contract should say.
+Revisit when `LinkedList` (ADR `0010`) lands, and not before.
