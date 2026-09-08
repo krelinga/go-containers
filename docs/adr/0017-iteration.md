@@ -120,19 +120,36 @@ the shape problem — **cannot build one**.
 
 From `experiments/iteration/`.
 
-### Converting between shapes is free
+### Converting between shapes is free only when the discarded half is small
 
-| | | allocs |
-|---|---|---|
-| `Values`, native | 1.167 µs | 0 |
-| `Values`, derived from an `All` | **1.160 µs** | 0 |
-| `Keys`, derived from an `All` | 1.154 µs | 0 |
-| `All`, derived from a `Values` | 1.278 µs (+6.5%) | 0 |
+With `int` elements, deriving one shape from another looks free — `Values` from
+an `All` costs nothing measurable, `Keys` likewise, inventing an index costs
+6.5%, and none of them allocate.
 
-Wrapping an iterator in another iterator costs nothing measurable and never
-allocates. Dropping a key or a value is free; inventing an index costs the
-counter. **Problem 1 is not a performance problem** — any shape can be produced
-from any other, by a free function, at no cost a caller would notice.
+**That does not generalise.** An `iter.Seq2` passes its value *by value* into
+`yield`, so a consumer that drops it has already paid for the copy. At 256
+elements, per element:
+
+| element width | `Keys` native | `Keys` derived, value dropped | value actually consumed |
+|---|---|---|---|
+| 64 B | 1.31 ns | 3.31 ns (**2.5x**) | 3.30 ns |
+| 1 KiB | 1.20 ns | 17.9 ns (**14.9x**) | 23.7 ns |
+| 8 KiB | 1.19 ns | 72.8 ns (**61x**) | 102.4 ns |
+
+A native key walk is **flat** at ~1.2 ns per element, because it never touches
+the value. A derived one scales at memory bandwidth. And **dropping a value costs
+70–80% of what using it would have** — a caller who wants only keys pays almost
+the full price of the data they discard.
+
+The `int` figures said otherwise because they were built from concrete,
+inlinable functions: the compiler saw the value was unused and elided the copy.
+Routing the same measurement through a **generic** interface — which is what this
+library does, `Elems2[K, V]` being generic — stops the elision. **The elision is
+real but fragile, and an API cannot rely on it.**
+
+This is also why `maps.Keys` exists in the stdlib as its own function rather than
+something derived from `maps.All`: `for k := range m` never materialises the
+value, and no wrapper around `maps.All` can avoid doing so.
 
 ### Reversing is free from inside, and expensive from outside
 
@@ -146,15 +163,24 @@ An `iter.Seq` is a *push* iterator: it yields forwards and the caller cannot ask
 for the previous element. Reversing one from outside means buffering all of it —
 3.4x, and allocation linear in the sequence.
 
-### The asymmetry, which shapes every option below
+### What can be done from outside a container, and at what price
 
-> **Shape can be converted by a free function. Direction cannot.**
+| | free function? | cost |
+|---|---|---|
+| drop a small key or value | yes | nothing |
+| drop a **wide** value | yes | ~the cost of using it |
+| invent an index | yes | ~6.5% |
+| **reverse** | **no** | buffers the whole sequence |
 
-So problem 1 can be solved in whatever way reads best, and problem 3 **must** be
-solved in the containers, because nothing else can solve it at an acceptable
-price. Every ordered container here is slice-backed, so `Backward` is free for
-all of them; a doubly-linked list would be too. The hash containers cannot offer
-it and have no order to reverse.
+A container knows its backing, so it can walk keys without materialising values
+and walk backwards without buffering. Nothing outside it can do either.
+
+**Both problems 1 and 3 therefore want methods on containers, for different
+reasons.** Problem 3 because a free function cannot do the job at all; problem 1
+because a free function can, but pays for data it throws away as soon as values
+are wide. The earlier reading of this experiment — that shape was purely an
+ergonomics question — was wrong, and the direction sketches below are graded
+against the corrected finding.
 
 ## Directions for problem 1
 
@@ -175,6 +201,12 @@ Against: it renames `All` on every set-side container, which is the most
 disruptive option here, and it means `HashDict` would satisfy `Elems[V]` via
 `Values` — collecting a dict into a set would silently take the values.
 
+**Strengthened by the corrected finding.** A native `Keys` is flat at ~1.2 ns per
+element regardless of value width, where a derived one is 14.9x that at 1 KiB.
+Native per-shape methods are a performance feature, not only an ergonomic one —
+which is exactly the reason the stdlib has `maps.Keys` rather than leaving
+callers to wrap `maps.All`.
+
 ### 1B. Keep one `All` per container; add free functions for other shapes
 
 ```go
@@ -183,9 +215,14 @@ func Values[K, V any](e Elems2[K, V]) iter.Seq[V]
 func Keys[K, V any](e Elems2[K, V]) iter.Seq[K]
 ```
 
-Cheapest change, and measured free. But it does not solve the problem: `Vector`'s
-`All` is still `Seq[T]`, so `Vector` still cannot be an `Elems2` and
+Cheapest change. **Weakened badly by the corrected finding**: free functions are
+free only for narrow values, and a `Keys` derived from an `All` over 1 KiB values
+costs 14.9x a native one. It also does not solve the problem — `Vector`'s `All`
+is still `Seq[T]`, so `Vector` still cannot be an `Elems2`, and
 `CollectHashDict(vector)` still cannot work.
+
+Free functions remain useful as a *convenience* for the narrow cases. They are
+not a substitute for a container offering the shape natively.
 
 ### 1C. Make `Elems` a value, not a contract
 
@@ -286,7 +323,9 @@ It does not decide. Three things should be settled before it becomes a decision,
 and two of them are already open elsewhere:
 
 1. **Whether `All` should mean `Seq2`**, matching the stdlib. Everything in
-   problem 1 follows from that answer.
+   problem 1 follows from that answer — and the corrected finding means the
+   answer also decides whether callers with wide values can walk keys cheaply,
+   which is a performance question rather than a naming one.
 2. **Whether `Elems` stays an interface.** ADR `0006` and `0008` assume it does.
 3. **Whether `Range` returns a view** (ADR `0013`'s follow-up) and whether the
    ordered contract tier lands (ADR `0008`'s). Problem 3's shape depends on both.
