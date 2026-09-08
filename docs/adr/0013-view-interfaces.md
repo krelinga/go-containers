@@ -199,7 +199,25 @@ priced at the time, and it should be recorded whether or not this ADR is adopted
 
 ### A. Status quo — concrete structs only
 
-Views stay as `0012` built them.
+Views stay as `0012` built them. A boundary can be declared two ways, and the
+dilemma is that neither is good:
+
+```go
+// sketch
+v := containers.ViewHashDict(d, viewer)   // concrete, free, 0 allocs
+
+render(v)   // 0 allocs -- the parameter is the concrete type
+audit(v)    // 1 alloc  -- boxes into the contract
+audit(v)    // 1 alloc  -- again, and on every call, forever
+
+// Spelled with the view type: no boxing, but *Item appears twice and the
+// signature names HashDict.
+func render(v containers.HashDictView[*Item, *Item, string, ItemView]) error
+
+// Spelled with the read contract: short, but it boxes on every call, and
+// *HashDict satisfies it too -- so handing over the container still compiles.
+func audit(v containers.Dict[string, ItemView]) error
+```
 
 - Free to construct, free to use locally, no new vocabulary.
 - Four type arguments; consumers name the implementation; forgetting the view
@@ -219,13 +237,22 @@ type DictView[K, V any] interface {
 	sealedView()
 }
 
+v := containers.ViewHashDict(d, viewer)   // returns DictView -- boxes HERE, 1 alloc
+render(v)                                 // 0 allocs, already an interface
+audit(v)                                  // 0 allocs
+v.Get("alpha")                            // 0 allocs, ~1 ns dispatch
+
 func render(v containers.DictView[string, ItemView]) error
+func audit(v containers.DictView[string, ItemView]) error
+
+// The box lands even when nothing crosses anything:
+n := containers.ViewHashDict(d, viewer).Len()   // still 1 alloc
 ```
 
 - One public name per concept. The container's types leave the API entirely.
   Consumers decouple from the implementation. Boxing becomes constant. The
   boundary type is sealed, so passing a container does not compile.
-- Every view allocates, including views that never cross a boundary (2.6x on
+- Every view allocates, including views that never cross a boundary (2.5x on
   local use). Direct calls stop inlining. The concrete type's extra methods need
   their own interfaces — `SortedDictView` must carry `Range`, `Min`, `Max`,
   `Floor`, `Ceil`, or ordered views lose them.
@@ -240,17 +267,23 @@ interfaces, intended as the type a *boundary* is declared with.
 
 ```go
 // sketch
-v := containers.ViewHashDict(d, viewer)      // concrete, free, 0 allocs
-render(v)                                     // boxes once, here
+v := containers.ViewHashDict(d, viewer)   // concrete, free, 0 allocs
+render(v)                                 // boxes once, here -- 1 alloc
+audit(v)                                  // boxes again -- 1 alloc
 
 func render(v containers.DictView[string, ItemView]) error
+func audit(v containers.DictView[string, ItemView]) error
+
+// Naming the interface once opts into B's behaviour for the rest of the frame:
+var w containers.DictView[string, ItemView] = containers.ViewHashDict(d, viewer)
+render(w)   // 0 allocs
+audit(w)    // 0 allocs
 ```
 
-- Local use keeps today's cost exactly. Boundaries get the short spelling, the
-  decoupling and the compile-time seal. A caller who crosses many boundaries can
-  opt into B's behaviour by naming the interface once
-  (`var v containers.DictView[string, ItemView] = containers.ViewHashDict(...)`),
-  and then pays one box; a caller who crosses one pays the same as today.
+- Local use keeps today's cost exactly, and boundaries get the short spelling,
+  the decoupling and the compile-time seal. Both cost profiles stay reachable:
+  a caller crossing one boundary pays what it pays today, and one crossing many
+  opts into B's single box by naming the interface once.
 - Two vocabularies for one concept, and a naming collision to resolve (below).
   The choice of when to hold which is now the caller's problem — though this
   package has consistently preferred making callers name a choice over making it
@@ -259,6 +292,21 @@ func render(v containers.DictView[string, ItemView]) error
 ### D. Pointer-shaped view structs
 
 Keep concrete types; move the fields behind one pointer so a view is one word.
+
+```go
+// sketch
+type HashDictView[K comparable, V, NK, NV any] struct {
+	b *hashDictViewBody[K, V, NK, NV]   // one word -- pointer-shaped
+}
+
+v := containers.ViewHashDict(d, viewer)   // allocates the body, elided when v does not escape
+render(v)                                 // 0 allocs
+audit(v)                                  // 0 allocs -- pointer-shaped, so boxing is free
+
+// Both signatures are exactly as they were under A. Only the cost changed.
+func render(v containers.HashDictView[*Item, *Item, string, ItemView]) error
+func audit(v containers.Dict[string, ItemView]) error   // still unsealed
+```
 
 - Fixes the whole allocation story — free to box, amortises like the interface
   (13.02 ns and 0 allocations into an interface parameter), and escape analysis
@@ -272,8 +320,19 @@ Keep concrete types; move the fields behind one pointer so a view is one word.
 ### E. Caller-side generic aliases, no library change
 
 ```go
-// sketch, in the consumer's package
+// sketch, in the CONSUMER's package -- the library is unchanged
 type ItemDictView = containers.HashDictView[*Item, *Item, string, ItemView]
+
+v := containers.ViewHashDict(d, viewer)   // concrete, free, 0 allocs
+render(v)                                 // 0 allocs
+audit(v)                                  // 1 alloc, every call -- unchanged from A
+
+func render(v ItemDictView) error                       // short, in this package only
+func audit(v containers.Dict[string, ItemView]) error   // unchanged from A
+
+// No help here: a generic consumer cannot drop the container's parameters,
+// because an alias has to fix them.
+func each[K comparable, V, NK, NV any](v containers.HashDictView[K, V, NK, NV]) error
 ```
 
 - Free, available today, and `experiments/views/` verified aliases are identical
