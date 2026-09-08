@@ -32,7 +32,7 @@ import (
 // The stronger reason is ADR 0001's: a []T field cannot be handed out
 // read-only, so an accessor over one must copy — O(n) per call, and O(n²) when
 // called in a caller's loop — or return a mutable interior. A Vector field can
-// have a view instead, at O(1) and no allocation. See VectorView.
+// have a view instead, at O(1) and no allocation. See IndexedView.
 //
 // # What it is not
 //

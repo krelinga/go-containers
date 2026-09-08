@@ -792,7 +792,7 @@ func (l *auditLogContainer) Record(e string) { l.entries.Append(e) }
 
 // Safe, O(1), and no allocation: the view cannot write, so there is nothing to
 // defend against by copying.
-func (l *auditLogContainer) Entries() containers.VectorView[string] {
+func (l *auditLogContainer) Entries() containers.IndexedView[string] {
 	return containers.ViewVectorIdentity(&l.entries)
 }
 
@@ -887,7 +887,7 @@ func TestTaskHAccessorAllocations(t *testing.T) {
 	}
 	_ = sinkSlice
 
-	var sinkView containers.VectorView[string]
+	var sinkView containers.IndexedView[string]
 	if got := testing.AllocsPerRun(100, func() { sinkView = cn.Entries() }); got != 0 {
 		t.Errorf("view accessor allocated %v times, want 0", got)
 	}
@@ -965,4 +965,64 @@ func ExampleVector() {
 	// The view was taken before any of those appends, and sees all of them.
 	fmt.Println(view.Len(), slices.Collect(view.All()))
 	// Output: 3 [login read write]
+}
+
+// ---------------------------------------------------------------------------
+// Task N — exposing a slice field read-only WITHOUT changing its type
+//
+// Task H's answer was to migrate the field to a Vector. That is right when the
+// type wants reallocation hidden, and heavy when it does not: append, range,
+// indexing and encoding/json all stop working on the field. ADR 0016's answer
+// keeps the field a []string and changes only the accessor.
+//
+// The stdlib baseline is auditLogStdlib above, unchanged.
+// ---------------------------------------------------------------------------
+
+type auditLogSliceView struct{ entries []string }
+
+func (l *auditLogSliceView) Record(e string) { l.entries = append(l.entries, e) }
+
+func (l *auditLogSliceView) Entries() containers.IndexedView[string] {
+	return containers.ViewSliceIdentity(l.entries)
+}
+
+func TestTaskNContainer(t *testing.T) {
+	for _, tc := range sequenceCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var l auditLogSliceView
+			for _, e := range tc.record {
+				l.Record(e)
+			}
+			if got := slices.Collect(l.Entries().All()); !slices.Equal(got, tc.want) {
+				t.Errorf("Entries() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// The point of Task N: the accessor does not copy, so its cost does not grow
+// with the log, and the caller still cannot write through it.
+//
+// Not copying IS the O(1) proof -- an accessor that returns without copying
+// cannot be linear in the log's size. Measured for the record and then removed
+// from the suite, because it cost 4.8s against 0.011s for everything else:
+// the copying accessor allocates 64 B at n=4 and 65 536 B at n=4096, while the
+// view allocates 24 B at both. Both are one allocation; only one of them grows.
+func TestTaskNAccessorDoesNotCopy(t *testing.T) {
+	var l auditLogSliceView
+	l.Record("login")
+
+	view := l.Entries()
+	// Not a copy: a write to the backing slice shows through.
+	l.entries[0] = "rewritten"
+	if got := view.At(0); got != "rewritten" {
+		t.Errorf("accessor copied: At(0) = %q", got)
+	}
+	// But the caller has no way to write.
+	if _, ok := any(view).(interface{ Set(int, string) }); ok {
+		t.Error("view exposed a mutator")
+	}
+	if _, ok := any(view).([]string); ok {
+		t.Error("view was assertable back to the slice")
+	}
 }

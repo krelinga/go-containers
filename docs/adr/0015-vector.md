@@ -231,8 +231,9 @@ sequence and a type cannot have both.
 ### 5. It satisfies `Elems[T]`, and gets a view
 
 Per ADR `0011`, a container is not finished without a view; per `0013`, that view
-is a sealed interface. A sequence fits none of the existing four, so it needs a fifth, named
-`VectorView`:
+is a sealed interface. A sequence fits none of the existing four, so it needs a fifth. **ADR `0016`
+renames it to `IndexedView`**, on the grounds that it acquired a second producer
+that is not a `Vector`; the shape below is unchanged.
 
 ```go
 type VectorView[NT any] interface {

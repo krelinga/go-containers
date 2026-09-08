@@ -1,7 +1,7 @@
 # 16. A view over a plain slice, and no `Slice` type
 
-- **Status:** Accepted. Not yet implemented, so this constrains the change
-  rather than describing it. Note that it changed subject while being written:
+- **Status:** Accepted and implemented. Note that it changed subject while being
+  written:
   it set out to propose `Slice[T] []T` and the measurements turned it into a
   proposal to add a view and no type. The rejected adapter is kept in full below.
 - **Date:** 2026-09-08

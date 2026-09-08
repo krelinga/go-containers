@@ -35,7 +35,7 @@ import (
 // them and add the ordered reads, so a sorted view can be passed wherever the
 // unordered one is wanted. A Map's view and a HashDict's view are the same type.
 //
-// VectorView stands alone. A sequence is neither: its reads are positional, so
+// IndexedView stands alone. A sequence is neither: its reads are positional, so
 // it cannot be a SetView, and giving it a DictView keyed by int would make All
 // yield pairs, which collides with Elems[T].
 //
@@ -138,7 +138,7 @@ type SortedDictView[K cmp.Ordered, NV any] interface {
 	Ceil(K) (K, NV, bool)
 }
 
-// VectorView is a read-only view of a Vector, with elements converted by a
+// IndexedView is a read-only view of a Vector, with elements converted by a
 // viewer.
 //
 // It is the answer to ADR 0001's accessor problem for sequences: a type holding
@@ -150,7 +150,7 @@ type SortedDictView[K cmp.Ordered, NV any] interface {
 // not a key the caller supplied — so At takes an int on both sides.
 //
 // Sealed: only this package's view types satisfy it.
-type VectorView[NT any] interface {
+type IndexedView[NT any] interface {
 	Elems[NT]
 
 	// At returns the element at i, converted. It panics if i is out of range.
@@ -409,6 +409,119 @@ func (v mapIdentityView[K, V]) Get(k K) (V, bool)    { return v.m.Get(k) }
 func (v mapIdentityView[K, V]) All() iter.Seq2[K, V] { return v.m.All() }
 
 // ---------------------------------------------------------------------------
+// Slice
+// ---------------------------------------------------------------------------
+//
+// A view over a plain slice, which is the only way to hand one out read-only
+// without copying it. See ADR 0016.
+//
+// # It views a slice, not a variable
+//
+// The constructor takes []T rather than *[]T, because a slice is a value: Go's
+// append returns a value the caller must rebind, and a reallocated slice is a
+// new slice, not the same one. ADR 0015 exists because of that — a Vector is
+// what gives a sequence identity across reallocation.
+//
+// So the view holds the slice it was given, and two things follow. A write to an
+// element is visible through it, because it wraps that element — the same rule
+// every other view in this package follows. An **append is not**, because an
+// append produces a different slice value, which this view was never given:
+//
+//	hosts := []string{"a"}
+//	v := containers.ViewSliceIdentity(hosts)
+//	hosts[0] = "z"                  // v.At(0) == "z"
+//	hosts = append(hosts, "b")      // v.Len() == 1, still
+//
+// If you want a sequence whose growth is visible to everyone holding it, that is
+// what Vector is for.
+//
+// # Cost
+//
+// One allocation per view, unlike every other view here. A slice header is three
+// words, so it is not pointer-shaped and boxes into the interface. That is the
+// price of viewing a value rather than a container, and it is unavoidable:
+// taking the address of the parameter escapes and allocates too.
+//
+// A nil slice makes a valid, empty view, exactly as a nil slice is a valid empty
+// slice.
+
+type sliceView[T, NT any] struct {
+	s      []T
+	viewer CanViewSlice[T, NT]
+}
+
+// ViewSlice returns a read-only view of s, converting elements through viewer.
+func ViewSlice[T, NT any](s []T, viewer CanViewSlice[T, NT]) IndexedView[NT] {
+	return sliceView[T, NT]{s, viewer}
+}
+
+func (v sliceView[T, NT]) sealedView() {}
+func (v sliceView[T, NT]) Len() int    { return len(v.s) }
+
+func (v sliceView[T, NT]) At(i int) NT { return v.viewer.ToValueView(v.s[i]) }
+
+func (v sliceView[T, NT]) All() iter.Seq[NT] {
+	es, vw := v.s, v.viewer
+	if vw == nil {
+		panic("containers: view has no viewer")
+	}
+	return func(yield func(NT) bool) {
+		for _, e := range es {
+			if !yield(vw.ToValueView(e)) {
+				return
+			}
+		}
+	}
+}
+
+func (v sliceView[T, NT]) AllIndexed() iter.Seq2[int, NT] {
+	es, vw := v.s, v.viewer
+	if vw == nil {
+		panic("containers: view has no viewer")
+	}
+	return func(yield func(int, NT) bool) {
+		for i, e := range es {
+			if !yield(i, vw.ToValueView(e)) {
+				return
+			}
+		}
+	}
+}
+
+type sliceIdentityView[T any] struct{ s []T }
+
+// ViewSliceIdentity returns a read-only view of s that converts nothing.
+func ViewSliceIdentity[T any](s []T) IndexedView[T] {
+	return sliceIdentityView[T]{s}
+}
+
+func (v sliceIdentityView[T]) sealedView() {}
+func (v sliceIdentityView[T]) Len() int    { return len(v.s) }
+func (v sliceIdentityView[T]) At(i int) T  { return v.s[i] }
+
+func (v sliceIdentityView[T]) All() iter.Seq[T] {
+	es := v.s
+	return func(yield func(T) bool) {
+		for _, e := range es {
+			if !yield(e) {
+				return
+			}
+		}
+	}
+}
+
+func (v sliceIdentityView[T]) AllIndexed() iter.Seq2[int, T] {
+	es := v.s
+	return func(yield func(int, T) bool) {
+		for i, e := range es {
+			if !yield(i, e) {
+				return
+			}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 
@@ -457,7 +570,7 @@ type vectorView[T, NT any] struct {
 }
 
 // ViewVector returns a read-only view of vec, converting elements through viewer.
-func ViewVector[T, NT any](vec *Vector[T], viewer CanViewVector[T, NT]) VectorView[NT] {
+func ViewVector[T, NT any](vec *Vector[T], viewer CanViewVector[T, NT]) IndexedView[NT] {
 	return vectorView[T, NT]{vec, viewer}
 }
 
@@ -491,7 +604,7 @@ func (v vectorView[T, NT]) AllIndexed() iter.Seq2[int, NT] {
 type vectorIdentityView[T any] struct{ vec *Vector[T] }
 
 // ViewVectorIdentity returns a read-only view of vec that converts nothing.
-func ViewVectorIdentity[T any](vec *Vector[T]) VectorView[T] {
+func ViewVectorIdentity[T any](vec *Vector[T]) IndexedView[T] {
 	return vectorIdentityView[T]{vec}
 }
 

@@ -15,8 +15,9 @@ beside it:
 | `sorteddict.go` | `SortedDict[K cmp.Ordered, V any]` | sorted slice |
 | `map.go` | `Map[K comparable, V any]` | a defined `map[K]V` — an **adapter**, not a default |
 | `vector.go` | `Vector[T any]` | an owned slice, insertion-ordered (ADR `0015`) |
+| — | *(no `Slice` type)* | a plain `[]T` gets a view instead (ADR `0016`) |
 | `contracts.go` | the interfaces below | — |
-| `views.go` | `SetView`, `DictView`, `SortedSetView`, `SortedDictView`, `VectorView` | sealed read-only interfaces (ADRs `0011`, `0012`, `0013`, `0015`) |
+| `views.go` | `SetView`, `DictView`, `SortedSetView`, `SortedDictView`, `IndexedView` | sealed read-only interfaces (ADRs `0011`, `0012`, `0013`, `0015`, `0016`) |
 | `viewers.go` | `KeyViewer`, `ValueViewer`, the `CanView<Container>` set | the conversions a view applies (ADR `0012`) |
 
 Contracts come in two layers (ADR `0008`, narrowed by `0013`):
@@ -97,8 +98,20 @@ to a plain `go test` — a shallow-copy `Clone` that silently shares the underly
   and `0013`; `views.go`, `viewers.go`). Build one with `View<Container>(c, viewer)`, or
   `View<Container>Identity(c)` to convert nothing. A constructor returns a **sealed interface** —
   `SetView[NT]` or `DictView[NK, NV]`, the `Sorted*` forms which embed those and add the ordered
-  reads, or `VectorView[NT]`, which stands alone because a sequence's reads are positional. The
+  reads, or `IndexedView[NT]`, which stands alone because a sequence's reads are positional. The
   concrete structs are unexported and may change.
+- **A plain `[]T` has a view too, and it views a *value*** (ADR `0016`). `ViewSlice(s)` takes a
+  slice, not `*[]T`, because a slice is a value and a reallocated slice is a new slice — which is
+  exactly why `Vector` exists. So an element write is visible through the view and an **append is
+  not**: the append made a different slice value the view was never given. It is the one view that
+  costs an allocation, a slice header being three words. Reach for it to expose a `[]T` field
+  read-only without changing the field's type; reach for `Vector` when growth must be visible to
+  every holder.
+- **`IndexedView` is named for the capability, and `ListView` is its declared destination**
+  (ADR `0016`). A list is position/value pairs whose position type varies — `int` here, a cursor
+  for `LinkedList` — so the general contract is `ListView[P, NT]`, and `IndexedView[NT]` becomes
+  a generic alias for `ListView[int, NT]` when that lands. `ListView` is deliberately unclaimed
+  until then, for the reason ADR `0010` gives for not calling itself `List`.
   The seal is one unexported method, and it works in both directions at compile time: a container
   cannot be passed where a view is expected (`missing method sealedView`), and a view cannot be
   asserted back to its container (`impossible type assertion`).
@@ -130,7 +143,7 @@ to a plain `go test` — a shallow-copy `Clone` that silently shares the underly
 - **`Vector` is not a replacement for `[]T`** (ADR `0015`). It earns its place at an API
   boundary, where a `[]T` field cannot be handed out read-only and an accessor over one must copy
   — O(n) per call, O(n²) in a caller's loop — or return a mutable interior. A `Vector` field hands
-  out a `VectorView` at O(1) and no allocation. It is *worse* than a slice for local code:
+  out a `IndexedView` at O(1) and no allocation. It is *worse* than a slice for local code:
   an indexed loop costs ~24% because bounds-check elimination does not survive `At`, and ranging
   `All` costs ~6x a raw range. Two of ADR `0015`'s four call-site tasks are recorded as
   explicitly **not** wins so they are not cited as motivation later.

@@ -106,3 +106,17 @@ func (IdentityValueViewer[V]) ToValueView(v V) V { return v }
 type CanViewVector[T, NT any] interface {
 	ValueViewer[T, NT]
 }
+
+// CanViewSlice is what ViewSlice requires.
+//
+// Values only, for the reason given on CanViewVector: a slice is indexed by int,
+// and an index is a position rather than a key the caller supplied.
+//
+// It is structurally identical to CanViewVector and separate from it on purpose.
+// These interfaces are named for the constructor that requires them, so that
+// failing to satisfy one names the operation you cannot perform rather than the
+// structural property you lack. CanViewHashDict and CanViewMap are identical to
+// each other on the same grounds. See ADR 0012.
+type CanViewSlice[T, NT any] interface {
+	ValueViewer[T, NT]
+}

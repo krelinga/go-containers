@@ -269,13 +269,13 @@ func TestEveryContainerHasAView(t *testing.T) {
 	}
 }
 
-// ---- VectorView (ADR 0015 decision 5) --------------------------------------
+// ---- IndexedView (ADR 0015 decision 5) --------------------------------------
 
 type itemValuesOnly struct{}
 
 func (itemValuesOnly) ToValueView(i *item) itemView { return itemView{i} }
 
-func TestVectorViewConvertsElements(t *testing.T) {
+func TestIndexedViewConvertsElements(t *testing.T) {
 	v := containers.NewVector(&item{Name: "first"}, &item{Name: "second"})
 	view := containers.ViewVector(v, itemValuesOnly{})
 
@@ -299,7 +299,7 @@ func TestVectorViewConvertsElements(t *testing.T) {
 // form must not allocate.
 func TestVectorIdentityViewDoesNotAllocate(t *testing.T) {
 	v := containers.NewVector(1, 2, 3)
-	var sink containers.VectorView[int]
+	var sink containers.IndexedView[int]
 	if got := testing.AllocsPerRun(100, func() { sink = containers.ViewVectorIdentity(v) }); got != 0 {
 		t.Errorf("ViewVectorIdentity: %v allocs, want 0", got)
 	}
@@ -310,9 +310,9 @@ func TestVectorIdentityViewDoesNotAllocate(t *testing.T) {
 
 // The seal, and the fact that a view carries no way to write.
 //
-//	var _ containers.VectorView[int] = containers.NewVector(1)
-//	  -> *Vector[int] does not implement VectorView[int] (missing method sealedView)
-func TestVectorViewIsSealed(t *testing.T) {
+//	var _ containers.IndexedView[int] = containers.NewVector(1)
+//	  -> *Vector[int] does not implement IndexedView[int] (missing method sealedView)
+func TestIndexedViewIsSealed(t *testing.T) {
 	v := containers.NewVector(1, 2)
 	view := containers.ViewVectorIdentity(v)
 
@@ -327,13 +327,13 @@ func TestVectorViewIsSealed(t *testing.T) {
 	}
 }
 
-func TestVectorViewNilAndEagerness(t *testing.T) {
-	var zero containers.VectorView[int]
+func TestIndexedViewNilAndEagerness(t *testing.T) {
+	var zero containers.IndexedView[int]
 	if zero != nil {
 		t.Error("a zero view should be a nil interface")
 	}
-	mustPanic(t, "VectorView.Len", func() { _ = zero.Len() })
-	mustPanic(t, "VectorView.At", func() { _ = zero.At(0) })
+	mustPanic(t, "IndexedView.Len", func() { _ = zero.Len() })
+	mustPanic(t, "IndexedView.At", func() { _ = zero.At(0) })
 
 	mustPanic(t, "vectorIdentityView.All", func() {
 		_ = containers.ViewVectorIdentity[int](nil).All()
@@ -344,4 +344,120 @@ func TestVectorViewNilAndEagerness(t *testing.T) {
 	mustPanic(t, "vectorView.AllIndexed", func() {
 		_ = containers.ViewVector[*item, itemView](nil, itemValuesOnly{}).AllIndexed()
 	})
+}
+
+// ---- ViewSlice (ADR 0016) --------------------------------------------------
+
+func TestSliceViewConvertsElements(t *testing.T) {
+	s := []*item{{Name: "first"}, {Name: "second"}}
+	view := containers.ViewSlice(s, itemValuesOnly{})
+
+	if view.Len() != 2 {
+		t.Errorf("Len = %d, want 2", view.Len())
+	}
+	if got := view.At(1).Name(); got != "second" {
+		t.Errorf("At(1).Name() = %q", got)
+	}
+	var names []string
+	for _, e := range view.AllIndexed() {
+		names = append(names, e.Name())
+	}
+	if !slices.Equal(names, []string{"first", "second"}) {
+		t.Errorf("AllIndexed = %v", names)
+	}
+}
+
+// It views a slice, not a variable (ADR 0016 decision 2). An element write is
+// visible because the view wraps that element; an append is not, because it
+// produces a different slice value the view was never given.
+func TestSliceViewViewsAValueNotAVariable(t *testing.T) {
+	hosts := make([]string, 1, 4)
+	hosts[0] = "original"
+	v := containers.ViewSliceIdentity(hosts)
+
+	hosts[0] = "rewritten"
+	if got := v.At(0); got != "rewritten" {
+		t.Errorf("element write not visible: At(0) = %q, want %q", got, "rewritten")
+	}
+
+	hosts = append(hosts, "appended") // within capacity
+	if v.Len() != 1 {
+		t.Errorf("append became visible: Len = %d, want 1", v.Len())
+	}
+
+	// And once the owner reallocates, the value this view holds is untouched.
+	hosts = append(hosts, "b", "c", "d", "e") // forces a new backing array
+	hosts[0] = "written after realloc"
+	if got := v.At(0); got != "rewritten" {
+		t.Errorf("view followed the reallocation: At(0) = %q", got)
+	}
+}
+
+// A nil slice is a valid empty slice, so it makes a valid empty view.
+func TestSliceViewOfNil(t *testing.T) {
+	v := containers.ViewSliceIdentity[string](nil)
+	if v.Len() != 0 {
+		t.Errorf("Len = %d, want 0", v.Len())
+	}
+	if got := slices.Collect(v.All()); len(got) != 0 {
+		t.Errorf("All = %v, want empty", got)
+	}
+	mustPanic(t, "At on an empty view", func() { _ = v.At(0) })
+}
+
+// A slice view costs one allocation, where every other view here costs none.
+// Asserted so the cost is visible if it ever changes in either direction.
+func TestSliceViewAllocatesOnce(t *testing.T) {
+	s := []int{1, 2, 3}
+	var sink containers.IndexedView[int]
+	if got := testing.AllocsPerRun(100, func() { sink = containers.ViewSliceIdentity(s) }); got != 1 {
+		t.Errorf("ViewSliceIdentity: %v allocs, want 1 (a slice header is three words)", got)
+	}
+	if sink.Len() != 3 {
+		t.Errorf("Len = %d", sink.Len())
+	}
+}
+
+// The seal, and the absence of any way to write. A bare slice cannot be passed
+// as a view:
+//
+//	var _ containers.IndexedView[int] = []int{1}
+//	  -> []int does not implement IndexedView[int] (missing method All)
+//
+// The compiler names All rather than sealedView because a slice is missing
+// several methods and reports the first. The seal is still what makes the type
+// unforgeable from outside the package; it is just not what the error says here.
+func TestSliceViewIsSealed(t *testing.T) {
+	view := containers.ViewSliceIdentity([]int{1, 2})
+
+	if _, ok := any(view).([]int); ok {
+		t.Error("view was assertable back to its slice")
+	}
+	if _, ok := any(view).(interface{ Set(int, int) }); ok {
+		t.Error("view exposed a mutator")
+	}
+}
+
+func TestSliceViewEagerness(t *testing.T) {
+	// A nil viewer must fail at the call, not at iteration.
+	mustPanic(t, "sliceView.All with a nil viewer", func() {
+		_ = containers.ViewSlice[*item, itemView](nil, nil).All()
+	})
+	mustPanic(t, "sliceView.AllIndexed with a nil viewer", func() {
+		_ = containers.ViewSlice[*item, itemView](nil, nil).AllIndexed()
+	})
+}
+
+// Both sequence producers satisfy the same interface, so a consumer names
+// neither of them.
+func TestBothSequenceViewsSatisfyIndexedView(t *testing.T) {
+	vec := containers.NewVector("a", "b")
+	for name, v := range map[string]containers.IndexedView[string]{
+		"Vector": containers.ViewVectorIdentity(vec),
+		"slice":  containers.ViewSliceIdentity([]string{"a", "b"}),
+	} {
+		if v.Len() != 2 || v.At(0) != "a" {
+			t.Errorf("%s: Len=%d At(0)=%q", name, v.Len(), v.At(0))
+		}
+	}
 }
