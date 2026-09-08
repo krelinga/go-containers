@@ -786,6 +786,16 @@ func (l *auditLogStdlib) Record(e string) { l.entries = append(l.entries, e) }
 // Safe, and O(n) on every call.
 func (l *auditLogStdlib) Entries() []string { return slices.Clone(l.entries) }
 
+type auditLogContainer struct{ entries containers.Vector[string] }
+
+func (l *auditLogContainer) Record(e string) { l.entries.Append(e) }
+
+// Safe, O(1), and no allocation: the view cannot write, so there is nothing to
+// defend against by copying.
+func (l *auditLogContainer) Entries() containers.VectorView[string] {
+	return containers.ViewVectorIdentity(&l.entries)
+}
+
 // ---------------------------------------------------------------------------
 // Task I — accumulating across a function boundary
 //
@@ -795,6 +805,11 @@ func (l *auditLogStdlib) Entries() []string { return slices.Clone(l.entries) }
 
 func addDefaultsStdlib(out []string, defaults ...string) []string {
 	return append(out, defaults...)
+}
+
+// The callee appends in place. There is no return value to forget.
+func addDefaultsContainer(out *containers.Vector[string], defaults ...string) {
+	out.AppendAllSeq(slices.Values(defaults))
 }
 
 // ---------------------------------------------------------------------------
@@ -826,6 +841,20 @@ func TestTaskHStdlib(t *testing.T) {
 	}
 }
 
+func TestTaskHContainer(t *testing.T) {
+	for _, tc := range sequenceCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var l auditLogContainer
+			for _, e := range tc.record {
+				l.Record(e)
+			}
+			if got := slices.Collect(l.Entries().All()); !slices.Equal(got, tc.want) {
+				t.Errorf("Entries() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // The property the container version must also have: what the accessor hands
 // back cannot be used to corrupt the log.
 func TestTaskHStdlibAccessorDoesNotLeak(t *testing.T) {
@@ -840,18 +869,50 @@ func TestTaskHStdlibAccessorDoesNotLeak(t *testing.T) {
 	}
 }
 
-// ADR 0001's guardrail. The stdlib accessor must copy to be safe, so it
-// allocates on every call, and the cost grows with the log.
-func TestTaskHStdlibAccessorAllocates(t *testing.T) {
-	var l auditLogStdlib
+// ADR 0001's guardrail, and the whole point of Task H. The stdlib accessor must
+// copy to be safe, so it allocates on every call and the cost grows with the
+// log; the container's hands out a view and allocates nothing, at any size.
+func TestTaskHAccessorAllocations(t *testing.T) {
+	var sl auditLogStdlib
+	var cn auditLogContainer
 	for i := range 64 {
-		l.Record(fmt.Sprint(i))
+		e := fmt.Sprint(i)
+		sl.Record(e)
+		cn.Record(e)
 	}
-	var sink []string
-	if got := testing.AllocsPerRun(100, func() { sink = l.Entries() }); got == 0 {
+
+	var sinkSlice []string
+	if got := testing.AllocsPerRun(100, func() { sinkSlice = sl.Entries() }); got == 0 {
 		t.Errorf("expected the copying accessor to allocate, got %v", got)
 	}
-	_ = sink
+	_ = sinkSlice
+
+	var sinkView containers.VectorView[string]
+	if got := testing.AllocsPerRun(100, func() { sinkView = cn.Entries() }); got != 0 {
+		t.Errorf("view accessor allocated %v times, want 0", got)
+	}
+	if sinkView.Len() != 64 {
+		t.Errorf("Len = %d, want 64", sinkView.Len())
+	}
+}
+
+// The stdlib version is safe only because it copies. The container version is
+// safe because the view has no way to write at all -- there is no Set, no
+// Append, and no path back to the Vector.
+func TestTaskHContainerAccessorCannotWrite(t *testing.T) {
+	var l auditLogContainer
+	l.Record("login")
+
+	got := l.Entries()
+	if _, ok := any(got).(interface{ Set(int, string) }); ok {
+		t.Error("view exposed Set")
+	}
+	if _, ok := any(got).(*containers.Vector[string]); ok {
+		t.Error("view was assertable back to the Vector")
+	}
+	if got.At(0) != "login" {
+		t.Errorf("At(0) = %q", got.At(0))
+	}
 }
 
 func TestTaskIStdlib(t *testing.T) {
@@ -864,13 +925,44 @@ func TestTaskIStdlib(t *testing.T) {
 	}
 }
 
-// The footgun the container version removes: the callee's work is lost unless
-// the caller reassigns, and nothing at the call site says so.
-func TestTaskIStdlibForgettingTheAssignmentIsSilent(t *testing.T) {
-	out := make([]string, 0, 8) // spare capacity, so nothing reallocates
-	addDefaultsStdlib(out, "a", "b")
+func TestTaskIContainer(t *testing.T) {
+	out := containers.NewVector("explicit")
+	addDefaultsContainer(out, "a", "b")
 
-	if len(out) != 0 {
-		t.Fatalf("expected the append to be lost, got %v", out)
+	want := []string{"explicit", "a", "b"}
+	if got := slices.Collect(out.All()); !slices.Equal(got, want) {
+		t.Errorf("addDefaultsContainer = %v, want %v", got, want)
 	}
+}
+
+// The footgun the container version removes: with a slice the callee's work is
+// lost unless the caller reassigns, and nothing at the call site says so. With
+// a Vector there is no return value to forget.
+func TestTaskIForgettingTheAssignment(t *testing.T) {
+	sl := make([]string, 0, 8) // spare capacity, so nothing reallocates
+	addDefaultsStdlib(sl, "a", "b")
+	if len(sl) != 0 {
+		t.Fatalf("expected the stdlib append to be lost, got %v", sl)
+	}
+
+	cn := containers.NewVector[string]()
+	addDefaultsContainer(cn, "a", "b")
+	if cn.Len() != 2 {
+		t.Errorf("container append was lost: Len = %d, want 2", cn.Len())
+	}
+}
+
+// A Vector accessor keeps working across the reallocations that would split
+// two holders of a slice header.
+func ExampleVector() {
+	var log containers.Vector[string]
+	view := containers.ViewVectorIdentity(&log)
+
+	for _, e := range []string{"login", "read", "write"} {
+		log.Append(e) // reallocates as it grows
+	}
+
+	// The view was taken before any of those appends, and sees all of them.
+	fmt.Println(view.Len(), slices.Collect(view.All()))
+	// Output: 3 [login read write]
 }
