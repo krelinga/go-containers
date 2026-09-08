@@ -501,11 +501,12 @@ once per batch.
 It belongs in the mutator-consistency work rather than here, because the same
 question applies to `SortedSet.AddAll` and every other `*All` in the package.
 
-### The iteration contracts want their own ADR
+### The iteration contracts want their own ADR — now ADR `0017`
 
-Several findings across ADRs `0013`, `0015` and this one point at the same place,
-and they are collected here so the ADR that takes them on does not have to
-rediscover them.
+Several findings across ADRs `0013`, `0015` and this one point at the same place.
+They were collected here and have since been **absorbed into ADR `0017`**, which
+states them as three problems with evidence. The summary below is kept as the
+trail that led there.
 
 **A type has one `All`, so `Elems[T]` and `Elems2[K, V]` are mutually
 exclusive.** This is the root of most of the rest:

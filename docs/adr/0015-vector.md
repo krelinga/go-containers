@@ -319,7 +319,7 @@ container exists to remove.
 
 ## Follow-ups
 
-### Make bulk mutators consistent across the map-backed containers
+### Make bulk mutators consistent across the map-backed containers — now ADR `0017`, problem 2
 
 Proposing `Append`/`AppendAll`/`AppendAllSeq` exposed that the existing
 containers already disagree with each other:
