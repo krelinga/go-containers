@@ -24,7 +24,13 @@
 // view's boundary crossing free in leaf code. This measures inlinable and
 // non-inlinable consumers separately, because the answer differs.
 //
-// Third, whether a pointer-shaped view is a third option: it boxes for free
+// Third, what passing actually costs, separated from constructing and from
+// boxing. Argument width turns out not to be the expense at all, and the
+// allocation has a narrower trigger than "it escaped" -- which also settles
+// whether an interface-returning constructor boxes per call or per constructor
+// call.
+//
+// Fourth, whether a pointer-shaped view is a third option: it boxes for free
 // like the type-parameter witness in the views experiment, but unlike that
 // witness it can carry a stateful viewer, which ADR 0012's FromKeyView needs.
 //

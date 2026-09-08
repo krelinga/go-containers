@@ -82,46 +82,101 @@ A view built once and passed across *n* boundaries:
 
 | crossings | concrete struct (today) | sealed interface | pointer-shaped struct |
 |---|---|---|---|
-| 1 | 30.36 ns, **1 alloc** | 30.20 ns, 1 alloc | 28.53 ns, 1 alloc |
-| 2 | 59.25 ns, **2 allocs** | 43.15 ns, 1 alloc | 40.91 ns, 1 alloc |
-| 4 | 118.5 ns, **4 allocs** | 69.97 ns, 1 alloc | 67.57 ns, 1 alloc |
-| 8 | 234.8 ns, **8 allocs** | 127.4 ns, 1 alloc | 123.9 ns, 1 alloc |
+| 1 | 32.05 ns, **1 alloc** | 32.04 ns, 1 alloc | 29.98 ns, 1 alloc |
+| 2 | 62.99 ns, **2 allocs** | 46.33 ns, 1 alloc | 44.09 ns, 1 alloc |
+| 4 | 125.5 ns, **4 allocs** | 75.69 ns, 1 alloc | 72.63 ns, 1 alloc |
+| 8 | 248.2 ns, **8 allocs** | 140.1 ns, 1 alloc | 135.3 ns, 1 alloc |
 
 `0012`'s view is 24 bytes — a container pointer plus a two-word viewer — so it
 is not pointer-shaped and re-boxes at every crossing. An interface boxes once.
 
-Marginally, one more crossing costs **13.9 ns** through an interface and
-**29.2 ns** through the concrete struct: **boxing roughly doubles the cost of a
+Marginally, one more crossing costs **15.4 ns** through an interface and
+**30.9 ns** through the concrete struct: **boxing roughly doubles the cost of a
 boundary crossing.** Crossover is at two crossings; at one they are
 indistinguishable, because both pay exactly one box.
 
 So the answer to "how much would an interface cost in boxing" is **negative**.
-Dispatch is 0.7 ns (`dispatch`); the allocation it removes is 13 ns. At a
-boundary the interface is never slower than what `0012` has today.
+Dispatch is ~1 ns; the allocation it removes is ~16 ns. At a boundary the
+interface is never slower than what `0012` has today.
 
 ### Escape analysis rescues the concrete form only where a view is pointless
 
 | | |
 |---|---|
-| consumer not inlinable | 29.27 ns, **1 alloc** |
-| consumer inlinable | 11.72 ns, **0 allocs** |
-| direct call, no interface at all | 12.04 ns, 0 allocs |
+| consumer not inlinable | 29.17 ns, **1 alloc** |
+| consumer inlinable | 11.76 ns, **0 allocs** |
+| direct call, no interface at all | 11.85 ns, 0 allocs |
 
-When the box cannot outlive the frame it goes on the stack and costs nothing.
-That rescue is gone as soon as the callee is in another package, is too large to
-inline, or retains the value — which describes an API boundary. **The concrete
-view is free exactly where nobody needs a view, and allocates exactly where
-someone does.**
+When the consumer inlines, the compiler devirtualises the call and needs no box.
+That rescue is gone as soon as the callee is in another package and too large to
+inline — which describes an API boundary.
+
+The mechanism is narrower than "it escaped", and the next finding pins it down:
+non-inlinability alone does not allocate. **The concrete view is free exactly
+where nobody needs a view, and allocates exactly where someone does.**
+
+### Passing is free at every width; dispatching through a box is what costs
+
+Width is not the expense. With every value built once and the callee ignoring
+its argument, one word, two words and three words are indistinguishable from a
+call taking no argument at all — they ride in registers:
+
+| argument, callee ignores it | | allocs |
+|---|---|---|
+| nothing (the floor) | 0.899 ns | 0 |
+| 1-word struct, concrete parameter | 0.935 ns | 0 |
+| 2-word interface, interface parameter | 0.905 ns | 0 |
+| 3-word struct, concrete parameter | 0.908 ns | 0 |
+| 3-word struct **into an interface parameter** | 1.072 ns | **0** |
+| interface into a *different* interface parameter | 1.345 ns | 0 |
+
+Boxing a 3-word struct allocates nothing here. Now have the callee call one
+method through the parameter, which is what a boundary does:
+
+| argument, callee calls `Get` once | | allocs |
+|---|---|---|
+| 1-word struct, concrete parameter | 12.33 ns | 0 |
+| 3-word struct, concrete parameter | 12.67 ns | 0 |
+| 1-word struct into an interface parameter | 13.02 ns | 0 |
+| 2-word interface, interface parameter | 13.61 ns | 0 |
+| interface into a *different* interface parameter | 13.83 ns | 0 |
+| **3-word struct into an interface parameter** | **29.05 ns** | **1** |
+
+So passing an interface costs ~1.3 ns over passing a concrete struct — that is
+dispatch, and it is the whole of it. The 16 ns is allocating a non-pointer-shaped
+receiver so a method can be dispatched through it: the itab takes the receiver as
+one pointer, the dynamic target is opaque, so a 3-word value must be copied to
+the heap. A 1-word receiver needs no copy, because it *is* the pointer.
+
+Interface-to-interface conversion — a `DictView` passed to a parameter typed
+`Dict` — costs ~0.45 ns and no allocation.
+
+### Only an interface can amortise the box
+
+A view built once and reused, against one rebuilt per call:
+
+| | | allocs |
+|---|---|---|
+| interface, rebuilt each call | 30.33 ns | 1 |
+| **interface, built once and reused** | **13.42 ns** | **0** |
+| 3-word struct, rebuilt each call | 30.01 ns | 1 |
+| **3-word struct, built once and reused** | **28.99 ns** | **1** |
+
+An interface-returning constructor boxes on every *call to the constructor*, not
+on every use. A view held in a field and read repeatedly — a server holding a
+view of its own state — boxes once, ever. Today's struct cannot do this: it
+re-boxes at every pass, so it allocates **per call, forever**, and 2.2x is the
+standing cost rather than a start-up one.
 
 ### An interface-returning constructor always allocates
 
 | construct + one `Get`, no boundary crossed | |
 |---|---|
-| concrete struct | **11.75 ns, 0 allocs** |
-| pointer-shaped struct | 12.05 ns, 0 allocs |
-| sealed interface | **30.36 ns, 1 alloc** |
+| concrete struct | **12.13 ns, 0 allocs** |
+| pointer-shaped struct | 11.79 ns, 0 allocs |
+| sealed interface | **30.46 ns, 1 alloc** |
 
-This is the one place the interface loses, and it loses by 2.6x. A view used
+This is the one place the interface loses, and it loses by 2.5x. A view used
 locally — built and read in the same function, never handed anywhere — pays for
 a boundary it never crosses.
 
@@ -147,8 +202,10 @@ priced at the time, and it should be recorded whether or not this ADR is adopted
 Views stay as `0012` built them.
 
 - Free to construct, free to use locally, no new vocabulary.
-- Four type arguments; consumers name the implementation; allocation at every
-  boundary crossing; forgetting the view stays a silent, compiling mistake.
+- Four type arguments; consumers name the implementation; forgetting the view
+  stays a silent, compiling mistake. An allocation at every boundary crossing
+  that **cannot be amortised** — a view held in a field and read repeatedly
+  allocates on every call, not once.
 
 ### B. Constructors return sealed interfaces
 
@@ -203,9 +260,11 @@ func render(v containers.DictView[string, ItemView]) error
 
 Keep concrete types; move the fields behind one pointer so a view is one word.
 
-- Fixes the whole allocation story — free to box, and escape analysis elides the
-  body allocation when the view does not escape. Slightly *faster* than the
-  interface everywhere measured. Keeps concrete methods and inlining.
+- Fixes the whole allocation story — free to box, amortises like the interface
+  (13.02 ns and 0 allocations into an interface parameter), and escape analysis
+  elides the body allocation when the view does not escape. Slightly *faster*
+  than the interface everywhere measured, since it skips dispatch when the callee
+  takes the concrete type. Keeps concrete methods and inlining.
 - **Fixes nothing this ADR is about.** Still four type arguments, still names the
   implementation, still forgettable. It answers the cost question while leaving
   the ergonomic one untouched.
@@ -246,6 +305,14 @@ interface at a boundary is cheaper than what `0012` ships today**, not more
 expensive, and the one case where it loses is the case where no boundary is
 crossed. That points at C rather than B — it is the option that takes the win
 where the win exists and pays nothing where it does not.
+
+It is worth being exact about *what* is cheaper, because "interfaces cost
+dispatch" is true and beside the point. Passing an interface is free; dispatch is
+~1 ns. The 16 ns is the allocation forced by dispatching through a
+non-pointer-shaped receiver, and today's view is non-pointer-shaped. The
+interface does not add a cost — it removes one, and removes it permanently,
+since a view held once stops paying while today's struct re-boxes on every call
+forever.
 
 But the numbers do not decide between the interface and option D. Those two are
 within 3% of each other everywhere measured. The real question this ADR turns on

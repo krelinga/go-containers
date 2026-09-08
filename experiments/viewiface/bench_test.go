@@ -264,3 +264,163 @@ func BenchmarkReportSealing(b *testing.B) {
 		sinkInt++
 	}
 }
+
+// ---- 8. passing, isolated from construction and from boxing ---------------
+//
+// The Cross benchmarks above bundle construction into the measurement, so they
+// answer "what does building and handing off a view cost" rather than "what
+// does an argument of this shape cost". These separate the two: every value is
+// built once, outside the loop.
+//
+// Two tiers. The first callee ignores its argument, so the measurement is the
+// argument itself plus a call. The second calls one method, which is what a
+// boundary actually does.
+
+//go:noinline
+func passNothing() int { return 1 }
+
+//go:noinline
+func passField(v fieldForm) int { return 1 }
+
+//go:noinline
+func passPtr(v ptrForm) int { return 1 }
+
+//go:noinline
+func passIface(v ifaceForm) int { return 1 }
+
+//go:noinline
+func passContract(v contract) int { return 1 }
+
+//go:noinline
+func useField(v fieldForm, k string) ItemView { r, _ := v.Get(k); return r }
+
+//go:noinline
+func usePtr(v ptrForm, k string) ItemView { r, _ := v.Get(k); return r }
+
+//go:noinline
+func useIface(v ifaceForm, k string) ItemView { r, _ := v.Get(k); return r }
+
+//go:noinline
+func useContract(v contract, k string) ItemView { r, _ := v.Get(k); return r }
+
+// Tier 1: the argument and the call, with no method dispatched.
+func BenchmarkPass(b *testing.B) {
+	d, vw, _ := fixture()
+	fv := ViewField[*Item, *Item, string, ItemView](d, vw)
+	pv := ViewPtr[*Item, *Item, string, ItemView](d, vw)
+	iv := ViewIface[*Item, *Item, string, ItemView](d, vw)
+
+	b.Run("NoArg", func(b *testing.B) {
+		for b.Loop() {
+			sinkInt = passNothing()
+		}
+	})
+	// Concrete parameter types: no interface anywhere, so this is pure
+	// argument width -- 3 words against 1.
+	b.Run("Struct3Word", func(b *testing.B) {
+		for b.Loop() {
+			sinkInt = passField(fv)
+		}
+	})
+	b.Run("Struct1Word", func(b *testing.B) {
+		for b.Loop() {
+			sinkInt = passPtr(pv)
+		}
+	})
+	// Interface parameter, already holding an interface: 2 words copied, and
+	// no conversion, because the types are identical.
+	b.Run("IfaceAsIs", func(b *testing.B) {
+		for b.Loop() {
+			sinkInt = passIface(iv)
+		}
+	})
+	// Interface parameter, holding a struct: this is where boxing happens.
+	b.Run("Struct3WordBoxed", func(b *testing.B) {
+		for b.Loop() {
+			sinkInt = passContract(fv)
+		}
+	})
+	b.Run("Struct1WordBoxed", func(b *testing.B) {
+		for b.Loop() {
+			sinkInt = passContract(pv)
+		}
+	})
+	// Interface to a DIFFERENT interface: no allocation, but an itab lookup.
+	b.Run("IfaceConverted", func(b *testing.B) {
+		for b.Loop() {
+			sinkInt = passContract(iv)
+		}
+	})
+}
+
+// Tier 2: the same, with one method called through the parameter.
+func BenchmarkPassAndCall(b *testing.B) {
+	d, vw, probe := fixture()
+	fv := ViewField[*Item, *Item, string, ItemView](d, vw)
+	pv := ViewPtr[*Item, *Item, string, ItemView](d, vw)
+	iv := ViewIface[*Item, *Item, string, ItemView](d, vw)
+
+	b.Run("Struct3Word", func(b *testing.B) {
+		for b.Loop() {
+			sinkItemView = useField(fv, probe)
+		}
+	})
+	b.Run("Struct1Word", func(b *testing.B) {
+		for b.Loop() {
+			sinkItemView = usePtr(pv, probe)
+		}
+	})
+	b.Run("IfaceAsIs", func(b *testing.B) {
+		for b.Loop() {
+			sinkItemView = useIface(iv, probe)
+		}
+	})
+	b.Run("Struct3WordBoxed", func(b *testing.B) {
+		for b.Loop() {
+			sinkItemView = useContract(fv, probe)
+		}
+	})
+	b.Run("Struct1WordBoxed", func(b *testing.B) {
+		for b.Loop() {
+			sinkItemView = useContract(pv, probe)
+		}
+	})
+	b.Run("IfaceConverted", func(b *testing.B) {
+		for b.Loop() {
+			sinkItemView = useContract(iv, probe)
+		}
+	})
+}
+
+// ---- 9. does an interface-returning constructor box on every call? --------
+//
+// Only if the constructor is called every time. A view held once and reused --
+// a server holding a view of its own state, say -- boxes once, ever.
+func BenchmarkReuse(b *testing.B) {
+	d, vw, probe := fixture()
+
+	b.Run("Iface/BuildEachTime", func(b *testing.B) {
+		for b.Loop() {
+			v := ViewIface[*Item, *Item, string, ItemView](d, vw)
+			sinkItemView = useIface(v, probe)
+		}
+	})
+	iv := ViewIface[*Item, *Item, string, ItemView](d, vw)
+	b.Run("Iface/BuiltOnce", func(b *testing.B) {
+		for b.Loop() {
+			sinkItemView = useIface(iv, probe)
+		}
+	})
+	b.Run("Field/BuildEachTime", func(b *testing.B) {
+		for b.Loop() {
+			v := ViewField[*Item, *Item, string, ItemView](d, vw)
+			sinkItemView = useContract(v, probe)
+		}
+	})
+	fv := ViewField[*Item, *Item, string, ItemView](d, vw)
+	b.Run("Field/BuiltOnce", func(b *testing.B) {
+		for b.Loop() {
+			sinkItemView = useContract(fv, probe)
+		}
+	})
+}
