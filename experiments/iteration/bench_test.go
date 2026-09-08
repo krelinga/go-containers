@@ -328,3 +328,43 @@ func BenchmarkDropScaling(b *testing.B) {
 	b.Run("1KiB", func(b *testing.B) { benchDrop[Sz1K](b, n) })
 	b.Run("8KiB", func(b *testing.B) { benchDrop[Sz8K](b, n) })
 }
+
+// ---- 7. building a Vector of a dict's keys -------------------------------
+//
+// The cross-container case. Two costs compound: losing the length, and copying
+// a value that is immediately discarded.
+
+var sinkKeys []string
+
+func benchCross[V any](b *testing.B, n int) {
+	keys := make([]string, n)
+	for i := range keys {
+		keys[i] = string(rune('a' + i%26))
+	}
+	src := newDictSource(keys, make([]V, n))
+
+	// Today: hand-rolled iterator, no length, keys derived from All.
+	b.Run("Today/SeqNoLength", func(b *testing.B) {
+		for b.Loop() {
+			sinkKeys = collectSeq(dropValue(src.All()))
+		}
+	})
+	// An adapter that keeps the length, still deriving keys.
+	b.Run("Adapter/LengthKept", func(b *testing.B) {
+		for b.Loop() {
+			sinkKeys = collectSized(KeysOfDerived[string, V](src))
+		}
+	})
+	// An adapter that keeps the length and upgrades to a native key walk.
+	b.Run("Adapter/LengthAndNativeKeys", func(b *testing.B) {
+		for b.Loop() {
+			sinkKeys = collectSized(KeysOf[string, V](src))
+		}
+	})
+}
+
+func BenchmarkCrossContainer(b *testing.B) {
+	const n = 256
+	b.Run("NarrowValues", func(b *testing.B) { benchCross[int](b, n) })
+	b.Run("WideValues", func(b *testing.B) { benchCross[Sz1K](b, n) })
+}

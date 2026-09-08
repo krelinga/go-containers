@@ -112,6 +112,36 @@ So both are reasons for a container to offer a method, for different reasons:
 A container knows its backing, so it can walk keys without touching values and
 walk backwards without buffering. Nothing outside it can do either.
 
+## 5. Cross-container construction pays both costs at once
+
+Building a `Vector` of a dict's keys — 256 entries, string keys:
+
+| | | memory | allocs |
+|---|---|---|---|
+| **narrow (`int`) values** | | | |
+| today: an `iter.Seq`, no length | 2.002 µs | 9.30 KiB | 15 |
+| an adapter that keeps the length | 1.304 µs (**1.54x**) | 4.98 KiB | 9 |
+| ...and upgrades to a native key walk | **950.0 ns (2.1x)** | 4.89 KiB | 6 |
+| **wide (1 KiB) values** | | | |
+| today: an `iter.Seq`, no length | 6.080 µs | 9.30 KiB | 15 |
+| an adapter that keeps the length | 5.830 µs (1.04x) | 4.98 KiB | 9 |
+| ...and upgrades to a native key walk | **970.9 ns (6.3x)** | 4.89 KiB | 6 |
+
+Two independent costs, and each is invisible without the other measurement:
+
+- **Losing the length** costs 1.54x and doubles the memory. Visible at narrow
+  values, and swamped at wide ones.
+- **Deriving keys instead of walking them natively** costs almost nothing at
+  narrow values and **6x** at wide ones.
+
+The fully-adapted form is **flat in value width** — 950 ns against 971 ns — since
+it never touches a value. Both partial forms scale with it.
+
+The native path here is reached by an optional-interface upgrade: the adapter
+asserts for a `Keys() iter.Seq[K]` and falls back to deriving when the source has
+none. That is the `io.WriterTo` pattern, and it only pays off if containers offer
+the native walk.
+
 ## Conclusions
 
 Durable:
@@ -130,7 +160,11 @@ Durable:
 4. Reverse iteration over a slice backing costs the same as forward.
 5. Reversing a forward `iter.Seq` from outside requires buffering it: 3.4x, and
    allocation linear in the sequence.
-6. **Direction is a capability only a container can provide.** Shape can be
+6. Building one container from another's keys pays both costs together: 2.1x at
+   narrow values and 6.3x at wide ones against today's route, with half the
+   memory and 6 allocations against 15. Fully adapted, the cost is flat in value
+   width.
+7. **Direction is a capability only a container can provide.** Shape can be
    converted from outside, but not for free once the discarded half is wide —
    so both shape and direction are reasons for a container to offer a method,
    for different reasons.

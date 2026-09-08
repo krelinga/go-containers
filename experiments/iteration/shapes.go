@@ -244,3 +244,92 @@ func (x sliceSource[T]) all() iter.Seq2[int, T] { return allOf(x.s) }
 func (x sliceSource[T]) keys() iter.Seq[int]    { return keysOf(x.s) }
 
 func newSource[T any](s []T) seqSource[T] { return sliceSource[T]{s} }
+
+// ---- cross-container construction ----------------------------------------
+//
+// Building a Vector of a dict's keys. Today the only route is an iter.Seq,
+// which loses the length; ADR 0006 measured what a length is worth. And if the
+// keys are derived from an All, the value is copied and discarded per element.
+
+// A dict-shaped source, generic so the compiler cannot see through it.
+type dictSource[K comparable, V any] struct {
+	keys []K
+	vals []V
+}
+
+func (d dictSource[K, V]) Len() int { return len(d.keys) }
+
+func (d dictSource[K, V]) All() iter.Seq2[K, V] {
+	return func(yield func(K, V) bool) {
+		for i := range d.keys {
+			if !yield(d.keys[i], d.vals[i]) {
+				return
+			}
+		}
+	}
+}
+
+// The native key walk a container could offer, which never touches a value.
+func (d dictSource[K, V]) Keys() iter.Seq[K] {
+	return func(yield func(K) bool) {
+		for i := range d.keys {
+			if !yield(d.keys[i]) {
+				return
+			}
+		}
+	}
+}
+
+func newDictSource[K comparable, V any](keys []K, vals []V) Elems2[K, V] {
+	return dictSource[K, V]{keys, vals}
+}
+
+// Elems2 as this library declares it.
+type Elems2[K, V any] interface {
+	Len() int
+	All() iter.Seq2[K, V]
+}
+
+type Elems[T any] interface {
+	Len() int
+	All() iter.Seq[T]
+}
+
+// A shape adapter that preserves the length, which is what today's route loses.
+type sized[T any] struct {
+	n   int
+	seq iter.Seq[T]
+}
+
+func (s sized[T]) Len() int         { return s.n }
+func (s sized[T]) All() iter.Seq[T] { return s.seq }
+
+// KeysOf derives keys, upgrading to a native walk when the source offers one.
+func KeysOf[K, V any](e Elems2[K, V]) Elems[K] {
+	if native, ok := e.(interface{ Keys() iter.Seq[K] }); ok {
+		return sized[K]{e.Len(), native.Keys()}
+	}
+	return sized[K]{e.Len(), dropValue(e.All())}
+}
+
+// KeysOfDerived always derives, for comparison.
+func KeysOfDerived[K, V any](e Elems2[K, V]) Elems[K] {
+	return sized[K]{e.Len(), dropValue(e.All())}
+}
+
+// The two collectors: one with a length, one without.
+func collectSized[T any](src Elems[T]) []T {
+	out := make([]T, 0, src.Len())
+	for v := range src.All() {
+		out = append(out, v)
+	}
+	return out
+}
+
+func collectSeq[T any](seq iter.Seq[T]) []T {
+	var out []T
+	for v := range seq {
+		out = append(out, v)
+	}
+	return out
+}
