@@ -7,10 +7,14 @@
   `experiments/views/` and `experiments/dispatch/`.
 - **Relates to:** ADR `0011` (which chose concrete structs, and recorded
   "sealing stays forgettable" as an unresolved limitation this would close),
-  `0012` (whose four-type-argument views are what prompted this), `0008`
-  (naming: contracts take the bare concept, implementations `<Ordering><Concept>`).
+  `0012` (whose four-type-argument views are what prompted this, and whose
+  values-only rule for ordered views is what lets decision 2's hierarchy exist),
+  `0008` (naming: contracts take the bare concept, implementations
+  `<Ordering><Concept>`), `0003` (whose `SortedDictFunc` follow-up would reopen
+  decision 2), `0009` (`Map` is an adapter — its view is a `DictView` like any
+  other).
 - **Supersedes:** ADR `0011`'s decision that a view is handed out as a concrete
-  struct, and ADR `0008`'s read-only contract tier. See decisions 1 and 2. ADR
+  struct, and ADR `0008`'s read-only contract tier. See decisions 1 and 3. ADR
   `0011`'s rule that **every container must have a view**, and ADR `0012`'s
   viewer vocabulary, both survive unchanged.
 
@@ -211,18 +215,48 @@ priced at the time, and it should be recorded whether or not this ADR is adopted
 
 ## Decision
 
-**Constructors return sealed, per-container interfaces. The view structs become
+**Constructors return sealed view interfaces. The view structs become
 unexported, and the `Set` and `Dict` contracts are removed.**
 
-### 1. One sealed `<Container>View` interface per container
+### 1. Four sealed view interfaces, in two pairs
 
 ```go
-type HashDictView[NK, NV any] interface {
+type SetView[NT any] interface {
+	Elems[NT]
+	Has(NT) bool
+	sealedView()
+}
+
+type DictView[NK, NV any] interface {
 	Elems2[NK, NV]
 	Get(NK) (NV, bool)
 	sealedView()
 }
 
+type SortedSetView[T cmp.Ordered] interface {
+	SetView[T]                              // see decision 2
+	Range(lo, hi T) iter.Seq[T]
+	Min() (T, bool)
+	Max() (T, bool)
+	Floor(T) (T, bool)
+	Ceil(T) (T, bool)
+}
+
+type SortedDictView[K cmp.Ordered, NV any] interface {
+	DictView[K, NV]
+	Range(lo, hi K) iter.Seq2[K, NV]
+	Min() (K, NV, bool)
+	Max() (K, NV, bool)
+	Floor(K) (K, NV, bool)
+	Ceil(K) (K, NV, bool)
+}
+```
+
+The structs stay one per container, unexported — `hashSetView`, `sortedSetView`,
+`hashDictView`, `sortedDictView`, `mapView` — so five structs behind four
+interfaces:
+
+```go
 type hashDictView[K comparable, V, NK, NV any] struct {   // unexported
 	d      *HashDict[K, V]
 	viewer CanViewHashDict[K, NK, V, NV]
@@ -230,22 +264,16 @@ type hashDictView[K comparable, V, NK, NV any] struct {   // unexported
 
 func ViewHashDict[K comparable, V, NK, NV any](
 	d *HashDict[K, V], vw CanViewHashDict[K, NK, V, NV],
-) HashDictView[NK, NV]
+) DictView[NK, NV]
 
-func ViewHashDictIdentity[K comparable, V any](d *HashDict[K, V]) HashDictView[K, V]
+func ViewHashDictIdentity[K comparable, V any](d *HashDict[K, V]) DictView[K, V]
 ```
 
-Five interfaces: `HashSetView[NT]`, `SortedSetView[T]`, `HashDictView[NK, NV]`,
-`SortedDictView[K, NV]`, `MapView[NK, NV]`. The exported name is the one the
-struct has today; the struct takes the lowercase form. `viewer` keeps its ADR
-`0012` meaning — the thing supplying conversions — and is not reused for the view
-itself.
-
-Per-container is what keeps the ordered operations. `SortedDictView` declares
-`Range`, `Min`, `Max`, `Floor` and `Ceil` alongside the universal methods, which
-one interface spanning every container could not. Whether the five share a base
-that the ordered two extend is open question 1 — that is a question about
-hierarchy, not about whether each container has its own interface.
+**There is no `HashDictView`, `HashSetView` or `MapView`.** A hash container's
+view adds nothing to the base, so the base *is* its view type; only the ordered
+containers need a name of their own, because only they add methods. `viewer`
+keeps its ADR `0012` meaning — the thing supplying conversions — and is not
+reused for the view itself.
 
 Sealing is one unexported method on each struct. `*HashDict` has `Len`, `All` and
 `Get`, but not `sealedView`, so **handing over the container where a view is
@@ -263,26 +291,48 @@ The second is a type outside the package supplying every exported method. The
 seal blocks the container from being passed *as* a view, and blocks anyone else
 from claiming to be one.
 
-### 2. `Set` and `Dict` are removed
+### 2. The ordered views embed the unordered ones
+
+`SortedSetView[T]` embeds `SetView[T]`, and `SortedDictView[K, NV]` embeds
+`DictView[K, NV]`, each adding `Range`, `Min`, `Max`, `Floor` and `Ceil`. So a
+sorted view is usable wherever the base is wanted, and a consumer can be written
+against "any dict view" without naming an implementation.
+
+This is what makes the decoupling real rather than partial: a provider swapping
+`HashDict` for `SortedDict` — or for `Map`, whose view is the *same type* as a
+hash dict's — does not touch a consumer that takes `DictView`.
+
+It type-checks only because ADR `0012` decided ordered views convert **values
+only**. `SortedDictView`'s `Get` takes `K` and its `All` yields
+`iter.Seq2[K, NV]`, which is exactly `DictView` instantiated at `[K, NV]`; the
+set side works the same way, since `SortedSetView` converts nothing at all. Had
+ordered keys been converted, the two would not line up and this hierarchy would
+be impossible.
+
+That dependency is load-bearing and was accidental — `0012` made that decision to
+sidestep order preservation, not to enable a hierarchy. **ADR `0003`'s
+`SortedDictFunc` follow-up would reopen both at once.**
+
+### 3. `Set` and `Dict` are removed
 
 ADR `0008`'s read-only tier goes away. The view interfaces subsume it, and
 keeping both would leave two spellings of "read-only dict" where one is a decoy:
 a container satisfies `Dict[K, V]` structurally, which is precisely the hole ADR
 `0011` recorded as unclosable and this ADR closes.
 
-### 3. `Elems` and `Elems2` stay, and stay unsealed
+### 4. `Elems` and `Elems2` stay, and stay unsealed
 
 The sized constructors take them, so they are a capability check rather than a
 boundary — `CollectHashSet(anythingIterable)` has to keep working. They were
 never load-bearing for read-only-ness, and are not asked to be.
 
-### 4. `MutableSet` and `MutableDict` absorb their read methods
+### 5. `MutableSet` and `MutableDict` absorb their read methods
 
 They embed `Set` and `Dict` today. With those gone they declare `Has` and `Get`
 themselves. ADR `0008`'s three layers become two — universal and mutation — with
 read-only expressed per container as a view rather than as a contract tier.
 
-### 5. Views satisfy their interface by value
+### 6. Views satisfy their interface by value
 
 The concrete struct keeps value receivers, so the representation can change to a
 pointer, to a body pointer, or to a type-parameter witness later without touching
@@ -309,9 +359,10 @@ a caller.
   shipping the field-carrying struct first.
 - **Option E stays available and gets better.** A caller-side alias now names an
   interface with two type parameters instead of a struct with four.
-- **Consumers decouple from the implementation only within a concept.** A
-  consumer taking `HashDictView[string, ItemView]` does not name `HashDict`'s key
-  and value types — but it does still name *hash*. See the open questions.
+- **Consumers stop naming the implementation entirely.** A consumer taking
+  `DictView[string, ItemView]` names neither the container's key and value types
+  nor which container it came from. A `Map` view and a `HashDict` view are the
+  same type, and a `SortedDict` view substitutes for either.
 - **ADR `0008`'s contract table changes**, and `CLAUDE.md` describes the old one.
 - **`views_test.go` and `callsites_test.go` are rewritten**, and the identity
   constructors change return type. `TestEveryContainerHasAView` becomes a check
@@ -445,65 +496,9 @@ func each[K comparable, V, NK, NV any](v containers.HashDictView[K, V, NK, NV]) 
 
 ## Open questions
 
-All three are about sorted containers, and they are the same question at
-different depths: **how much shared vocabulary survives the removal of `Dict` and
-`Set`?**
-
-### 1. Is there a shared base interface, or are the five unrelated?
-
-Five mutually unrelated interfaces is the strictest reading of "one per
-container". It has a cost this ADR should not pretend away: a consumer cannot be
-written against "any dict view", and a provider switching `HashDict` for
-`SortedDict` breaks every consumer — which is half of what decoupling was
-supposed to buy.
-
-The alternative reintroduces `Dict` and `Set` under new names, sealed:
-
-```go
-// sketch
-type DictView[NK, NV any] interface {
-	Elems2[NK, NV]
-	Get(NK) (NV, bool)
-	sealedView()
-}
-
-type SortedDictView[K cmp.Ordered, NV any] interface {
-	DictView[K, NV]                       // embeds cleanly -- see below
-	Range(lo, hi K) iter.Seq2[K, NV]
-	Min() (K, NV, bool)
-	Max() (K, NV, bool)
-	Floor(K) (K, NV, bool)
-	Ceil(K) (K, NV, bool)
-}
-
-type HashDictView[NK, NV any] = DictView[NK, NV]   // or no separate name at all
-```
-
-That is not obviously wrong — a sealed `DictView` is a different object from the
-structural `Dict` this ADR deletes, because a container cannot satisfy it. But it
-is worth deciding deliberately rather than arriving at by embedding.
-
-### 2. The embedding works, which is a consequence of ADR `0012`
-
-`SortedDictView[K, NV]` embedding `DictView[K, NV]` type-checks only because ADR
-`0012` decided sorted views convert **values only**. Its `Get` takes `K`, its
-`All` yields `iter.Seq2[K, NV]` — exactly `DictView` instantiated at `[K, NV]`.
-Had sorted keys been converted, the two would not line up and the hierarchy would
-be impossible.
-
-The same holds for sets: `SortedSetView[T]` converts nothing, so it is
-`SetView[T]` plus the ordered methods.
-
-This is worth recording because it is load-bearing and accidental: ADR `0012`
-made that decision to sidestep order preservation, not to enable a hierarchy.
-**ADR `0003`'s `SortedDictFunc` follow-up would reopen both at once.**
-
-### 3. Should `Range` return a view rather than an iterator?
-
-ADR `0011` listed this as a capability gap. Under this decision it becomes cheap
-to express — `Range(lo, hi K) SortedDictView[K, NV]` returns an interface like
-everything else — where against a concrete struct it meant naming a fourth type.
-Not decided here, but the cost of doing it later just fell.
+None outstanding. The three raised while this was proposed are resolved:
+decisions 1 and 2 settle the shared base and the embedding; `Range` returning a
+view is deferred to its own ADR, recorded below.
 
 ## Why B rather than C
 
@@ -538,14 +533,20 @@ since a view held once stops paying while today's struct re-boxes forever.
 
 ## Follow-ups
 
+- **Should `Range` return a view rather than an iterator?** ADR `0011` listed
+  this as a capability gap, and this decision makes it cheap to express —
+  `Range(lo, hi K) SortedDictView[K, NV]` returns an interface like everything
+  else, where against a concrete struct it meant naming a fourth type. Worth its
+  own ADR, together with ADR `0011`'s other deferred capabilities: a view of a
+  view, so conversions compose, and views over `LinkedList`.
 - **`LinkedList` (ADR `0010`) inherits this before it is written.** Its `All`
   yields cursors, so `LinkedListView` hands out handles that are inert without
   the list — worth settling when the container lands.
 - **The witness shape's loss to stateful viewers belongs in `0012`'s record.**
   ADR `0011` left it available as the cheapest form; `0012` closed it without
   noticing.
-- **ADR `0008`'s deferred ordered tier is partly answered here.** If open
-  question 1 lands on a shared base, `SortedDictView` *is* the ordered tier, on
-  the view side. Whether containers still want one is separate.
+- **ADR `0008`'s deferred ordered tier is answered on the view side.**
+  `SortedSetView` and `SortedDictView` *are* the ordered tier. Whether the
+  mutation contracts still want one is separate and still open.
 - **`CLAUDE.md` needs the new contract table and view convention** once this is
   implemented.
