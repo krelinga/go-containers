@@ -803,3 +803,96 @@ These were recorded elsewhere and belong here now:
 - ADR `0013`'s view-iteration allocation erratum: iterating a view allocates
   three times per call, because `All` returns a closure through a dynamic call.
   It is a cost of the contract's *shape* and belongs in whatever replaces it.
+
+## Proposals
+
+The directions above are per-problem alternatives. A proposal combines them into
+one coherent design and says which directions it takes. Proposals are numbered
+by letter; more may be added before this ADR decides.
+
+### Proposal A: a `Collector` primitive
+
+Every bulk constructor and bulk mutator takes a `Collector`. A `Collector`
+abstracts away *where a sequence of entries comes from* — a container's keys, its
+values, its pairs, a bare iterator, or a literal list — so the consumer never
+learns which.
+
+```go
+type Collector[T any] interface {
+	SizeHint() int
+	AsSlice() []T
+	AsSeq() iter.Seq[T]
+	sealedCollector()
+}
+
+type Collector2[K, V any] interface {
+	SizeHint() int
+	AsSeq2() iter.Seq2[K, V]
+	sealedCollector()
+}
+```
+
+`SizeHint` returns 0 when the size is not known, so the consumer never has to ask
+whether a length exists. `AsSlice` returns nil when the entries were not a slice
+to begin with, so a consumer can take a memmove fast path when one is available
+and fall back otherwise. `AsSeq`/`AsSeq2` always work.
+
+**Sources.** A container advertises which shapes it can produce:
+
+```go
+type HoldsKeys[T any] interface   { Len() int; Keys() iter.Seq[T] }
+type HoldsValues[T any] interface { Len() int; Values() iter.Seq[T] }
+type HoldsAll[K, V any] interface { Len() int; All() iter.Seq2[K, V] }
+```
+
+**Constructors.** Six, covering every source:
+
+```go
+func KeysOf[T any](h HoldsKeys[T]) Collector[T]
+func ValuesOf[T any](h HoldsValues[T]) Collector[T]
+func AllOf[K, V any](h HoldsAll[K, V]) Collector2[K, V]
+func ItemsFrom[T any](seq iter.Seq[T]) Collector[T]
+func AllFrom[K, V any](seq iter.Seq2[K, V]) Collector2[K, V]
+func Items[T any](vs ...T) Collector[T]
+```
+
+**Consumers.** One per container, not one per source shape:
+
+```go
+func CollectVector[T any](c Collector[T]) *Vector[T]
+func CollectHashSet[T comparable](c Collector[T]) *HashSet[T]
+func CollectHashDict[K comparable, V any](c Collector2[K, V]) *HashDict[K, V]
+
+func (v *Vector[T]) AppendAll(c Collector[T])
+func (s *HashSet[T]) AddAll(c Collector[T])
+func (d *HashDict[K, V]) SetAll(c Collector2[K, V])
+```
+
+**Caller code:**
+
+```go
+containers.CollectVector(containers.KeysOf(d))        // problem 5, solved
+containers.CollectHashSet(containers.ValuesOf(d))
+containers.CollectHashDict(containers.AllOf(v))       // a vector, keyed by index
+v.AppendAll(containers.Items("a", "b", "c"))
+v.AppendAll(containers.ItemsFrom(slices.Values(names)))
+```
+
+**Type inference works**, which is the thing that would have sunk it. `KeysOf(d)`
+and `ValuesOf(d)` on a dict that has both methods each resolve to the right one
+with no type arguments, and a mismatch is a compile error naming the method:
+
+```
+Collector[int] does not implement Collector[string] (wrong type for method AsSeq)
+        have AsSeq() iter.Seq[int]
+```
+
+**What it takes from the directions.** 1A, for the native `Keys`/`Values` that
+`HoldsKeys` and `HoldsValues` require — without them `KeysOf` cannot avoid the
+discarded-value copy. 2B, since `SizeHint` carries the length and the `X`/`XSeq`
+split collapses. 5B and 5C, of which the collector constructors are a
+generalisation. 5A and 5D become unnecessary.
+
+**Surface.** Six constructors, one `Collect` and one bulk method per container:
+about twenty declarations covering every source-shape × target combination,
+against eighteen functions under 5A covering a third of them.
