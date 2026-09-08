@@ -96,3 +96,13 @@ func (IdentityViewer[K, V]) ToValueView(v V) V         { return v }
 type IdentityValueViewer[V any] struct{}
 
 func (IdentityValueViewer[V]) ToValueView(v V) V { return v }
+
+// CanViewVector is what ViewVector requires.
+//
+// Values only. A vector is indexed by int, and an index is not a key the caller
+// supplied — it is a position the container assigned — so there is nothing for
+// an inbound conversion to translate and no membership question to answer. At
+// takes an int on both sides of the view.
+type CanViewVector[T, NT any] interface {
+	ValueViewer[T, NT]
+}

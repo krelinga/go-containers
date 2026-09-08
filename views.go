@@ -28,12 +28,16 @@ import (
 //
 //	v := containers.ViewHashDictIdentity(d)
 //
-// # Four interfaces, in two pairs
+// # Five interfaces
 //
 // SetView and DictView are what an unordered container's view satisfies, and are
 // what a boundary should usually name. SortedSetView and SortedDictView embed
 // them and add the ordered reads, so a sorted view can be passed wherever the
 // unordered one is wanted. A Map's view and a HashDict's view are the same type.
+//
+// VectorView stands alone. A sequence is neither: its reads are positional, so
+// it cannot be a SetView, and giving it a DictView keyed by int would make All
+// yield pairs, which collides with Elems[T].
 //
 // The concrete types behind these interfaces are unexported and may change.
 //
@@ -132,6 +136,30 @@ type SortedDictView[K cmp.Ordered, NV any] interface {
 	Max() (K, NV, bool)
 	Floor(K) (K, NV, bool)
 	Ceil(K) (K, NV, bool)
+}
+
+// VectorView is a read-only view of a Vector, with elements converted by a
+// viewer.
+//
+// It is the answer to ADR 0001's accessor problem for sequences: a type holding
+// a Vector field hands one of these out in O(1) and no allocation, where an
+// accessor over a []T field must copy on every call or return a mutable
+// interior.
+//
+// Indices are not converted — an index is a position the container assigned,
+// not a key the caller supplied — so At takes an int on both sides.
+//
+// Sealed: only this package's view types satisfy it.
+type VectorView[NT any] interface {
+	Elems[NT]
+
+	// At returns the element at i, converted. It panics if i is out of range.
+	At(int) NT
+
+	// AllIndexed iterates index and converted element together.
+	AllIndexed() iter.Seq2[int, NT]
+
+	sealedView()
 }
 
 // ---------------------------------------------------------------------------
@@ -418,3 +446,57 @@ var (
 	_ SetView[int]          = (SortedSetView[int])(nil)
 	_ DictView[int, string] = (SortedDictView[int, string])(nil)
 )
+
+// ---------------------------------------------------------------------------
+// Vector
+// ---------------------------------------------------------------------------
+
+type vectorView[T, NT any] struct {
+	vec    *Vector[T]
+	viewer CanViewVector[T, NT]
+}
+
+// ViewVector returns a read-only view of vec, converting elements through viewer.
+func ViewVector[T, NT any](vec *Vector[T], viewer CanViewVector[T, NT]) VectorView[NT] {
+	return vectorView[T, NT]{vec, viewer}
+}
+
+func (v vectorView[T, NT]) sealedView() {}
+func (v vectorView[T, NT]) Len() int    { return v.vec.Len() }
+
+func (v vectorView[T, NT]) At(i int) NT { return v.viewer.ToValueView(v.vec.At(i)) }
+
+func (v vectorView[T, NT]) All() iter.Seq[NT] {
+	seq, vw := v.vec.All(), v.viewer // eager, so a broken view panics here
+	return func(yield func(NT) bool) {
+		for e := range seq {
+			if !yield(vw.ToValueView(e)) {
+				return
+			}
+		}
+	}
+}
+
+func (v vectorView[T, NT]) AllIndexed() iter.Seq2[int, NT] {
+	seq, vw := v.vec.AllIndexed(), v.viewer // eager
+	return func(yield func(int, NT) bool) {
+		for i, e := range seq {
+			if !yield(i, vw.ToValueView(e)) {
+				return
+			}
+		}
+	}
+}
+
+type vectorIdentityView[T any] struct{ vec *Vector[T] }
+
+// ViewVectorIdentity returns a read-only view of vec that converts nothing.
+func ViewVectorIdentity[T any](vec *Vector[T]) VectorView[T] {
+	return vectorIdentityView[T]{vec}
+}
+
+func (v vectorIdentityView[T]) sealedView()                   {}
+func (v vectorIdentityView[T]) Len() int                      { return v.vec.Len() }
+func (v vectorIdentityView[T]) At(i int) T                    { return v.vec.At(i) }
+func (v vectorIdentityView[T]) All() iter.Seq[T]              { return v.vec.All() }
+func (v vectorIdentityView[T]) AllIndexed() iter.Seq2[int, T] { return v.vec.AllIndexed() }

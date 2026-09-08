@@ -268,3 +268,80 @@ func TestEveryContainerHasAView(t *testing.T) {
 		t.Errorf("converting set view All = %v", got)
 	}
 }
+
+// ---- VectorView (ADR 0015 decision 5) --------------------------------------
+
+type itemValuesOnly struct{}
+
+func (itemValuesOnly) ToValueView(i *item) itemView { return itemView{i} }
+
+func TestVectorViewConvertsElements(t *testing.T) {
+	v := containers.NewVector(&item{Name: "first"}, &item{Name: "second"})
+	view := containers.ViewVector(v, itemValuesOnly{})
+
+	if view.Len() != 2 {
+		t.Errorf("Len = %d, want 2", view.Len())
+	}
+	if got := view.At(1).Name(); got != "second" {
+		t.Errorf("At(1).Name() = %q", got)
+	}
+
+	var names []string
+	for _, e := range view.AllIndexed() {
+		names = append(names, e.Name())
+	}
+	if !slices.Equal(names, []string{"first", "second"}) {
+		t.Errorf("AllIndexed = %v", names)
+	}
+}
+
+// A view is the O(1) answer to ADR 0001's accessor problem, so the identity
+// form must not allocate.
+func TestVectorIdentityViewDoesNotAllocate(t *testing.T) {
+	v := containers.NewVector(1, 2, 3)
+	var sink containers.VectorView[int]
+	if got := testing.AllocsPerRun(100, func() { sink = containers.ViewVectorIdentity(v) }); got != 0 {
+		t.Errorf("ViewVectorIdentity: %v allocs, want 0", got)
+	}
+	if sink.Len() != 3 {
+		t.Errorf("Len = %d", sink.Len())
+	}
+}
+
+// The seal, and the fact that a view carries no way to write.
+//
+//	var _ containers.VectorView[int] = containers.NewVector(1)
+//	  -> *Vector[int] does not implement VectorView[int] (missing method sealedView)
+func TestVectorViewIsSealed(t *testing.T) {
+	v := containers.NewVector(1, 2)
+	view := containers.ViewVectorIdentity(v)
+
+	if _, ok := any(view).(*containers.Vector[int]); ok {
+		t.Error("view was assertable back to its container")
+	}
+	if _, ok := any(view).(interface{ Set(int, int) }); ok {
+		t.Error("view exposed a mutator")
+	}
+	if _, ok := any(view).(interface{ Append(int) }); ok {
+		t.Error("view exposed Append")
+	}
+}
+
+func TestVectorViewNilAndEagerness(t *testing.T) {
+	var zero containers.VectorView[int]
+	if zero != nil {
+		t.Error("a zero view should be a nil interface")
+	}
+	mustPanic(t, "VectorView.Len", func() { _ = zero.Len() })
+	mustPanic(t, "VectorView.At", func() { _ = zero.At(0) })
+
+	mustPanic(t, "vectorIdentityView.All", func() {
+		_ = containers.ViewVectorIdentity[int](nil).All()
+	})
+	mustPanic(t, "vectorView.All", func() {
+		_ = containers.ViewVector[*item, itemView](nil, itemValuesOnly{}).All()
+	})
+	mustPanic(t, "vectorView.AllIndexed", func() {
+		_ = containers.ViewVector[*item, itemView](nil, itemValuesOnly{}).AllIndexed()
+	})
+}
