@@ -202,3 +202,76 @@ func BenchmarkReportSemantics(b *testing.B) {
 func growByValue(s Slice[int], e int) { s = append(s, e); _ = s }
 
 var _ = fmt.Sprint
+
+// ---- 5. what about just expanding the slice variadically? ----------------
+
+func BenchmarkAppendBulkForms(b *testing.B) {
+	src := source()
+
+	b.Run("Empty/VariadicExpansion", func(b *testing.B) {
+		for b.Loop() {
+			v := &Vector[int]{}
+			v.AppendMany(src...)
+			sinkInt = v.Len()
+		}
+	})
+	b.Run("Empty/SliceAdapter", func(b *testing.B) {
+		for b.Loop() {
+			v := &Vector[int]{}
+			v.AppendAll(Slice[int](src))
+			sinkInt = v.Len()
+		}
+	})
+	b.Run("Empty/ValuesSeq", func(b *testing.B) {
+		for b.Loop() {
+			v := &Vector[int]{}
+			v.AppendAllSeq(slices.Values(src))
+			sinkInt = v.Len()
+		}
+	})
+	b.Run("Empty/RawFloor", func(b *testing.B) {
+		for b.Loop() {
+			es := make([]int, 0, len(src))
+			es = append(es, src...)
+			sinkInt = len(es)
+		}
+	})
+
+	b.Run("NonEmpty/VariadicExpansion", func(b *testing.B) {
+		for b.Loop() {
+			v := &Vector[int]{es: slices.Clone(src)}
+			v.AppendMany(src...)
+			sinkInt = v.Len()
+		}
+	})
+	b.Run("NonEmpty/SliceAdapter", func(b *testing.B) {
+		for b.Loop() {
+			v := &Vector[int]{es: slices.Clone(src)}
+			v.AppendAll(Slice[int](src))
+			sinkInt = v.Len()
+		}
+	})
+}
+
+// Does the variadic bulk form help when the source is NOT already a slice --
+// the case the Elems contract exists for?
+func BenchmarkAppendFromContainer(b *testing.B) {
+	other := &Vector[int]{es: source()}
+
+	b.Run("ViaElems", func(b *testing.B) {
+		for b.Loop() {
+			v := &Vector[int]{}
+			v.AppendAll(other)
+			sinkInt = v.Len()
+		}
+	})
+	// A caller with a container and only a variadic method must materialise a
+	// slice first.
+	b.Run("ViaVariadicNeedsCollect", func(b *testing.B) {
+		for b.Loop() {
+			v := &Vector[int]{}
+			v.AppendMany(slices.Collect(other.All())...)
+			sinkInt = v.Len()
+		}
+	})
+}

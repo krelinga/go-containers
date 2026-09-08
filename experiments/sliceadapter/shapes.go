@@ -114,3 +114,11 @@ func (v slicePtrView[T]) At(i int) T       { return v.s.At(i) }
 func (v slicePtrView[T]) All() iter.Seq[T] { return v.s.All() }
 
 func ViewSlicePtr[T any](s *Slice[T]) VectorView[T] { return slicePtrView[T]{s} }
+
+// AppendMany is the variadic bulk form. It is NOT the single-element Append
+// that ADR 0015 measured at +41%: that cost is per call on a one-element
+// append, where here the ...T is expanded once for the whole batch and reaches
+// append's own variadic form, which is a single memmove.
+func (v *Vector[T]) AppendMany(es ...T) {
+	v.es = append(v.es, es...)
+}

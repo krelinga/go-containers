@@ -54,7 +54,7 @@ remaining check inside *both* accessors' method bodies, because an inlined body
 keeps its original source position. It therefore does not separate the two. **The
 timings do** — three groups, ±3%, consistent.
 
-## 4. It gives the sized constructors a length, and that is the real win
+## 4. It gives the sized constructors a length — but see section 5
 
 ADR `0015` made `Vector.Append` non-variadic, so bulk-appending a plain `[]T`
 goes through either a length-carrying `Elems` or a bare iterator with none.
@@ -80,7 +80,47 @@ capacity to absorb most of the growth, so `Grow`'s single large allocation
 replaces only one or two doublings. Worth stating plainly: the headline figure is
 the empty case, and the empty case is the one `Collect`-style construction hits.
 
-## 5. A view over it must take a pointer
+## 5. Variadic expansion beats both, and the two forms are complementary
+
+The question section 4 did not ask: what if the bulk method simply took `...T`?
+
+| append 1024 into an **empty** Vector | | allocs |
+|---|---|---|
+| `v.AppendMany(s...)` — variadic | **1.124 µs** | **1** |
+| raw `append(es, s...)` — the floor | 1.169 µs | 1 |
+| `v.AppendAll(Slice[int](s))` | 2.409 µs | 6 |
+| `v.AppendAllSeq(slices.Values(s))` | 4.266 µs | 15 |
+
+**Variadic expansion is the floor.** It reaches `append`'s own variadic form,
+which is one memmove with a known length — no iterator, no yield per element,
+one allocation. It is 2.1x the adapter and 3.8x the bare iterator.
+
+Non-empty: 3.796 µs / 2 allocs variadic against 4.818 µs / 7 for the adapter.
+
+This is not the cost ADR `0015` measured. That was `Append(e T)` against
+`Append(es ...T)` for **one** element, where the `...T` is paid per call. Here
+the expansion happens once for the whole batch, so a separate variadic *bulk*
+method costs the single-append path nothing.
+
+### But `Elems` wins in the other direction
+
+| append 1024 from another **container** | | allocs |
+|---|---|---|
+| `v.AppendAll(other)` — via `Elems` | **2.388 µs** | **5** |
+| `v.AppendMany(slices.Collect(other.All())...)` | 4.518 µs | 13 |
+
+A caller holding a container and offered only a variadic method has to
+materialise a slice first: 1.9x and eight more allocations.
+
+**So neither form subsumes the other**: variadic is optimal when the source is
+already a slice, `Elems` when it is already a container. A container offering
+both covers each at its floor.
+
+The consequence for a slice adapter is direct and unflattering: **feeding a
+plain `[]T` to a bulk append is not a reason to have one.** A variadic bulk
+method does that job 2.1x faster than converting to an adapter.
+
+## 6. A view over it must take a pointer
 
 | construct a sequence view | | allocs |
 |---|---|---|
@@ -97,7 +137,7 @@ That is an awkward result for an adapter whose selling point is value semantics:
 to a function's return value. `Map` does not have this problem, because a map
 header is one word.
 
-## 6. It round-trips through `encoding/json`
+## 7. It round-trips through `encoding/json`
 
 ```
 json.Marshal: Slice -> [1,2,3]   Vector -> {}
@@ -121,11 +161,17 @@ Durable:
 3. A defined slice type keeps bounds-check elimination, through its accessor as
    well as through builtin syntax — matching raw indexing where a struct wrapper
    costs 23%.
-4. Supplying `Len` to a sized bulk operation is worth **1.71x and 6 allocations
-   against 15** when the target is empty, and only 1.18x when it is not.
-5. A view over a slice adapter must hold `*Slice[T]`; by value it costs an
+4. Supplying `Len` to a sized bulk operation beats a bare iterator — 1.71x and
+   6 allocations against 15 into an empty target, 1.18x into a populated one.
+5. **A variadic bulk form beats both** when the source is already a slice: 1.124
+   µs and one allocation, which is the raw `append` floor, against 2.409 µs and
+   six for the adapter. It is not the per-call cost ADR 0015 measured, since the
+   expansion happens once per batch. But `Elems` beats variadic by 1.9x when the
+   source is a container, because the caller would otherwise have to materialise
+   a slice. The two are complementary; neither subsumes the other.
+6. A view over a slice adapter must hold `*Slice[T]`; by value it costs an
    allocation, because a slice header is three words where a map header is one.
-6. A defined slice type round-trips through `encoding/json`; no struct-shaped
+7. A defined slice type round-trips through `encoding/json`; no struct-shaped
    container in this library does.
 
 Perishable: every absolute number above.
