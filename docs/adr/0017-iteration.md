@@ -324,6 +324,32 @@ are wide. The earlier reading of this experiment — that shape was purely an
 ergonomics question — was wrong, and the direction sketches below are graded
 against the corrected finding.
 
+## A note on the examples below
+
+Each direction shows what the **common case** looks like: a caller who just wants
+to walk keys, values, or pairs. The running example is a dict whose values are
+wide, a set, and a vector:
+
+```go
+d := containers.NewHashDict[string, User]()  // User is large
+s := containers.NewHashSet[string]()
+v := containers.NewVector[Item]()
+```
+
+One thing to get straight first, because it changes how problem 1 reads:
+**iterating keys is already expressible today.** Ranging an `iter.Seq2` with one
+variable is legal Go:
+
+```go
+for k := range d.All() { }   // compiles today, and copies every User
+```
+
+So problem 1 is not that a caller cannot walk keys. It is that doing so costs
+14.9x a native walk at 1 KiB values, and that `Vector` cannot satisfy
+`Elems2[int, T]` for construction. The directions below should be read against
+that: the iteration examples are mostly about *cost* and *churn*, not about
+expressiveness.
+
 ## Directions for problem 1
 
 ### 1A. Follow the stdlib: `All` means `Seq2`, `Values`/`Keys` mean `Seq`
@@ -349,6 +375,23 @@ Native per-shape methods are a performance feature, not only an ergonomic one �
 which is exactly the reason the stdlib has `maps.Keys` rather than leaving
 callers to wrap `maps.All`.
 
+Iterating:
+
+```go
+for k, v := range d.All() { }     // pairs
+for k := range d.Keys() { }       // keys -- never materialises a User
+for val := range d.Values() { }   // values
+
+for e := range s.Values() { }     // a set's elements -- WAS s.All()
+for i, e := range v.All() { }     // WAS v.AllIndexed()
+for e := range v.Values() { }     // WAS v.All()
+```
+
+The first three read well and the last three are the cost: **every existing set
+and vector iteration in every caller changes**, and the two that change are the
+ones that already looked right. `s.All()` becoming `s.Values()` is the single
+most disruptive line in this ADR.
+
 ### 1B. Keep one `All` per container; add free functions for other shapes
 
 ```go
@@ -365,6 +408,25 @@ is still `Seq[T]`, so `Vector` still cannot be an `Elems2`, and
 
 Free functions remain useful as a *convenience* for the narrow cases. They are
 not a substitute for a container offering the shape natively.
+
+Iterating:
+
+```go
+for k, v := range d.All() { }                  // pairs, unchanged
+for k := range containers.Keys(d) { }          // keys -- still copies every User
+for val := range containers.Values(d) { }      // values
+
+for e := range s.All() { }                     // unchanged
+for e := range v.All() { }                     // unchanged
+for i, e := range v.AllIndexed() { }           // unchanged
+```
+
+**No churn at all**, which is its real appeal. But note what the second line
+costs, and note a wrinkle: if `Keys` returns an `Elems[K]` so it can also feed a
+constructor (problem 5), it is an *interface* and no longer directly rangeable —
+the caller writes `range containers.Keys(d).All()`. Making it rangeable means
+returning a bare `iter.Seq[K]`, which drops the length, which is problem 5 again.
+**One helper cannot be both** while `Elems` is an interface.
 
 ### 1C. Make `Elems` a value, not a contract
 
@@ -385,6 +447,27 @@ shapes as it likes. It also folds problem 2's duplication away: an unknown lengt
 is `Len: 0`, so `CollectX(Elems[T])` covers what `CollectX` and `CollectXSeq`
 cover today, halving that surface.
 
+Iterating:
+
+```go
+for k, v := range d.All().Seq { }              // pairs -- note the .Seq
+for k := range d.Keys().Seq { }                // keys
+for val := range d.Values().Seq { }            // values
+
+for e := range s.Values().Seq { }
+for i, e := range v.All().Seq { }
+```
+
+**The `.Seq` is a tax on the most common operation in the package**, and it is
+paid on every iteration whether or not the length is wanted. A struct is not
+rangeable; only its func-typed field is. (`for v := range e.Seq` does compile —
+verified — so this works, it just reads worse than everything else here.)
+
+The compensation is that the wrinkle 1B hits disappears: one helper can be both
+rangeable and length-carrying, because the length rides alongside rather than
+inside an interface. `containers.Keys(d)` feeds a constructor *and*
+`range containers.Keys(d).Seq` walks it.
+
 Against: it discards `Elems` as an interface, which ADRs `0006` and `0008` are
 built on — containers would no longer *satisfy* anything, they would *produce*
 something. That is a large conceptual change, and it removes the ability to write
@@ -394,7 +477,22 @@ a function generic over "any container" without naming a producing method.
 
 The status quo, made explicit: `Elems` and `Elems2` stay exclusive, `AllIndexed`
 stays, `ListView` stays unbuildable, and the disagreement with the stdlib stays.
-Recorded so that doing nothing is a choice rather than a default.
+
+Iterating, today:
+
+```go
+for k, v := range d.All() { }        // pairs
+for k := range d.All() { }           // keys -- legal, and copies every User
+for _, val := range d.All() { }      // values
+for e := range s.All() { }
+for e := range v.All() { }
+for i, e := range v.AllIndexed() { } // and `for i := range v.AllIndexed()` for indexes
+```
+
+Every shape a caller might want is reachable. Two of the six lines silently copy
+a value they discard, at 14.9x a native walk when the value is 1 KiB, and nothing
+at the call site says so. **That is the honest statement of the status quo**, and
+it is recorded so that doing nothing is a choice rather than a default.
 
 ## Directions for problem 2
 
@@ -404,11 +502,28 @@ Give `HashSet` its `CollectHashSet`, `AddAll` and `AddAllSeq`; add
 `Vector.AppendMany(es ...T)`; decide `Map` deliberately rather than by omission.
 Smallest change, leaves the shape duplication in place.
 
+**Iteration is untouched by all three of problem 2's directions** — they change
+how a container is filled, not how it is read. What changes is the filling:
+
+```go
+containers.CollectHashSet(other)          // does not exist today
+hs.AddAll(other)                          // does not exist today
+v.AppendMany(names...)                    // does not exist today; 2.1x the alternatives
+```
+
 ### 2B. Collapse `X` and `XSeq` into one
 
 Follows from 1C: if a length is carried by the argument rather than by the
 argument's type, one function covers both. Eight functions and eight methods
 become four and four.
+
+```go
+containers.CollectVector(src)                     // src carries its own length
+containers.CollectVector(containers.Seq(anyIter)) // or does not, at Len 0
+```
+
+Iteration is untouched, except that anything *returning* an `Elems` acquires
+1C's `.Seq` tax.
 
 ### 2C. Free functions instead of methods
 
@@ -422,6 +537,12 @@ new container. Against: it reads worse than a method, and ADR `0002` records tha
 anything generic over containers has to be a free function anyway — so this may
 be where it ends up regardless.
 
+```go
+containers.InsertAll(hs, other)   // instead of hs.AddAll(other)
+```
+
+Iteration untouched.
+
 ## Directions for problem 3
 
 ### 3A. `Backward` methods on the ordered containers
@@ -434,9 +555,24 @@ func (v *Vector[T]) Backward() iter.Seq2[int, V]
 ```
 
 Mirrors `slices.Backward`, free at every backing this library has, and it is the
-only place the capability can come from. The open part is `Range`: a reversed
-range needs either `RangeBackward(lo, hi)` or something better, and adding a
-second method per ordered operation does not scale.
+only place the capability can come from.
+
+Iterating:
+
+```go
+for e := range ss.All() { }              // forward, as today
+for e := range ss.Backward() { }         // reverse
+for k, val := range sd.Backward() { }
+for i, e := range vec.Backward() { }
+
+for k, val := range sd.Range(lo, hi) { }         // forward slice of the order
+for k, val := range sd.RangeBackward(lo, hi) { } // ...and its reverse?
+```
+
+The first four read exactly like their forward twins, which is the appeal. The
+last line is the open part: a reversed range needs a second method, and **adding
+one per ordered operation does not scale** — `Range`, and then `Floor`, `Ceil`,
+`Min` and `Max` already come in pairs by another name.
 
 ### 3B. Reversal as a view operation
 
@@ -449,12 +585,39 @@ Free for an `IndexedView`, whose `At(i)` makes reversal a subtraction. Does not
 work for `SetView` or `DictView`, which have no positional access — so it solves
 reversal for sequences only, which may be enough.
 
+Iterating:
+
+```go
+view := containers.ViewVectorIdentity(vec)
+for e := range view.All() { }                          // forward
+for e := range containers.Reverse(view).All() { }      // reverse
+
+// A sorted set or dict cannot be reversed this way at all.
+```
+
+Note what that costs a caller who is not otherwise using views: reversing a
+`Vector` now means constructing a view first, which is an allocation and a
+concept they did not ask for.
+
 ### 3C. `Range` returns a view, and views reverse
 
 ADR `0013` already carries "should `Range` return a view rather than an
 iterator?" as a follow-up, and ADR `0008` carries a deferred ordered contract
 tier. Combined with 3B, one answer covers all three: `Range` yields a view,
 views can be reversed, and the ordered tier declares both.
+
+Iterating:
+
+```go
+for k, val := range sd.All() { }                              // whole container
+for k, val := range sd.Range(lo, hi).All() { }                // a slice of it
+for k, val := range containers.Reverse(sd.Range(lo, hi)).All() { }  // reversed
+```
+
+Every ordered read composes from two pieces instead of needing its own method,
+which is what stops the multiplication. The cost is visible in that third line:
+it is the most to read of any option here, and `Range` returning a view is a
+behaviour change for existing callers, who currently range it directly.
 
 This is the most speculative direction and the only one that does not multiply
 methods.
@@ -472,6 +635,24 @@ The second is a real option. Converting ordered keys costs the `SortedDictView`
 embedding that ADR `0016` depends on, and buys abstraction for key types that are
 already immutable and mostly already named.
 
+What a caller sees, adopting the taxonomy:
+
+```go
+// A sorted dict view could then hide its key type, as a hash dict view already can.
+sv := containers.ViewSortedDict(sd, viewer)          // viewer converts K -> NK too
+for nk, nval := range sv.All() { }                   // neither raw type named
+```
+
+and keeping the four treatments:
+
+```go
+sv := containers.ViewSortedDict(sd, viewer)          // viewer converts values only
+for k, nval := range sv.All() { }                    // k is the container's raw K
+```
+
+The difference is one identifier in one line, which is a fair measure of how much
+is at stake: this is a coherence question, not an ergonomics one.
+
 ## Directions for problem 5
 
 ### 5A. Add the constructors
@@ -480,6 +661,14 @@ Eighteen or more functions, each trivial, each needing a doc comment and a test,
 and each a thing to forget when a container is added. Recorded so that "just add
 them" is a weighed option rather than the default — it is not obviously wrong,
 only large.
+
+```go
+keys := containers.CollectVectorFromKeys(d)      // one of eighteen
+for k := range d.All() { }                       // iteration unchanged, and still copies
+```
+
+**It does nothing for iteration** — it fixes construction only, so the caller who
+wants to walk keys cheaply is no better off.
 
 ### 5B. Shape adapters that preserve the length
 
@@ -495,6 +684,15 @@ future container, and they keep the length — worth **1.54x** and half the memo
 
 They cannot fix the wasted value copy on their own: deriving keys from an `All`
 pays it, which is 6x at 1 KiB values.
+
+```go
+containers.CollectVector(containers.Keys(d))     // construction
+for k := range containers.Keys(d).All() { }      // iteration -- see 1B's wrinkle
+```
+
+The second line is where the interface-versus-value question bites: `.All()` is
+needed because `Elems` is an interface. Under 1C it would be `.Seq` and under 1A
+the caller would just write `d.Keys()`.
 
 ### 5C. 5B, upgrading to a native walk when the source has one
 
@@ -516,6 +714,12 @@ direction 1A. **Problem 5's best answer is downstream of problem 1's**, and this
 is the clearest evidence for 1A yet: the same method that fixes the naming
 mismatch also removes a 6x cost here.
 
+```go
+containers.CollectVector(containers.Keys(d))     // 6.3x today's route at wide values
+for k := range d.Keys() { }                      // and the caller who only wants to
+                                                 // iterate skips the adapter entirely
+```
+
 ### 5D. Source-side methods, and no adapters at all
 
 If a container's `Keys()` returns an `Elems[K]` rather than a bare `iter.Seq[K]`,
@@ -531,6 +735,19 @@ One constructor per container, no adapters, no explosion, and the length travels
 with the shape. This is where 1A and 1C together lead, and it is the smallest
 final surface of any option here.
 
+```go
+containers.CollectVector(d.Keys())               // construction
+for k := range d.Keys() { }                      // iteration -- if Keys returns a
+                                                 // bare iter.Seq
+for k := range d.Keys().Seq { }                  // ...or this, if it returns a sized
+                                                 // value carrying its length
+```
+
+**Those last two lines are the whole of decision-blocker 2**, written out. One of
+them is what every caller types for the commonest operation in the package, and
+the choice is between a `.Seq` on every iteration and a second method for the
+sized form.
+
 Against: it needs every container to grow shape methods that return a sized
 thing, which is the largest change in this ADR, and it depends on whether `Elems`
 stays an interface — decision-blocker 2.
@@ -543,6 +760,10 @@ not a shape:
 ```go
 // sketch
 func TransformSeq[A, B any](seq iter.Seq[A], f func(A) B) iter.Seq[B]
+```
+
+```go
+for name := range containers.TransformSeq(d.Keys(), strings.ToUpper) { }
 ```
 
 None of 5A–5D address that, and none should. Recorded so the two are not solved
