@@ -11,7 +11,8 @@
 // dishonest view of ergonomics. The external test package forces the real
 // public import path.
 //
-// Tasks correspond to those in docs/adr/0002-set.md.
+// Tasks correspond to those in the ADR that proposed each container: A-C from
+// 0002, D-G from 0003 and 0009, H-I from 0015.
 package containers_test
 
 import (
@@ -767,4 +768,109 @@ func ExampleCollectHashDict() {
 	byHash := containers.CollectHashDict(src)
 	fmt.Println(byHash.Len(), slices.Sorted(maps.Keys(maps.Collect(byHash.All()))))
 	// Output: 3 [a b c]
+}
+
+// ---------------------------------------------------------------------------
+// Task H — a type that owns a growing sequence and exposes it
+//
+// ADR 0001's accessor problem in its sequence form. A []T field cannot be
+// handed out read-only, so the accessor either copies on every call -- O(n)
+// each time, O(n²) in a caller's loop -- or returns the interior and lets the
+// caller write into the log. This baseline takes the safe horn.
+// ---------------------------------------------------------------------------
+
+type auditLogStdlib struct{ entries []string }
+
+func (l *auditLogStdlib) Record(e string) { l.entries = append(l.entries, e) }
+
+// Safe, and O(n) on every call.
+func (l *auditLogStdlib) Entries() []string { return slices.Clone(l.entries) }
+
+// ---------------------------------------------------------------------------
+// Task I — accumulating across a function boundary
+//
+// The callee cannot append in place: a slice header is a value, so it must
+// return the slice and the caller must reassign. Forgetting is silent.
+// ---------------------------------------------------------------------------
+
+func addDefaultsStdlib(out []string, defaults ...string) []string {
+	return append(out, defaults...)
+}
+
+// ---------------------------------------------------------------------------
+// Cases, shared by the stdlib and (later) container implementations.
+// ---------------------------------------------------------------------------
+
+var sequenceCases = []struct {
+	name   string
+	record []string
+	want   []string
+}{
+	{"empty", nil, nil},
+	{"one", []string{"login"}, []string{"login"}},
+	{"several", []string{"login", "read", "write"}, []string{"login", "read", "write"}},
+	{"duplicates are kept", []string{"read", "read"}, []string{"read", "read"}},
+}
+
+func TestTaskHStdlib(t *testing.T) {
+	for _, tc := range sequenceCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var l auditLogStdlib
+			for _, e := range tc.record {
+				l.Record(e)
+			}
+			if got := l.Entries(); !slices.Equal(got, tc.want) {
+				t.Errorf("Entries() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// The property the container version must also have: what the accessor hands
+// back cannot be used to corrupt the log.
+func TestTaskHStdlibAccessorDoesNotLeak(t *testing.T) {
+	var l auditLogStdlib
+	l.Record("login")
+
+	got := l.Entries()
+	got[0] = "TAMPERED"
+
+	if after := l.Entries(); after[0] != "login" {
+		t.Errorf("log was mutated through its accessor: %v", after)
+	}
+}
+
+// ADR 0001's guardrail. The stdlib accessor must copy to be safe, so it
+// allocates on every call, and the cost grows with the log.
+func TestTaskHStdlibAccessorAllocates(t *testing.T) {
+	var l auditLogStdlib
+	for i := range 64 {
+		l.Record(fmt.Sprint(i))
+	}
+	var sink []string
+	if got := testing.AllocsPerRun(100, func() { sink = l.Entries() }); got == 0 {
+		t.Errorf("expected the copying accessor to allocate, got %v", got)
+	}
+	_ = sink
+}
+
+func TestTaskIStdlib(t *testing.T) {
+	out := []string{"explicit"}
+	out = addDefaultsStdlib(out, "a", "b")
+
+	want := []string{"explicit", "a", "b"}
+	if !slices.Equal(out, want) {
+		t.Errorf("addDefaultsStdlib = %v, want %v", out, want)
+	}
+}
+
+// The footgun the container version removes: the callee's work is lost unless
+// the caller reassigns, and nothing at the call site says so.
+func TestTaskIStdlibForgettingTheAssignmentIsSilent(t *testing.T) {
+	out := make([]string, 0, 8) // spare capacity, so nothing reallocates
+	addDefaultsStdlib(out, "a", "b")
+
+	if len(out) != 0 {
+		t.Fatalf("expected the append to be lost, got %v", out)
+	}
 }
