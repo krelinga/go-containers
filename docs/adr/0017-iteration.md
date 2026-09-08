@@ -116,6 +116,97 @@ and `Range(lo, hi)` runs forwards only.
 The stdlib has `slices.Backward`. A caller here has no equivalent, and — unlike
 the shape problem — **cannot build one**.
 
+## Problem 4: "key" and "value" are not defined, and the viewers disagree
+
+This one is arguably **prior to problem 1** — it is numbered last because it was
+found last.
+
+There is a rule operating in the package, and it is nowhere written down:
+
+> A **key** is the handle a container's lookup methods take. A **value** is what
+> they give back.
+
+Applied to what exists:
+
+| container | lookup takes | yields | key | value |
+|---|---|---|---|---|
+| `HashDict[K, V]`, `Map[K, V]` | `K` | `V` | `K` | `V` |
+| `SortedDict[K, V]` | `K` | `V` | `K` | `V` |
+| `HashSet[T]` | `T` | `bool` | `T` | — |
+| `SortedSet[T]` | `T` | `bool` | `T` | — |
+| `Vector[T]`, a slice | `int` | `T` | `int` | `T` |
+| `LinkedList[V]` (ADR `0010`) | a cursor | `V` | cursor | `V` |
+
+That rule is coherent and answers the questions directly. **A `Vector`'s index is
+its key.** **A set's element is its key, and a set has no value.**
+
+### But the viewers implement four different answers
+
+ADR `0012` gives keys a round trip — `ToKeyView` out, `FromKeyView(NK) (K, bool)`
+back in — and values only an outbound conversion, because only a key travels
+inward, for lookup. That is right. What is not right is which containers get
+which:
+
+| container | viewer requires | key converted? | round-trips? |
+|---|---|---|---|
+| `HashDict`, `Map` | `KeyViewer` + `ValueViewer` | yes | yes |
+| `HashSet` | `KeyViewer` only | yes | yes |
+| `SortedDict` | `ValueViewer` only | **no** | — |
+| `Vector`, slice | `ValueViewer` only | n/a (`int`) | — |
+| `SortedSet` | *no viewer at all* | **no** | — |
+
+Four treatments for what the rule above says are three kinds of thing.
+
+**`HashDict.K` and `SortedDict.K` are the same kind of thing** — caller-supplied
+lookup keys — and one is convertible while the other is not. ADR `0012`
+decision 3 justified that on **safety**: `cmp.Ordered` admits only immutable
+value types, so there is nothing for a conversion to protect.
+
+That argument is sound and incomplete. Conversion does two jobs:
+
+- **Protection** — hide a mutable key behind a read-only type. Only mutable keys
+  need it, and `cmp.Ordered` keys are not mutable. `0012` is right about this.
+- **Abstraction** — stop a consumer naming the container's own types. ADR `0013`
+  leaned on this heavily: "unordered consumers stop naming the implementation."
+
+Ordered views get the first for free and the second not at all. A consumer of
+`SortedDictView[K, NV]` names the container's raw `K`, and a consumer of
+`SortedSetView[T]` names its raw `T` with no way to convert anything. **Nobody
+decided that was acceptable; it fell out of a decision made about safety.**
+
+### A third category the rule does not name
+
+`HashDict`'s `K` is caller data. `Vector`'s `int` is not — it is a coordinate the
+container assigned, meaningful only relative to that container. A
+`LinkedListCursor` is the same kind of thing and more obviously so, being opaque
+by construction (ADR `0010` decision 1).
+
+So there are three categories, not two:
+
+| category | example | converted? | round-trips? |
+|---|---|---|---|
+| **caller key** | `HashDict.K`, `HashSet.T` | yes — protection and abstraction | **yes**, it travels inward |
+| **position** | `Vector`'s index, a cursor | no — already opaque or trivial | n/a |
+| **value** | `HashDict.V`, `Vector`'s element | yes — outbound only | no |
+
+Under this taxonomy every current treatment is explained except one: **ordered
+containers put caller keys in the position column**, which is where the anomaly
+lives.
+
+### It decides problem 1
+
+If a container is a bag of *(handle, value)* pairs, then the general contract is
+`Elems2` and `Elems` is the degenerate case:
+
+- a **dict** is key/value → `Elems2[K, V]`
+- a **sequence** is position/value → `Elems2[int, T]`
+- a **set** has keys and no values → `Elems[T]` is the honest shape
+
+Which makes `Vector` an `Elems2[int, T]` whose values can also be walked alone —
+exactly direction 1A below, arrived at from semantics rather than from matching
+the stdlib. That two independent routes reach the same shape is the strongest
+argument either of them has.
+
 ## Findings
 
 From `experiments/iteration/`.
@@ -319,8 +410,13 @@ methods.
 
 ## What this ADR does not do
 
-It does not decide. Three things should be settled before it becomes a decision,
-and two of them are already open elsewhere:
+It does not decide. Five things should be settled before it becomes a decision,
+and three of them are already open elsewhere. They are listed in dependency
+order, not importance order:
+
+0. **What a key and a value are** (problem 4), which is logically prior to the
+   rest: it decides whether `Vector` is an `Elems2[int, T]`, whether ordered
+   containers should convert their keys, and whether a position is a key at all.
 
 1. **Whether `All` should mean `Seq2`**, matching the stdlib. Everything in
    problem 1 follows from that answer — and the corrected finding means the
@@ -329,6 +425,11 @@ and two of them are already open elsewhere:
 2. **Whether `Elems` stays an interface.** ADR `0006` and `0008` assume it does.
 3. **Whether `Range` returns a view** (ADR `0013`'s follow-up) and whether the
    ordered contract tier lands (ADR `0008`'s). Problem 3's shape depends on both.
+4. **Whether ADR `0012` decision 3 should be revisited** — ordered containers
+   converting values only. It is sound on safety and silent on abstraction, and
+   problem 4 is where that shows. Note that ADR `0016` records this decision as
+   load-bearing for a different reason: it is what lets `SortedDictView` embed
+   `DictView`. Changing it reopens that too.
 
 ## Follow-ups absorbed into this ADR
 
