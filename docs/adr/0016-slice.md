@@ -1,6 +1,8 @@
-# 16. Slice[T]: a defined slice type, as an adapter
+# 16. A view over a plain slice, and no `Slice` type
 
-- **Status:** Proposed.
+- **Status:** Proposed. Note that this ADR changed subject while being written:
+  it set out to propose `Slice[T] []T` and the measurements turned it into a
+  proposal to add a view and no type. The rejected adapter is kept in full below.
 - **Date:** 2026-09-08
 - **Evidence:** `experiments/sliceadapter/` (`RESULTS.md`), with context from
   `experiments/vectorcost/` and `sizedcollect/`.
@@ -79,24 +81,28 @@ func (c *Config) Hosts() []string { return c.hosts }
 Proposed:
 
 ```go
-// sketch
-type Config struct{ hosts containers.Slice[string] } // still a []string underneath
+// sketch -- the field does not change at all
+type Config struct{ hosts []string }
 
 func (c *Config) Hosts() containers.VectorView[string] {
 	return containers.ViewSliceIdentity(&c.hosts)
 }
 ```
 
-**Zero copy, O(1), and the caller cannot write.** The field is still a slice —
-builtin syntax, `append`, `range`, `encoding/json` all keep working — and it
-gained the ability to be handed out read-only, which a `[]T` cannot do at any
-price short of copying.
+**Zero copy, O(1), and the caller cannot write.** The field is still a `[]string`
+— `append`, `range`, indexing and `encoding/json` all keep working — and it
+gained the ability to be handed out read-only, which a slice cannot otherwise do
+at any price short of copying.
 
-This is ADR `0001`'s accessor problem again, and it is the justification Task L
-was supposed to provide and does not. It is a *safety* win, which is what the call-site
-convention actually asks for.
+This is ADR `0001`'s accessor problem, and it is the only task here that is a
+win. It is a *safety* win, which is what the call-site convention asks for.
 
-### Task K — a sequence field that round-trips through JSON
+An earlier draft of this ADR reached it through a `Slice[T]` adapter, making the
+field `containers.Slice[string]`. That works and is measurably identical — and
+the adapter turns out to contribute nothing to it, which is what moved this ADR
+off proposing one.
+
+### Task K — a sequence field that round-trips through JSON. **Not a win.**
 
 ```go
 // sketch -- today
@@ -105,22 +111,20 @@ type Config struct {
 }
 
 type Config struct {
-	Hosts []string // round-trips, but has no library vocabulary at all
+	Hosts []string // round-trips correctly
 }
 ```
 
-Proposed:
+A plain slice already does this. The draft that proposed `Slice[T]` counted JSON
+as a reason for it, on the grounds that a `Slice[T]` field would round-trip
+*and* carry the library's vocabulary. But the vocabulary is only needed to
+satisfy `Elems[T]`, Task L shows that is not worth having for a slice, and
+decision 1 leaves the field a plain `[]string` anyway — so the round-trip was
+never at risk.
 
-```go
-// sketch
-type Config struct {
-	Hosts containers.Slice[string] // ["a","b"], and has Len, At, All, AllIndexed
-}
-```
-
-A narrow win, and the only one available: no struct-shaped container in this
-library can round-trip, and that is not fixable without the serialization ADR
-`0002` has been owing since the beginning.
+**Recorded because it was nearly used as a justification.** What it actually
+shows is that `Vector` marshals as `{}`, which is the serialization ADR this
+library has owed since `0002`, and is not fixable here.
 
 ### Task L — feeding a plain `[]T` to a sized bulk operation. **Not a win.**
 
@@ -228,148 +232,149 @@ boxes with an allocation. `Map` has no such problem: its header is one word, so
 
 ## Decision
 
-### 1. Build `Slice[T any] []T`, with value receivers and no growth
+### 1. Add `ViewSlice` and `ViewSliceIdentity` over `*[]T`. Add no new type.
 
 ```go
-type Slice[T any] []T
-
-func (s Slice[T]) Len() int
-func (s Slice[T]) At(i int) T
-func (s Slice[T]) Set(i int, e T)
-func (s Slice[T]) All() iter.Seq[T]
-func (s Slice[T]) AllIndexed() iter.Seq2[int, T]
-func (s Slice[T]) Clone() Slice[T]
+func ViewSlice[T, NT any](s *[]T, viewer CanViewVector[T, NT]) VectorView[NT]
+func ViewSliceIdentity[T any](s *[]T) VectorView[T]
 ```
 
-**There is deliberately no `Append`.** A value receiver cannot grow a slice, and
-a pointer receiver would forfeit the value semantics the type exists for. Callers
-append with the builtin — `s = append(s, e)` works on a `Slice[T]` unchanged —
-or reach for `Vector` when they want that hidden.
-
-`Set` is kept even though it permits mutation through a read-shaped type, because
-`s[i] = e` works on a defined slice type regardless. Denying the method would
-buy nothing and cost consistency with `Vector`.
-
-### 2. It exists so a slice can be handed out read-only, and can satisfy `Elems[T]`
-
-The first is the justification and belongs in the first line of its doc comment:
-a `[]T` field converts for free into something that has a view, which is the one
-thing a slice cannot otherwise do without copying.
-
-Satisfying `Elems[T]` is a secondary convenience. It is **not** the reason —
-Task L shows a variadic bulk method beats the adapter 2.1x for that job — but it
-is still the right way to feed a slice to an operation that has no variadic
-form.
-
-### 3. It is an adapter, not a default — `Vector` is the default
-
-Reach for `Slice` for a free conversion from `[]T`, for builtin syntax, to pass
-where a `[]T` is expected, or for working `encoding/json`. Everything else uses
-`Vector`, which is the only one of the two that hides reallocation.
-
-This is the same division `0009` draws between `Map` and `HashDict`, and it
-should be stated the same way.
-
-### 4. It has a view, sharing the sequence view interface, and that view takes a pointer
-
-Every container has one (ADR `0011`), adapters included — `Map` has `ViewMap`.
-The need is not theoretical here: handing out read-only access to a slice is
-Task J, this ADR's primary justification.
+That is the whole change. A `[]T` field gains the one thing it could not have —
+being handed out read-only — and gains it without becoming a different type:
 
 ```go
-func ViewSlice[T, NT any](s *Slice[T], viewer CanViewVector[T, NT]) VectorView[NT]
-func ViewSliceIdentity[T any](s *Slice[T]) VectorView[T]
+type Config struct{ hosts []string } // unchanged
+
+func (c *Config) Hosts() containers.VectorView[string] {
+	return containers.ViewSliceIdentity(&c.hosts)
+}
 ```
 
-**It shares the interface rather than declaring a `SliceView` of its own.** That
-follows ADR `0013` decision 1 exactly: a `Map`'s view is a `DictView`, not a
-`MapView`, because it adds nothing to the base. A `Slice`'s view adds nothing to
-a `Vector`'s, so a second identical interface would only mean a slice view could
-not be passed where a vector view is wanted.
+`append`, `range`, indexing and `encoding/json` all keep working on the field,
+because it is still a slice.
 
-**`*Slice[T]`, not `Slice[T]`.** Measured: by value a view costs 12.25 ns and an
-allocation, because a slice header is three words and so not pointer-shaped; by
-pointer it is 0.377 ns and none. `Map` avoids this only because a map header is
-one word. The cost is that `ViewSliceIdentity` needs an addressable `Slice`, so
-it cannot be applied directly to a function's return value.
+### 2. `*[]T`, not `[]T`
 
-### 5. No `CollectSlice`
+A slice header is three words, so a view holding one by value is not
+pointer-shaped and costs an allocation on every construction; holding the
+address costs none. Measured at 12.25 ns and one allocation against 0.375 ns and
+zero.
 
-`slices.Collect` already returns a `[]T`, which converts to a `Slice[T]` for
-free. A `CollectSlice` would be a rename of a stdlib function, which is not what
-the `Collect<Container>` family is for.
+The address is also the right semantics rather than merely the cheap one: the
+view tracks the *variable*, so the owner's appends — including reallocating
+ones — are visible through it. Holding a copy of the header would show a
+snapshot that silently goes stale. This matches `ViewVectorIdentity`, which holds
+`*Vector`.
+
+The cost is that `ViewSliceIdentity` needs an addressable slice, so it cannot be
+applied directly to a function's return value. One local variable fixes it, and
+the same is true of `Vector`.
+
+### 3. The view is a `VectorView`, not a new interface
+
+A slice's view adds nothing to a `Vector`'s. Declaring a second identical
+interface would only mean a slice view could not be passed where a vector view is
+wanted. This is ADR `0013` decision 1's reasoning applied unchanged: a `Map`'s
+view is a `DictView`, not a `MapView`.
 
 ## Open questions
 
 ### A. What the sequence view interface should be called
 
-Decision 4 shares one interface between `Vector` and `Slice`, which is right. But
-it is currently called `VectorView`, and naming it after one of its two
-implementations was already flagged in ADR `0015` decision 5 as an inconsistency
-— the set and dict views are named for the *concept*. A second implementation
-makes it actively misleading.
+`VectorView` now names an interface with two producers, one of which is not a
+`Vector` at all. ADR `0015` decision 5 already flagged naming it after an
+implementation as inconsistent; this makes it wrong. `SeqView` or `ListView`
+would be correct.
 
-`SeqView` or `ListView` would be concept-shaped and correct for both. Renaming
-touches shipped code, so it is left to the naming review ADR `0015` opened rather
-than taken here. **If that review is not happening soon, this is the argument for
-doing it now**, since every new caller of `VectorView` makes the rename bigger.
-
-### B. Whether `Vector.AppendAll` is the odd one out
-
-Left open deliberately, pending the bulk-mutator consistency work ADR `0015`
-recorded. The finding in Task L is an input to it: a variadic bulk form and an
-`Elems` form are complementary, each optimal for its own source, so the answer is
-probably "offer both everywhere" rather than picking one.
+Renaming touches shipped code, so it belongs to the naming review ADR `0015`
+opened — but **this decision is the argument for doing that review now**, because
+`ViewSlice` is a second caller and every one makes the rename bigger.
 
 ## Rejected alternatives
 
-### Give `Slice` a pointer receiver so it can grow
+### `Slice[T] []T` as an adapter — what this ADR set out to propose
 
-`func (s *Slice[T]) Append(e T)` works. Rejected because it forfeits everything
-the type is for: a `*Slice[T]` cannot be produced by a free conversion from a
-`[]T` value, cannot be passed where a `[]T` is expected, and reintroduces the
+ADR `0015` recorded it as a follow-up and ADR `0008` had pre-authorised the name.
+It would have been a defined slice type with value receivers, `Len`, `At`, `Set`,
+`All`, `AllIndexed` and `Clone`, and deliberately no `Append` — a value receiver
+cannot grow a slice, and a pointer receiver would forfeit the value semantics
+that make an adapter an adapter.
+
+Every reason for it fell over:
+
+- **To give a slice a view.** The view needs no adapter. Measured over a bare
+  `*[]T` it is identical on construction, indexing and iteration, all
+  allocation-free, and it leaves the caller's field a plain slice instead of
+  requiring a type change.
+- **To let a `[]T` satisfy `Elems[T]` for bulk operations.** Task L: a variadic
+  bulk form is 2.1x faster than the adapter for that, and needs no type.
+- **To round-trip through `encoding/json`.** Task K: a plain slice already does,
+  and decision 1 keeps the field a plain slice.
+- **To supply index/value pairs to a dict-shaped constructor.** It cannot. A type
+  has one `All`, and one yielding values satisfies `Elems[T]` rather than
+  `Elems2[int, T]`:
+
+  ```
+  Slice[string] does not implement Elems2[int, string] (wrong type for method All)
+          have All() iter.Seq[string]
+          want All() iter.Seq2[int, string]
+  ```
+
+  Serving that case would need a *second* adapter whose `All` yields pairs, which
+  would then not satisfy `Elems[T]`.
+
+What is left is a type that costs nothing to use, fixes nothing, and does nothing
+a plain slice plus one constructor does not. It would also have added a second
+sequence type whose difference from `Vector` is invisible in the name, and a
+fourth exception to ADR `0008`'s naming scheme.
+
+**The analysis is kept because the wall in the `Map` analogy is worth having
+written down**: `Map` works as an adapter because a map is a reference type, and
+nothing in the slice world can copy that.
+
+### Give the adapter a pointer receiver so it can grow
+
+`func (s *Slice[T]) Append(e T)` works. Rejected with the adapter, and
+independently: a `*Slice[T]` cannot be produced by a free conversion from a `[]T`
+value, cannot be passed where a `[]T` is expected, and reintroduces the
 mixed-receiver problem ADR `0002` decision 2 rejected. A type that needs a
 pointer is `Vector`, which already exists.
 
-### Do not build it
+### Take the slice by value in the view
 
-Costs nothing, and Task L no longer argues against it — a variadic bulk method
-covers that case better than the adapter does, with no new type.
+`ViewSliceIdentity(s []T)` reads better than `ViewSliceIdentity(&s)` and works on
+a function's return value directly. Rejected on two grounds: it costs 12.25 ns
+and an allocation per construction against 0.375 ns and none, and it captures a
+*snapshot* of the header, so the view silently goes stale the moment the owner
+appends.
 
-Rejected on Task J alone. Without `Slice`, a `[]T` field cannot be handed out
-read-only at any price short of copying it, and migrating the field to `Vector`
-changes how every other line touching it reads — `append`, `range`, indexing and
-`encoding/json` all stop working on it. `Slice` is the only way to keep a slice a
-slice and still give it a view.
+### Do nothing
 
-The JSON round-trip in Task K is a second, narrower reason, and would not have
-been sufficient alone.
-
-### Make `Slice` the default and drop `Vector`
-
-Rejected outright: an adapter fixes none of the hazards ADR `0015` was accepted
-to fix, and `Vector`'s justification — the accessor problem — is untouched by
-anything here.
+Rejected on Task J alone. A slice field cannot be handed out read-only at any
+price short of copying — O(n) per call and O(n²) in a caller's loop, per
+`experiments/copycost` — and migrating it to `Vector` changes how every other
+line touching it reads.
 
 ## Consequences
 
-- **Two sequence types, and the difference is not obvious from the names.**
-  `Vector` hides reallocation; `Slice` does not. `Slice` exists so an existing
-  slice can be given a view without ceasing to be a slice. This needs saying
-  wherever either is documented, as `0009` does for `Map` and `HashDict`.
-- **The adapter is not the fast path for bulk appends**, despite carrying `Len`.
-  A variadic form beats it 2.1x when the source is already a slice. Reaching for
-  `Slice[T](s)` to feed a bulk operation is a mistake the doc comment should name
-  outright.
-- **`Slice` is the only sequence in the library that round-trips through
-  `encoding/json`**, which makes the missing serialization ADR more visible, not
-  less.
-- **Its view is spelled differently from `Map`'s**, taking a pointer where
-  `ViewMapIdentity` takes a value. A reader will notice; the doc comment should
-  say why.
-- **`Slice[T]` has no `Append` while `Vector` does**, which will read as an
-  omission until the reason is given. It is the same asymmetry `Map` has with
-  nothing, and stems from a language property rather than a choice.
+- **The library gains a view without gaining a container.** This is the first
+  time; every previous view came with one. ADR `0011`'s rule is that every
+  container has a view, not that every view has a container, so nothing needs
+  restating — but `CLAUDE.md` describes views as belonging to containers and will
+  need a word.
+- **`VectorView` acquires a second producer that is not a `Vector`**, which turns
+  a naming inconsistency into a naming error. See the open question.
+- **A slice field can now be exposed read-only without changing its type**, which
+  is a cheaper migration than any other container in this library offers — there
+  is nothing to migrate.
+- **The view tracks the variable, not a snapshot.** `hosts = append(hosts, x)` is
+  visible through a view taken beforehand, including across reallocations. That
+  is the correct behaviour for a field accessor and a surprise for anyone
+  expecting a copy; it is the same rule every other view in the library follows.
+- **`ViewSliceIdentity` needs an addressable slice**, so it cannot be applied to
+  a function's return value without a local. `Vector` has the same constraint.
+- **No `Slice[T]`, so ADR `0008`'s pre-authorised exception goes unused**, and the
+  naming scheme keeps two exceptions rather than gaining a third.
 
 ## Follow-ups
 

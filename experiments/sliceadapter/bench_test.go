@@ -275,3 +275,82 @@ func BenchmarkAppendFromContainer(b *testing.B) {
 		}
 	})
 }
+
+// ---- 6. can the view stand alone, with no Slice type at all? -------------
+
+func BenchmarkViewOnly(b *testing.B) {
+	raw := source()
+	ad := Slice[int](raw)
+	vec := &Vector[int]{es: raw}
+
+	b.Run("Construct/OverBareSlice", func(b *testing.B) {
+		for b.Loop() {
+			sinkView = ViewBareSlice(&raw)
+		}
+	})
+	b.Run("Construct/OverSlicePtr", func(b *testing.B) {
+		for b.Loop() {
+			sinkView = ViewSlicePtr(&ad)
+		}
+	})
+	b.Run("Construct/OverVector", func(b *testing.B) {
+		for b.Loop() {
+			sinkView = ViewVectorIdentity(vec)
+		}
+	})
+
+	bare := ViewBareSlice(&raw)
+	viaAd := ViewSlicePtr(&ad)
+	viaVec := ViewVectorIdentity(vec)
+
+	b.Run("At/OverBareSlice", func(b *testing.B) {
+		for b.Loop() {
+			sinkInt = bare.At(512)
+		}
+	})
+	b.Run("At/OverSlicePtr", func(b *testing.B) {
+		for b.Loop() {
+			sinkInt = viaAd.At(512)
+		}
+	})
+	b.Run("At/OverVector", func(b *testing.B) {
+		for b.Loop() {
+			sinkInt = viaVec.At(512)
+		}
+	})
+
+	b.Run("Sum/OverBareSlice", func(b *testing.B) {
+		for b.Loop() {
+			t := 0
+			for x := range bare.All() {
+				t += x
+			}
+			sinkInt = t
+		}
+	})
+	b.Run("Sum/OverVector", func(b *testing.B) {
+		for b.Loop() {
+			t := 0
+			for x := range viaVec.All() {
+				t += x
+			}
+			sinkInt = t
+		}
+	})
+}
+
+// The view tracks the variable, so the owner's appends are visible through it.
+func BenchmarkReportViewOnly(b *testing.B) {
+	var hosts []string
+	view := ViewBareSlice(&hosts)
+
+	hosts = append(hosts, "a")
+	hosts = append(hosts, "b", "c") // reallocates
+	b.Logf("view over a plain []T, taken before any append: Len=%d At(0)=%q",
+		view.Len(), view.At(0))
+
+	b.Logf("the field stays a []T, so append/range/index/json all keep working")
+	for b.Loop() {
+		sinkInt++
+	}
+}

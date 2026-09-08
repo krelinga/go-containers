@@ -137,7 +137,41 @@ That is an awkward result for an adapter whose selling point is value semantics:
 to a function's return value. `Map` does not have this problem, because a map
 header is one word.
 
-## 7. It round-trips through `encoding/json`
+## 7. The view does not need the adapter
+
+A view can be taken over a plain `[]T` directly, holding `*[]T` — one word, so it
+boxes free, exactly like a view over a `*Vector`:
+
+| | construct | `At` | `All` sum of 1024 |
+|---|---|---|---|
+| over a bare `*[]int` | 0.375 ns | 1.10 ns | 1.150 µs |
+| over a `*Slice[int]` | 0.370 ns | 1.05 ns | — |
+| over a `*Vector[int]` | 0.375 ns | 0.98 ns | 1.144 µs |
+
+Indistinguishable, all zero-allocation. The adapter contributes nothing.
+
+```
+view over a plain []T, taken before any append: Len=3 At(0)="a"
+```
+
+The view holds the address of the variable, so the owner's appends — including
+the reallocating ones — are visible through it, and the field stays a `[]T`,
+keeping `append`, `range`, indexing and `encoding/json`.
+
+### And the adapter cannot serve the index/value case
+
+```
+Slice[string] does not implement Elems2[int, string] (wrong type for method All)
+        have All() iter.Seq[string]
+        want All() iter.Seq2[int, string]
+```
+
+A type has one `All`. `Slice`'s yields values, so it satisfies `Elems[T]` and not
+`Elems2[int, T]`; `AllIndexed` is a different method under a different name.
+Feeding index/value pairs into a dict-shaped constructor would need a *second*
+adapter whose `All` yields pairs — which would then not satisfy `Elems[T]`.
+
+## 8. It round-trips through `encoding/json`
 
 ```
 json.Marshal: Slice -> [1,2,3]   Vector -> {}
@@ -171,7 +205,12 @@ Durable:
    a slice. The two are complementary; neither subsumes the other.
 6. A view over a slice adapter must hold `*Slice[T]`; by value it costs an
    allocation, because a slice header is three words where a map header is one.
-7. A defined slice type round-trips through `encoding/json`; no struct-shaped
-   container in this library does.
+7. A view over a plain `[]T` — holding `*[]T` — is indistinguishable from one
+   over an adapter or over a `*Vector`, on construction, indexing and iteration,
+   all allocation-free. **The adapter is not needed to give a slice a view.**
+8. A slice adapter cannot serve the index/value case: a type has one `All`, and
+   one yielding values satisfies `Elems[T]` rather than `Elems2[int, T]`.
+9. A defined slice type round-trips through `encoding/json` — but so does a
+   plain `[]T`, which is what it would be replacing.
 
 Perishable: every absolute number above.
