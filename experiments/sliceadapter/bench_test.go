@@ -354,3 +354,56 @@ func BenchmarkReportViewOnly(b *testing.B) {
 		sinkInt++
 	}
 }
+
+// ---- 7. what taking []T instead of *[]T costs, in both senses ------------
+
+func BenchmarkViewParamForm(b *testing.B) {
+	raw := source()
+
+	b.Run("TakesPointer", func(b *testing.B) {
+		for b.Loop() {
+			sinkView = ViewBareSlice(&raw)
+		}
+	})
+	b.Run("TakesValue", func(b *testing.B) {
+		for b.Loop() {
+			sinkView = ViewSliceByValue(raw)
+		}
+	})
+	b.Run("TakesValueStoresAddress", func(b *testing.B) {
+		for b.Loop() {
+			sinkView = ViewSliceByValueBoxed(raw)
+		}
+	})
+}
+
+func BenchmarkReportParamSemantics(b *testing.B) {
+	// A view holding the ADDRESS tracks the variable.
+	live := make([]string, 0, 4)
+	live = append(live, "a")
+	lv := ViewBareSlice(&live)
+	live = append(live, "b")           // still within capacity
+	live = append(live, "c", "d", "e") // reallocates
+	b.Logf("holds *[]T: after appends, Len=%d (owner has %d)", lv.Len(), len(live))
+
+	// A view holding the HEADER sees element writes but not length changes.
+	val := make([]string, 1, 4)
+	val[0] = "original"
+	vv := ViewSliceByValue(val)
+	val[0] = "MUTATED"            // same backing array -> visible
+	val = append(val, "appended") // length change -> invisible
+	b.Logf("holds []T:  At(0)=%q (element write VISIBLE), Len=%d (owner has %d, append INVISIBLE)",
+		vv.At(0), vv.Len(), len(val))
+
+	// And once the owner reallocates, even element writes stop being visible.
+	val2 := make([]string, 1, 1)
+	val2[0] = "original"
+	vv2 := ViewSliceByValue(val2)
+	val2 = append(val2, "forces realloc")
+	val2[0] = "MUTATED after realloc"
+	b.Logf("holds []T:  after the owner reallocates, At(0)=%q -- now fully stale", vv2.At(0))
+
+	for b.Loop() {
+		sinkInt++
+	}
+}

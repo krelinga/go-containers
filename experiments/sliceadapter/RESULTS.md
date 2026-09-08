@@ -120,22 +120,43 @@ The consequence for a slice adapter is direct and unflattering: **feeding a
 plain `[]T` to a bulk append is not a reason to have one.** A variadic bulk
 method does that job 2.1x faster than converting to an adapter.
 
-## 6. A view over it must take a pointer
+## 6. What the view's parameter form costs, in both senses
 
 | construct a sequence view | | allocs |
 |---|---|---|
-| over a `*Vector` (one word) | 0.371 ns | 0 |
-| over a `Slice` **by value** (three words) | **12.25 ns** | **1** |
-| over a `*Slice` (one word) | 0.377 ns | 0 |
+| from `*[]T` (or `*Slice`, or `*Vector`) | 0.367 ns | 0 |
+| from `[]T`, storing the header | **11.80 ns** | **1** |
+| from `[]T`, storing its address | 11.68 ns | 1 |
 
-A slice header is three words, so a view holding one by value is not
-pointer-shaped and boxes with an allocation — the same mechanism
-`experiments/viewiface` measured. Holding `*Slice[T]` instead is free.
+A slice header is three words, so a view holding one is not pointer-shaped and
+boxes with an allocation. Taking `[]T` and storing `&s` does not help: the
+address of a parameter escapes, so it allocates too. **A value parameter costs
+one allocation per view, and there is no way around it.**
 
-That is an awkward result for an adapter whose selling point is value semantics:
-`ViewSlice(&s)` requires an addressable `Slice`, so it cannot be applied directly
-to a function's return value. `Map` does not have this problem, because a map
-header is one word.
+The behavioural difference is the more interesting one:
+
+```
+holds *[]T: after appends, Len=5 (owner has 5)
+holds []T:  At(0)="MUTATED" (element write VISIBLE), Len=1 (owner has 2, append INVISIBLE)
+holds []T:  after the owner reallocates, At(0)="original" -- now fully stale
+```
+
+These are two different things being viewed, not two qualities of the same view.
+A `*[]T` view tracks a **variable**, so it follows every rebinding. A `[]T` view
+holds a **slice value**, which cannot change — an append produces a *different*
+value the view was never given, and after a reallocation the original value is
+still intact and still what the view shows.
+
+Which is correct depends on whether a reallocated slice is the same slice. It is
+not: Go's `append` returns a value the caller must rebind, and ADR `0015` exists
+precisely because "a reallocation stops being observable" is a property a
+`Vector` has to *add*. Identity lives in the variable or in a container, never in
+the slice value.
+
+So the third line above is not staleness. It is the view faithfully showing the
+value it was handed, which is also what `views.go` promises: a view is "not a
+snapshot", shows writes to the elements it wraps, and does not invent elements it
+was never given.
 
 ## 7. The view does not need the adapter
 
@@ -203,8 +224,12 @@ Durable:
    expansion happens once per batch. But `Elems` beats variadic by 1.9x when the
    source is a container, because the caller would otherwise have to materialise
    a slice. The two are complementary; neither subsumes the other.
-6. A view over a slice adapter must hold `*Slice[T]`; by value it costs an
-   allocation, because a slice header is three words where a map header is one.
+6. A view's parameter form costs one allocation if it takes a slice by value,
+   and none if it takes an address — and there is no way to take a value without
+   paying it, since the address of a parameter escapes. The two forms view
+   different things: an address views a *variable*, a value views a *slice
+   value*, and since a reallocated slice is a new slice, the value form is not
+   stale but faithful.
 7. A view over a plain `[]T` — holding `*[]T` — is indistinguishable from one
    over an adapter or over a `*Vector`, on construction, indexing and iteration,
    all allocation-free. **The adapter is not needed to give a slice a view.**

@@ -94,7 +94,7 @@ Proposed:
 type Config struct{ hosts []string }
 
 func (c *Config) Hosts() containers.IndexedView[string] {
-	return containers.ViewSliceIdentity(&c.hosts)
+	return containers.ViewSliceIdentity(c.hosts)
 }
 ```
 
@@ -194,7 +194,10 @@ and does not stop appends off a shared header aliasing. **Recorded so that
 
 From `experiments/sliceadapter/`.
 
-### A view over a plain slice costs nothing, and needs no adapter
+### A view over a plain slice needs no adapter
+
+Like for like — every row taking an address, so the only variable is what is
+underneath:
 
 | | construct | `At` | `All` sum of 1024 |
 |---|---|---|---|
@@ -202,21 +205,28 @@ From `experiments/sliceadapter/`.
 | over a `*Slice[int]` | 0.370 ns | 1.05 ns | — |
 | over a `*Vector[int]` | 0.375 ns | 0.98 ns | 1.144 µs |
 
-Indistinguishable, all allocation-free. **The adapter contributes nothing to the
+Indistinguishable. (Decision 2 takes `[]T` rather than `*[]T`, which costs one
+allocation — a separate axis, measured below. It applies equally to all three
+rows and so does not change this comparison.)
+
+**The adapter contributes nothing to the
 one thing it was most wanted for**, and going without leaves the caller's field a
 plain slice.
 
-### It must hold the address, not the header
+### Taking a slice by value costs one allocation, and there is no way around it
 
 | construct a view | | allocs |
 |---|---|---|
-| over `*[]T` / `*Slice` / `*Vector` | ~0.375 ns | 0 |
-| over a `Slice` **by value** | **12.25 ns** | **1** |
+| from `*[]T` | 0.367 ns | 0 |
+| from `[]T`, storing the header | **11.80 ns** | **1** |
+| from `[]T`, storing its address | 11.68 ns | 1 |
 
-A slice header is three words, so holding one by value is not pointer-shaped and
-boxes with an allocation. It is also a *snapshot*: a view holding a copy of the
-header goes stale the moment the owner appends. `Map` has neither problem — its
-header is one word and a map is a reference type.
+A slice header is three words, so a view holding one is not pointer-shaped and
+boxes with an allocation. Taking `[]T` and storing `&s` does not dodge it — the
+address of a parameter escapes.
+
+Decision 2 pays that allocation deliberately. The two forms view different
+things, and the value form is the one that matches what a slice is.
 
 ### Evidence that bore on the adapter, and did not save it
 
@@ -250,11 +260,11 @@ Slice[string] does not implement Elems2[int, string] (wrong type for method All)
 
 ## Decision
 
-### 1. Add `ViewSlice` and `ViewSliceIdentity` over `*[]T`. Add no new type.
+### 1. Add `ViewSlice` and `ViewSliceIdentity` over `[]T`. Add no new type.
 
 ```go
-func ViewSlice[T, NT any](s *[]T, viewer CanViewSlice[T, NT]) IndexedView[NT]
-func ViewSliceIdentity[T any](s *[]T) IndexedView[T]
+func ViewSlice[T, NT any](s []T, viewer CanViewSlice[T, NT]) IndexedView[NT]
+func ViewSliceIdentity[T any](s []T) IndexedView[T]
 ```
 
 That is the whole change. A `[]T` field gains the one thing it could not have —
@@ -264,7 +274,7 @@ being handed out read-only — and gains it without becoming a different type:
 type Config struct{ hosts []string } // unchanged
 
 func (c *Config) Hosts() containers.IndexedView[string] {
-	return containers.ViewSliceIdentity(&c.hosts)
+	return containers.ViewSliceIdentity(c.hosts)
 }
 ```
 
@@ -277,22 +287,46 @@ named per *constructor*, so that failing to satisfy one names the operation you
 cannot perform. `CanViewHashDict` and `CanViewMap` are already identical to each
 other on the same grounds.
 
-### 2. `*[]T`, not `[]T`
+### 2. `[]T`, not `*[]T` — because a reallocated slice is a new slice
 
-A slice header is three words, so a view holding one by value is not
-pointer-shaped and costs an allocation on every construction; holding the
-address costs none. Measured at 12.25 ns and one allocation against 0.375 ns and
-zero.
+The constructor takes a slice, not the address of one. That costs one allocation
+per view — 11.80 ns against 0.367 ns — and it is not an ergonomic concession. It
+is the correct signature, and the reason is a semantic question worth writing
+down.
 
-The address is also the right semantics rather than merely the cheap one: the
-view tracks the *variable*, so the owner's appends — including reallocating
-ones — are visible through it. Holding a copy of the header would show a
-snapshot that silently goes stale. This matches `ViewVectorIdentity`, which holds
-`*Vector`.
+**Is a reallocated slice logically the same slice, or a new one?**
 
-The cost is that `ViewSliceIdentity` needs an addressable slice, so it cannot be
-applied directly to a function's return value. One local variable fixes it, and
-the same is true of `Vector`.
+It is a new one. Go's `append` returns a value the caller must rebind, and the
+spec does not promise the backing array is reused, so a slice has value identity
+rather than reference identity. This library has already committed to that
+answer: ADR `0015` justifies `Vector` on the grounds that with one, "a
+reallocation stops being observable" — which only needs saying because for a bare
+slice it *is* observable. **If a reallocated slice were the same slice, `Vector`
+would have nothing to fix.** Identity lives in a variable, or in a container that
+owns the slice. Never in the slice value.
+
+So the two candidate signatures view two different things:
+
+- `ViewSlice(s *[]T)` views a **variable**, and follows every rebinding.
+- `ViewSlice(s []T)` views a **slice value**, which cannot change.
+
+Given that a slice is a value, the second is what "a view of a slice" means. The
+behaviour follows and is correct rather than merely tolerable:
+
+```
+At(0)="MUTATED"   -- an element write is visible, because the view wraps that element
+Len=1             -- an append is not, because it produced a value the view was never given
+At(0)="original"  -- after the owner reallocates, the value the view holds is intact
+```
+
+That third line is not staleness. It is the view faithfully showing what it was
+handed, and it matches what `views.go` already promises: a view is "not a
+snapshot", it shows later writes to the elements it wraps, and it denies writes
+*through the view*.
+
+An earlier draft of this ADR took `*[]T` and called the value form "half-live,
+and the half changes over time". That was measuring real behaviour against a
+model in which slices have identity — the model ADR `0015` rejects.
 
 ### 3. One shared interface, renamed from `VectorView` to `IndexedView`
 
@@ -363,10 +397,10 @@ that make an adapter an adapter.
 
 Every reason for it fell over:
 
-- **To give a slice a view.** The view needs no adapter. Measured over a bare
-  `*[]T` it is identical on construction, indexing and iteration, all
-  allocation-free, and it leaves the caller's field a plain slice instead of
-  requiring a type change.
+- **To give a slice a view.** The view needs no adapter. Measured like for like,
+  a view over a bare slice is identical to one over the adapter on construction,
+  indexing and iteration, and it leaves the caller's field a plain slice instead
+  of requiring a type change.
 - **To let a `[]T` satisfy `Elems[T]` for bulk operations.** Task L: a variadic
   bulk form is 2.1x faster than the adapter for that, and needs no type.
 - **To round-trip through `encoding/json`.** Task K: a plain slice already does,
@@ -401,13 +435,20 @@ value, cannot be passed where a `[]T` is expected, and reintroduces the
 mixed-receiver problem ADR `0002` decision 2 rejected. A type that needs a
 pointer is `Vector`, which already exists.
 
-### Take the slice by value in the view
+### Take the address of the slice in the view
 
-`ViewSliceIdentity(s []T)` reads better than `ViewSliceIdentity(&s)` and works on
-a function's return value directly. Rejected on two grounds: it costs 12.25 ns
-and an allocation per construction against 0.375 ns and none, and it captures a
-*snapshot* of the header, so the view silently goes stale the moment the owner
-appends.
+`ViewSlice(s *[]T)` is free — 0.367 ns and no allocation against 11.80 ns and
+one — and gives a view that follows the caller's variable through every append
+and rebinding.
+
+Rejected on decision 2's grounds: it views a *variable*, not a slice, and a slice
+is what the caller asked to have viewed. It also costs `&` at every call site and
+requires an addressable slice, so it cannot be applied to a function's return
+value.
+
+If a view of a variable is ever wanted, it is a distinct concept and deserves a
+distinct name rather than the default spelling — and `Vector` already covers most
+of what it would be for, at no allocation and with real identity behind it.
 
 ### Do nothing
 
@@ -431,12 +472,17 @@ line touching it reads.
 - **A slice field can now be exposed read-only without changing its type**, which
   is a cheaper migration than any other container in this library offers — there
   is nothing to migrate.
-- **The view tracks the variable, not a snapshot.** `hosts = append(hosts, x)` is
-  visible through a view taken beforehand, including across reallocations. That
-  is the correct behaviour for a field accessor and a surprise for anyone
-  expecting a copy; it is the same rule every other view in the library follows.
-- **`ViewSliceIdentity` needs an addressable slice**, so it cannot be applied to
-  a function's return value without a local. `Vector` has the same constraint.
+- **A slice view costs one allocation**, where every other view in the library
+  costs none. That is the price of viewing a value rather than a container, and
+  it is unavoidable: a slice header is three words, so it cannot be
+  pointer-shaped.
+- **A slice view shows element writes but not appends.** Both are correct — it
+  wraps the elements it was given and was never given the appended one — but it
+  is the first view in the library where the distinction is visible, because it
+  is the first view of something without identity. The doc comment must say so
+  plainly.
+- **`ViewSliceIdentity` works on any slice expression**, including a function's
+  return value, since it takes no address.
 - **No `Slice[T]`, so ADR `0008`'s pre-authorised exception goes unused**, and the
   naming scheme keeps two exceptions rather than gaining a third.
 
