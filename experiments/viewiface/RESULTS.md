@@ -237,7 +237,27 @@ separates them is that the wrapper's constructor returns a value, so signatures
 carry no `*` and `nil` is not a spellable argument; against that, a bare pointer
 adds no type and matches how containers themselves are passed.
 
-## 8. What none of this decides
+## 8. A view that converts nothing does not allocate behind an interface
+
+Whether an interface-returning constructor allocates depends entirely on whether
+the concrete view is pointer-shaped — not on the interface.
+
+| | | allocs |
+|---|---|---|
+| 3-word view (container + viewer) → sealed interface | 13.14 ns | **1** |
+| **1-word view (container only) → sealed interface** | **0.32 ns** | **0** |
+
+`SortedSetView` in the library is the second row: ADR 0012 gives it no viewer,
+because `cmp.Ordered` keys need no protection, so it is 8 bytes. Putting it
+behind a sealed interface costs nothing at all.
+
+This also means the pointer-shaped option is **subsumed** rather than rejected by
+an interface-returning constructor. Whether the concrete struct is three words
+boxed once, or one word pointing at a heap body, the total is the same single
+allocation — and behind an interface the choice is invisible to callers, so it
+can be made per container and revisited without an API change.
+
+## 9. What none of this decides
 
 Cost separates the concrete struct from the other two, but it does not separate
 the sealed interface from the pointer-shaped struct — they are within 3% of each
@@ -278,7 +298,11 @@ Durable:
    that never cross a boundary. A pointer-shaped struct avoids this: escape
    analysis elides its allocation when it does not escape.
 8. Stateful viewers rule out the type-parameter witness shape entirely.
-9. A one-word wrapper struct and a bare pointer to the same body are
+9. Whether an interface-returning constructor allocates depends on the concrete
+   view's shape, not on the interface: a one-word view behind a sealed interface
+   costs 0.32 ns and no allocation. A view that carries no viewer therefore does
+   not regress behind an interface.
+10. A one-word wrapper struct and a bare pointer to the same body are
    indistinguishable in time and allocations on every axis measured. A
    single-field struct is flattened, so choosing between them is an API
    question, not a cost one.

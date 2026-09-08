@@ -504,3 +504,23 @@ func BenchmarkWrapperVsBarePointer(b *testing.B) {
 		}
 	})
 }
+
+// ---- 11. does a viewer-less view allocate behind a sealed interface? ------
+func BenchmarkSealedShallow(b *testing.B) {
+	d, _, _ := fixture()
+	var sink SealedShallow[*Item, *Item]
+
+	b.Run("Construct", func(b *testing.B) {
+		for b.Loop() {
+			sink = ViewShallowSealed(d)
+		}
+	})
+	sv := ViewShallowSealed(d)
+	b.Run("Call", func(b *testing.B) {
+		for b.Loop() {
+			_, sinkBool = sv.Get(nil)
+		}
+	})
+	b.Logf("ShallowView width = %d B", sizeOf(ShallowView[*Item, *Item]{d}))
+	_ = sink
+}

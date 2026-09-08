@@ -150,3 +150,25 @@ func (v *DirectView[K, V, NK, NV]) Get(nk NK) (NV, bool) {
 	}
 	return v.viewer.ToValueView(raw), true
 }
+
+// ---- A view that converts nothing, behind a sealed interface.
+//
+// SortedSetView in the library carries no viewer (ADR 0012 decision 3), so it
+// is one word. The question option B raises is whether putting it behind an
+// interface makes it allocate for the first time.
+
+type ShallowView[K comparable, V any] struct{ d *Dict[K, V] }
+
+type SealedShallow[K, V any] interface {
+	Len() int
+	Get(K) (V, bool)
+	sealedView()
+}
+
+func (v ShallowView[K, V]) Len() int          { return v.d.Len() }
+func (v ShallowView[K, V]) Get(k K) (V, bool) { return v.d.Get(k) }
+func (v ShallowView[K, V]) sealedView()       {}
+
+func ViewShallowSealed[K comparable, V any](d *Dict[K, V]) SealedShallow[K, V] {
+	return ShallowView[K, V]{d}
+}
