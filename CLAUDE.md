@@ -15,7 +15,8 @@ beside it:
 | `sorteddict.go` | `SortedDict[K cmp.Ordered, V any]` | sorted slice |
 | `map.go` | `Map[K comparable, V any]` | a defined `map[K]V` — an **adapter**, not a default |
 | `contracts.go` | the interfaces below | — |
-| `views.go` | `<Container>View` for each of the above | read-only handles (ADR `0011`) |
+| `views.go` | `<Container>View` for each of the above | read-only handles (ADRs `0011`, `0012`) |
+| `viewers.go` | `KeyViewer`, `ValueViewer`, the `CanView<Container>` set | the conversions a view applies (ADR `0012`) |
 
 Contracts come in three layers (ADR `0008`), each building on the one beneath:
 
@@ -24,6 +25,9 @@ Contracts come in three layers (ADR `0008`), each building on the one beneath:
 | universal | `Elems[T]` | `Elems2[K, V]` | `Len`, `All` |
 | read-only | `Set[T]` | `Dict[K, V]` | `Has` / `Get` |
 | mutation | `MutableSet[T]` | `MutableDict[K, V]` | `Add`+`Remove` / `Set`+`Delete` |
+
+All six take `any` elements and keys, not `comparable` (ADR `0012`) — a view converts keys, and
+the converted type need not be comparable. Implementations state their own constraints.
 
 `callsites_test.go` holds every stdlib-vs-container comparison. Alongside: `docs/adr/` (accepted
 design decisions, binding on new code) and `experiments/` (measurement harnesses, each its own
@@ -74,13 +78,23 @@ to a plain `go test` — a shallow-copy `Clone` that silently shares the underly
   satisfy it silently opts out. Add `Has` or `Get` to reach the read-only layer, and the writes to
   reach the mutation layer. Every existing container satisfied these without changes, because the
   signatures already matched; keep it that way.
-- **Every container has a view, and a new one is not finished without it** (ADR `0011`,
-  `views.go`). A view is a struct holding a container pointer plus a projection: `c.View()` gives
-  the identity view; `View<Container>(c, f)` projects elements through `f`.
+- **Every container has a view, and a new one is not finished without it** (ADRs `0011` and
+  `0012`; `views.go`, `viewers.go`). A view is a struct holding a container pointer plus a
+  *viewer* — an interface value supplying the conversions. Build one with
+  `View<Container>(c, viewer)`, or `View<Container>Identity(c)` to convert nothing.
   Returning a *concrete struct* is the point — a bare contract interface prevents nothing, since
   containers satisfy the read contracts structurally and a holder can assert back and mutate.
   A view is not a snapshot, is not proof against `reflect`+`unsafe`, and is not automatic: a
   provider can still hand out the container, so a view is applied at boundaries deliberately.
+- **There is deliberately no `View()` method** (ADR `0012`). It read as "give me a view" with no
+  hint that key and value handling is a dimension at all, so it invited the assumption that keys
+  were safe. Callers name the conversion, or name its absence with the `Identity` constructor.
+- **Hash containers convert keys both ways; ordered containers convert values only** (ADR `0012`).
+  `KeyViewer` has `ToKeyView(K) NK` outbound and `FromKeyView(NK) (K, bool)` inbound, where a
+  failed conversion reads as a miss. `SortedSet` and `SortedDict` key on `cmp.Ordered`, which
+  admits only immutable value types, so their keys need no protection: `Range`/`Floor`/`Ceil` take
+  `K` directly and `SortedSetView` carries no viewer at all. This is what sidesteps
+  order-preservation entirely — **revisit it if sorted containers ever sort by a function.**
 - **`HashDict` is the default hash dict; `Map` is an adapter** (ADR `0009`). Reach for `Map` only
   when you need a free conversion from an existing `map[K]V`, builtin syntax, to pass the result
   where a `map[K]V` is expected, or working `encoding/json`. Everything else should use `HashDict`,
