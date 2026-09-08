@@ -314,6 +314,28 @@ Go itself splits the same way, which is either a precedent or an excuse:
 `time.Time` is a struct and uses `IsZero`, while maps, slices and interfaces use
 `== nil`.
 
+**A hybrid was evaluated and is not recommended.** Keeping `SetView` and
+`DictView` as pure interfaces while making only `SortedSetView` and
+`SortedDictView` structs has one genuine merit: a struct *satisfies* an interface
+even though it cannot subtype one by embedding, so ADR `0013`'s substitution
+survives implicitly, with no explicit conversion. But it fails on its own terms
+and adds a hazard:
+
+- **The split moves rather than closes.** Hash views stay `== nil`, ordered views
+  become `IsNil()` — two spellings inside the view vocabulary, where which one
+  applies depends on the static type in hand rather than on the value.
+- **It reintroduces the typed-nil trap.** A zero ordered view reports
+  `IsNil() == true`, but substituted into the base interface it is a non-nil
+  interface holding a zero struct: `v == nil` is **false** while calling it
+  panics. With both types as interfaces a nil view is nil at every static type.
+- Substituting a two-word struct into the base interface costs 30.06 ns and an
+  allocation against 13.39 ns and none, every time. A one-word form fixes that
+  and doubles construction.
+
+So the choice stands at two: all views stay interfaces, or all views become
+structs. The hybrid keeps the two spellings *and* adds a trap neither pure option
+has.
+
 ### B. What `Map` must gain before `HashDict` can be removed
 
 `HashDict` has API `Map` does not: `NewHashDict`, `CollectHashDict`,

@@ -325,6 +325,60 @@ The seal stops needing a method. A struct whose only field is unexported cannot
 be built populated outside the package, so `sealedView()` is redundant; and
 `v.(*HashDict[K, V])` fails to compile because `v` is not an interface at all.
 
+### The hybrid: base types stay interfaces, ordered types become structs
+
+A middle option: keep `SetView` and `DictView` as pure interfaces, make only the
+most-derived types — `SortedSetView`, `SortedDictView` — structs, so those carry
+`IsNil`.
+
+**Its central move works, and it is the good idea here.** A struct *satisfies* an
+interface even though it cannot embed-and-subtype one, so the ordered view
+remains usable wherever the base is wanted with no explicit conversion:
+
+```go
+var _ HDictView[string, ItemView] = HSortedDictView[string, ItemView]{}   // compiles
+```
+
+That recovers the substitution the all-structs option loses. Two things spoil it.
+
+**The split moves rather than closes.**
+
+```
+hash view (interface): spelled `v == nil`   -> true
+ordered view (struct): spelled `v.IsNil()`  -> true
+```
+
+The API still has two spellings, now *within* the view vocabulary rather than
+between containers and views. That is arguably worse: which one applies depends
+on the static type in hand, not on what the value is, so the same underlying view
+is checked one way as a `SortedDictView` and the other way as a `DictView`.
+
+**It reintroduces Go's typed-nil trap**, which neither pure option has:
+
+```
+zero ordered struct: IsNil()=true
+same value as the base interface: asBase == nil -> false
+...and calling it panics -> true
+today (both interfaces): nil view == nil -> true
+```
+
+A zero ordered view knows it is empty. Substituted into the base interface it
+becomes a non-nil interface holding a zero struct, so `v == nil` reports **false**
+for a view that is empty and panics on use. With both types as interfaces, a nil
+view is nil at every static type it is held at.
+
+The costs, for completeness:
+
+| | construct | call directly | substitute as the base |
+|---|---|---|---|
+| hash view (interface, today) | 13.41 ns, 1 alloc | 13.17 ns | **13.39 ns, 0 allocs** |
+| ordered as a 2-word struct | 13.38 ns, 1 alloc | 13.12 ns | **30.06 ns, 1 alloc** |
+| ordered as a 1-word ptr-struct | 23.62 ns, **2 allocs** | 13.98 ns | 14.08 ns, 0 allocs |
+
+Substituting a two-word struct into the base interface boxes: 2.2x and an
+allocation, every time. The one-word form fixes that and pays a second allocation
+at construction instead.
+
 ## 10. What none of this decides
 
 Cost separates the concrete struct from the other two, but it does not separate
@@ -374,7 +428,12 @@ Durable:
     construction or iteration, but boxes with an allocation when passed to a
     foreign interface, and **forfeits interface subtyping** — the ordered/base
     hierarchy becomes an explicit 2.74 ns conversion instead of an implicit one.
-11. A one-word wrapper struct and a bare pointer to the same body are
+11. A struct satisfies an interface even though it cannot subtype one by
+    embedding, so a hybrid recovers implicit substitution — but it keeps two
+    spellings for emptiness and adds Go's typed-nil trap, where a zero struct
+    boxed into the base interface reports `== nil` as false while panicking on
+    use. Both pure options avoid that.
+12. A one-word wrapper struct and a bare pointer to the same body are
    indistinguishable in time and allocations on every axis measured. A
    single-field struct is flattened, so choosing between them is an API
    question, not a cost one.
