@@ -173,11 +173,10 @@ func TestHashDictSatisfiesContractsThroughPointer(t *testing.T) {
 	var d containers.HashDict[int, string]
 	var (
 		_ containers.Elems2[int, string]      = &d
-		_ containers.Dict[int, string]        = &d
 		_ containers.MutableDict[int, string] = &d
 	)
 	d.Set(1, "a")
-	if n := lookupAll[int, string](&d, 1, 2); n != 1 {
+	if n := lookupAll[int, string](containers.ViewHashDictIdentity(&d), 1, 2); n != 1 {
 		t.Errorf("lookupAll = %d, want 1", n)
 	}
 }

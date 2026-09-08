@@ -37,49 +37,41 @@ type Elems2[K, V any] interface {
 	All() iter.Seq2[K, V]
 }
 
-// Set is the read-only contract for set-like containers: everything Elems
-// offers, plus the question a set exists to answer.
+// MutableSet is the contract for set-like containers: everything Elems offers,
+// the question a set exists to answer, and the writes.
 //
 // T is unconstrained. Implementations that need comparable elements say so in
-// their own type parameters; the contract never needed to, and a view whose
-// elements are a projected type may not be comparable at all. See ADR 0012.
+// their own type parameters; the contract never needed to. See ADR 0012.
 //
-// Satisfied by *HashSet[T] and *SortedSet[T]. Take this rather than MutableSet
-// when a function only needs to read, so it cannot write through the argument.
-type Set[T any] interface {
-	Elems[T]
-	Has(T) bool
-}
-
-// Dict is the read-only contract for key-value containers.
-//
-// K is unconstrained, for the reason given on Set.
-//
-// Satisfied by Map[K, V] as a value and *SortedDict[K, V] as a pointer. That
-// asymmetry is inherent to Go: value receivers satisfy from a value, pointer
-// receivers do not.
-//
-// Dict carries only Get, not Floor, Ceil, Min, Max or Range, because Map cannot
-// provide them. Generic code over Dict cannot do ordered reads; see ADR 0008's
-// follow-up on a contract for ordered containers.
-type Dict[K any, V any] interface {
-	Elems2[K, V]
-	Get(K) (V, bool)
-}
-
-// MutableSet adds writing to Set.
+// There is no read-only tier below this one. ADR 0013 removed it: a container
+// satisfies a structural read contract inherently, so such a contract prevents
+// nothing — a holder asserts back to the container and writes. A function that
+// must not write takes a SetView, which is sealed and which a container cannot
+// satisfy. A caller holding a container passes ViewHashSetIdentity(s), which
+// converts nothing and allocates nothing.
 //
 // Operations returning the container type are absent — Union, Intersect,
 // Difference and Clone — because Go has no covariant returns, so a method
 // returning a concrete *HashSet cannot satisfy an interface method returning
 // the interface. That is the ceiling ADR 0002 documented for set algebra.
 type MutableSet[T any] interface {
-	Set[T]
+	Elems[T]
+	Has(T) bool
 	Add(...T)
 	Remove(...T)
 }
 
-// MutableDict adds writing to Dict.
+// MutableDict is the contract for key-value containers: everything Elems2
+// offers, Get, and the writes.
+//
+// K is unconstrained, for the reason given on MutableSet, and there is likewise
+// no read-only tier below this one — a function that must not write takes a
+// DictView. See ADR 0013.
+//
+// MutableDict carries only Get, not Floor, Ceil, Min, Max or Range, because Map
+// cannot provide them. The ordered reads live on SortedDictView, on the view
+// side; ADR 0008's follow-up on an ordered contract for *containers* is still
+// open.
 //
 // # Mutation during iteration is not supported
 //
@@ -92,21 +84,29 @@ type MutableSet[T any] interface {
 // Whether an iterator reflects writes made after it was created is likewise
 // unspecified; see Elems2.
 type MutableDict[K any, V any] interface {
-	Dict[K, V]
+	Elems2[K, V]
+	Get(K) (V, bool)
 	Set(K, V)
 	Delete(K)
 }
 
-// The layering, asserted against every container.
+// The two layers, asserted against every container.
 var (
-	_ Set[int]                 = (*HashSet[int])(nil)
-	_ Set[int]                 = (*SortedSet[int])(nil)
+	_ Elems[int]               = (*HashSet[int])(nil)
+	_ Elems[int]               = (*SortedSet[int])(nil)
+	_ Elems2[string, int]      = Map[string, int]{}
+	_ Elems2[string, int]      = (*HashDict[string, int])(nil)
+	_ Elems2[string, int]      = (*SortedDict[string, int])(nil)
 	_ MutableSet[int]          = (*HashSet[int])(nil)
 	_ MutableSet[int]          = (*SortedSet[int])(nil)
-	_ Dict[string, int]        = Map[string, int]{}
-	_ Dict[string, int]        = (*HashDict[string, int])(nil)
-	_ Dict[string, int]        = (*SortedDict[string, int])(nil)
 	_ MutableDict[string, int] = Map[string, int]{}
 	_ MutableDict[string, int] = (*HashDict[string, int])(nil)
 	_ MutableDict[string, int] = (*SortedDict[string, int])(nil)
 )
+
+// No container satisfies a view interface. This is the seal, asserted: each
+// line below is a compile error if uncommented.
+//
+//	var _ SetView[int]           = (*HashSet[int])(nil)     // missing sealedView
+//	var _ DictView[string, int]  = (*HashDict[string, int])(nil)
+//	var _ DictView[string, int]  = Map[string, int]{}

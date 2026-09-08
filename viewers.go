@@ -77,16 +77,22 @@ type CanViewSortedDict[V, NV any] interface {
 	ValueViewer[V, NV]
 }
 
-// IdentityViewer converts nothing. It is what the Identity constructors use.
+// IdentityViewer converts nothing, in both directions and on both halves.
+//
+// The Identity constructors do not use it: ADR 0013 gives them a viewer-less
+// representation that is one word and allocates nothing. It is here for
+// composing a *partial* identity — a viewer that converts keys but passes values
+// through, or the reverse — by embedding the half you do not want to write.
 type IdentityViewer[K, V any] struct{}
 
 func (IdentityViewer[K, V]) ToKeyView(k K) K           { return k }
 func (IdentityViewer[K, V]) FromKeyView(k K) (K, bool) { return k, true }
 func (IdentityViewer[K, V]) ToValueView(v V) V         { return v }
 
-// IdentityValueViewer converts nothing, and offers only the value half. It is
-// what ViewSortedDictIdentity uses, since a sorted container needs no key
-// conversion.
+// IdentityValueViewer converts nothing, and offers only the value half.
+//
+// Embed it in a viewer that converts keys but should pass values through. As
+// with IdentityViewer, ViewSortedDictIdentity does not use it.
 type IdentityValueViewer[V any] struct{}
 
 func (IdentityValueViewer[V]) ToValueView(v V) V { return v }

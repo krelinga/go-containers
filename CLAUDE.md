@@ -15,19 +15,24 @@ beside it:
 | `sorteddict.go` | `SortedDict[K cmp.Ordered, V any]` | sorted slice |
 | `map.go` | `Map[K comparable, V any]` | a defined `map[K]V` — an **adapter**, not a default |
 | `contracts.go` | the interfaces below | — |
-| `views.go` | `<Container>View` for each of the above | read-only handles (ADRs `0011`, `0012`) |
+| `views.go` | `SetView`, `DictView`, `SortedSetView`, `SortedDictView` | sealed read-only interfaces (ADRs `0011`, `0012`, `0013`) |
 | `viewers.go` | `KeyViewer`, `ValueViewer`, the `CanView<Container>` set | the conversions a view applies (ADR `0012`) |
 
-Contracts come in three layers (ADR `0008`), each building on the one beneath:
+Contracts come in two layers (ADR `0008`, narrowed by `0013`):
 
 | layer | set side | dict side | adds |
 |---|---|---|---|
 | universal | `Elems[T]` | `Elems2[K, V]` | `Len`, `All` |
-| read-only | `Set[T]` | `Dict[K, V]` | `Has` / `Get` |
-| mutation | `MutableSet[T]` | `MutableDict[K, V]` | `Add`+`Remove` / `Set`+`Delete` |
+| mutation | `MutableSet[T]` | `MutableDict[K, V]` | `Has`+`Add`+`Remove` / `Get`+`Set`+`Delete` |
 
-All six take `any` elements and keys, not `comparable` (ADR `0012`) — a view converts keys, and
-the converted type need not be comparable. Implementations state their own constraints.
+They take `any` elements and keys, not `comparable` (ADR `0012`). Implementations state their own
+constraints.
+
+**There is no read-only contract tier.** ADR `0013` deleted `Set` and `Dict`: a container
+satisfies a structural read contract inherently, so one prevents nothing — a holder asserts back
+and writes. Read-only is expressed by the sealed view interfaces instead. A function that must not
+write takes `SetView`/`DictView`; a caller holding a container wraps it with
+`View<Container>Identity`, which converts nothing and allocates nothing.
 
 `callsites_test.go` holds every stdlib-vs-container comparison. Alongside: `docs/adr/` (accepted
 design decisions, binding on new code) and `experiments/` (measurement harnesses, each its own
@@ -78,14 +83,30 @@ to a plain `go test` — a shallow-copy `Clone` that silently shares the underly
   satisfy it silently opts out. Add `Has` or `Get` to reach the read-only layer, and the writes to
   reach the mutation layer. Every existing container satisfied these without changes, because the
   signatures already matched; keep it that way.
-- **Every container has a view, and a new one is not finished without it** (ADRs `0011` and
-  `0012`; `views.go`, `viewers.go`). A view is a struct holding a container pointer plus a
-  *viewer* — an interface value supplying the conversions. Build one with
-  `View<Container>(c, viewer)`, or `View<Container>Identity(c)` to convert nothing.
-  Returning a *concrete struct* is the point — a bare contract interface prevents nothing, since
-  containers satisfy the read contracts structurally and a holder can assert back and mutate.
+- **Every container has a view, and a new one is not finished without it** (ADRs `0011`, `0012`
+  and `0013`; `views.go`, `viewers.go`). Build one with `View<Container>(c, viewer)`, or
+  `View<Container>Identity(c)` to convert nothing. A constructor returns a **sealed interface** —
+  `SetView[NT]` or `DictView[NK, NV]`, or the `Sorted*` forms which embed those and add the
+  ordered reads. The concrete structs are unexported and may change.
+  The seal is one unexported method, and it works in both directions at compile time: a container
+  cannot be passed where a view is expected (`missing method sealedView`), and a view cannot be
+  asserted back to its container (`impossible type assertion`).
   A view is not a snapshot, is not proof against `reflect`+`unsafe`, and is not automatic: a
-  provider can still hand out the container, so a view is applied at boundaries deliberately.
+  boundary declared with an unsealed type — `Elems2`, which containers also satisfy — accepts the
+  container as happily as ever. The seal binds where the boundary names it.
+- **Ordered views substitute for unordered ones.** `SortedDictView[K, NV]` embeds
+  `DictView[K, NV]`, and `SortedSetView[T]` embeds `SetView[T]`, so a consumer naming the base
+  never names an implementation — a `Map` view and a `HashDict` view are the *same type*. This
+  type-checks only because ordered views convert values only; **converting ordered keys would
+  break the hierarchy** as well as reopening order preservation.
+- **A view carrying a viewer costs one allocation, at construction, and nothing per boundary
+  crossing.** A view that converts nothing — every `Identity` view, and every `SortedSetView` —
+  is one word and allocates nothing at all, which is what makes the identity wrap free. Adding a
+  method to a view interface is *not* a breaking change, since nothing outside the package can
+  implement one.
+- **A nil view panics when used, and nothing checks for it.** A view is an interface now, so
+  `var v DictView[K, V]` is nil and `v == nil` compiles. Per ADR `0002` no method or constructor
+  special-cases it.
 - **There is deliberately no `View()` method** (ADR `0012`). It read as "give me a view" with no
   hint that key and value handling is a dimension at all, so it invited the assumption that keys
   were safe. Callers name the conversion, or name its absence with the `Identity` constructor.

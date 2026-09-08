@@ -1,7 +1,6 @@
 # 13. Interfaces for view types
 
-- **Status:** Accepted. Not yet implemented, so this constrains the change
-  rather than describing it.
+- **Status:** Accepted and implemented.
 - **Date:** 2026-09-08
 - **Evidence:** `experiments/viewiface/` (`RESULTS.md`); background numbers from
   `experiments/views/` and `experiments/dispatch/`.
