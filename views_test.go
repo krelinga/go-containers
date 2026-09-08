@@ -8,22 +8,41 @@ import (
 	"github.com/krelinga/go-containers"
 )
 
+// ---- the caller-supplied read-only types ADR 0012 says the library cannot
+// invent ---------------------------------------------------------------------
+
 type item struct{ Name string }
 
-// itemView is the element-level read-only type. ADR 0011: the library cannot
-// invent this; the caller who owns item must write it.
 type itemView struct{ i *item }
 
 func (v itemView) Name() string { return v.i.Name }
 
-func projectItem(i *item) itemView { return itemView{i} }
+// A key viewer for *item keys: out to a string, back by lookup in a registry.
+type itemKeys struct{ known map[string]*item }
 
-// The whole point: a view cannot be asserted back to its container.
+func (k itemKeys) ToKeyView(i *item) string { return i.Name }
+func (k itemKeys) FromKeyView(s string) (*item, bool) {
+	i, ok := k.known[s]
+	return i, ok
+}
+
+type itemValues struct{}
+
+func (itemValues) ToValueView(i *item) itemView { return itemView{i} }
+
+// Composed by embedding, as ADR 0012 intends.
+type itemViewer struct {
+	itemKeys
+	itemValues
+}
+
+// ---- what a view is for ----------------------------------------------------
+
 func TestViewBlocksDowncast(t *testing.T) {
 	d := containers.NewHashDict[string, int]()
 	d.Set("a", 1)
 
-	// A bare contract does not protect anything.
+	// A bare contract protects nothing: the container satisfies it structurally.
 	var bare containers.Dict[string, int] = d
 	if c, ok := bare.(*containers.HashDict[string, int]); ok {
 		c.Set("b", 2)
@@ -32,109 +51,124 @@ func TestViewBlocksDowncast(t *testing.T) {
 		t.Error("expected the bare contract to permit mutation, for contrast")
 	}
 
-	// A view does.
-	var sealed any = d.View()
+	// A view does not.
+	var sealed any = containers.ViewHashDictIdentity(d)
 	if _, ok := sealed.(*containers.HashDict[string, int]); ok {
 		t.Error("view was assertable back to its container")
 	}
 }
 
-// ADR 0011: a projection denies writes through the view.
-func TestViewProjectsElements(t *testing.T) {
-	d := containers.NewHashDict[string, *item]()
-	d.Set("a", &item{Name: "orig"})
+// ADR 0012's motivating hole: comparable admits pointers, so a value-only view
+// leaked mutable keys. A key viewer closes it.
+func TestViewConvertsKeys(t *testing.T) {
+	k := &item{Name: "alpha"}
+	d := containers.NewHashDict[*item, *item]()
+	d.Set(k, &item{Name: "payload"})
 
-	shallow := d.View()
-	raw, _ := shallow.Get("a")
-	raw.Name = "mutated" // the shallow view hands back the mutable element
-	if got, _ := d.Get("a"); got.Name != "mutated" {
-		t.Error("shallow view should hand back the mutable element")
+	vw := itemViewer{itemKeys: itemKeys{known: map[string]*item{"alpha": k}}}
+	v := containers.ViewHashDict(d, vw)
+
+	// Keys come out as strings; the raw *item never escapes.
+	for gotKey, gotVal := range v.All() {
+		if gotKey != "alpha" {
+			t.Errorf("key = %v, want %q", gotKey, "alpha")
+		}
+		if gotVal.Name() != "payload" {
+			t.Errorf("value = %q", gotVal.Name())
+		}
 	}
 
-	pv := containers.ViewHashDict(d, projectItem)
-	iv, ok := pv.Get("a")
-	if !ok || iv.Name() != "mutated" {
-		t.Errorf("projected Get = %v,%v", iv, ok)
-	}
-	// iv exposes only Name(); there is no path from it to the *item's fields.
+	// And the view satisfies a contract naming neither raw type.
+	var _ containers.Dict[string, itemView] = v
 }
 
-func TestViewsForwardReads(t *testing.T) {
-	hs := containers.NewHashSet(1, 2, 3)
-	if v := hs.View(); v.Len() != 3 || !v.Has(2) || len(slices.Sorted(v.All())) != 3 {
-		t.Errorf("HashSetView: Len=%d Has(2)=%v", v.Len(), v.Has(2))
+// A key that does not convert back cannot be present.
+func TestFromKeyViewFailureIsAMiss(t *testing.T) {
+	k := &item{Name: "alpha"}
+	d := containers.NewHashDict[*item, *item]()
+	d.Set(k, &item{Name: "payload"})
+
+	vw := itemViewer{itemKeys: itemKeys{known: map[string]*item{"alpha": k}}}
+	v := containers.ViewHashDict(d, vw)
+
+	if _, ok := v.Get("alpha"); !ok {
+		t.Error("a convertible, present key should hit")
+	}
+	got, ok := v.Get("not-a-known-key")
+	if ok || got != (itemView{}) {
+		t.Errorf("unconvertible key = %v,%v; want zero,false", got, ok)
+	}
+}
+
+// A miss must not call the value projection.
+func TestMissDoesNotProject(t *testing.T) {
+	d := containers.NewSortedDict[int, *item]()
+	called := false
+	v := containers.ViewSortedDict(d, valueCounter{&called})
+	if _, ok := v.Get(99); ok {
+		t.Error("empty dict should miss")
+	}
+	if called {
+		t.Error("projection ran for a missing key")
+	}
+}
+
+type valueCounter struct{ called *bool }
+
+func (c valueCounter) ToValueView(i *item) itemView { *c.called = true; return itemView{i} }
+
+// ---- ordered containers convert values only (ADR 0012 decision 3) ----------
+
+func TestSortedViewsConvertValuesOnly(t *testing.T) {
+	sd := containers.NewSortedDict[int, *item]()
+	sd.Set(1, &item{Name: "one"})
+	sd.Set(3, &item{Name: "three"})
+	v := containers.ViewSortedDict(sd, itemValues{})
+
+	// Ordered lookups take and return the container's own key type: no
+	// conversion, so no order-preservation question arises.
+	if k, val, ok := v.Min(); k != 1 || !ok || val.Name() != "one" {
+		t.Errorf("Min = %v,%v,%v", k, val, ok)
+	}
+	if k, _, ok := v.Ceil(2); k != 3 || !ok {
+		t.Errorf("Ceil(2) = %v,%v", k, ok)
+	}
+	if got := slices.Sorted(maps.Keys(maps.Collect(v.Range(1, 3)))); !slices.Equal(got, []int{1}) {
+		t.Errorf("Range(1,3) keys = %v", got)
 	}
 
-	ss := containers.NewSortedSet(1, 2, 3)
-	sv := ss.View()
+	// A sorted set view takes no viewer at all.
+	ss := containers.NewSortedSet(3, 1, 2)
+	sv := containers.ViewSortedSet(ss)
 	if mn, ok := sv.Min(); mn != 1 || !ok {
 		t.Errorf("SortedSetView.Min = %v,%v", mn, ok)
 	}
-	if mx, ok := sv.Max(); mx != 3 || !ok {
-		t.Errorf("SortedSetView.Max = %v,%v", mx, ok)
-	}
-	if f, ok := sv.Floor(2); f != 2 || !ok {
-		t.Errorf("SortedSetView.Floor(2) = %v,%v", f, ok)
-	}
-	if c, ok := sv.Ceil(0); c != 1 || !ok {
-		t.Errorf("SortedSetView.Ceil(0) = %v,%v", c, ok)
-	}
-	if got, want := slices.Collect(sv.Range(2, 4)), []int{2, 3}; !slices.Equal(got, want) {
-		t.Errorf("SortedSetView.Range = %v, want %v", got, want)
-	}
-
-	sd := containers.NewSortedDict[int, string]()
-	sd.SetAllSeq(maps.All(map[int]string{1: "a", 2: "b", 3: "c"}))
-	dv := sd.View()
-	if k, val, ok := dv.Min(); k != 1 || val != "a" || !ok {
-		t.Errorf("SortedDictView.Min = %v,%v,%v", k, val, ok)
-	}
-	if k, val, ok := dv.Ceil(2); k != 2 || val != "b" || !ok {
-		t.Errorf("SortedDictView.Ceil = %v,%v,%v", k, val, ok)
-	}
-	if got, want := slices.Sorted(maps.Keys(maps.Collect(dv.Range(2, 4)))), []int{2, 3}; !slices.Equal(got, want) {
-		t.Errorf("SortedDictView.Range = %v, want %v", got, want)
-	}
-
-	m := containers.Map[string, int]{"x": 9}
-	mv := m.View()
-	if got, ok := mv.Get("x"); got != 9 || !ok || mv.Len() != 1 {
-		t.Errorf("MapView.Get = %v,%v Len=%d", got, ok, mv.Len())
+	if got := slices.Collect(sv.Range(2, 4)); !slices.Equal(got, []int{2, 3}) {
+		t.Errorf("SortedSetView.Range = %v", got)
 	}
 }
 
-// A miss must produce the zero projected value, not call the projection.
-func TestViewMissDoesNotProject(t *testing.T) {
-	d := containers.NewHashDict[string, *item]()
-	called := false
-	pv := containers.ViewHashDict(d, func(i *item) itemView { called = true; return itemView{i} })
-	got, ok := pv.Get("absent")
-	if ok || got != (itemView{}) {
-		t.Errorf("miss = %v,%v; want zero,false", got, ok)
-	}
-	if called {
-		t.Error("projection was called for a missing key")
-	}
-}
+// ---- shape rules -----------------------------------------------------------
 
-// ADR 0002's rules: a zero view panics, on a path that always executes.
 func TestZeroViewPanics(t *testing.T) {
 	var hsv containers.HashSetView[int, int]
+	var hdv containers.HashDictView[int, string, int, string]
 	var sdv containers.SortedDictView[int, string, string]
+	var ssv containers.SortedSetView[int]
 
 	mustPanic(t, "HashSetView.Len", func() { _ = hsv.Len() })
+	mustPanic(t, "HashSetView.Has", func() { _ = hsv.Has(1) })
 	mustPanic(t, "HashSetView.All", func() { _ = hsv.All() })
-	mustPanic(t, "SortedDictView.Get", func() { _, _ = sdv.Get(1) })
+	mustPanic(t, "HashDictView.Get", func() { _, _ = hdv.Get(1) })
+	mustPanic(t, "HashDictView.All", func() { _ = hdv.All() })
 	mustPanic(t, "SortedDictView.Min", func() { _, _, _ = sdv.Min() })
-	mustPanic(t, "SortedDictView.Range", func() { _ = sdv.Range(1, 2) })
+	mustPanic(t, "SortedDictView.All", func() { _ = sdv.All() })
+	mustPanic(t, "SortedSetView.Len", func() { _ = ssv.Len() })
 }
 
-// TestEveryContainerHasAView is the guardrail for ADR 0011's rule that a new
-// container is not finished until it has one. Adding a container without a View
-// method breaks this file rather than being noticed later at a boundary.
-//
-// It also checks that identity views satisfy the read contracts, so they
-// compose with generic code.
+// TestEveryContainerHasAView is the guardrail for ADR 0011's rule, which ADR
+// 0012 preserved while changing its shape: a container is not finished until it
+// has view constructors.
 func TestEveryContainerHasAView(t *testing.T) {
 	hs := containers.NewHashSet(1)
 	ss := containers.NewSortedSet(1)
@@ -143,15 +177,20 @@ func TestEveryContainerHasAView(t *testing.T) {
 	m := containers.Map[string, int]{}
 
 	var (
-		_ containers.Set[int]          = hs.View()
-		_ containers.Set[int]          = ss.View()
-		_ containers.Dict[string, int] = hd.View()
-		_ containers.Dict[string, int] = sd.View()
-		_ containers.Dict[string, int] = m.View()
+		_ containers.Set[int]          = containers.ViewHashSetIdentity(hs)
+		_ containers.Set[int]          = containers.ViewSortedSet(ss)
+		_ containers.Dict[string, int] = containers.ViewHashDictIdentity(hd)
+		_ containers.Dict[string, int] = containers.ViewSortedDictIdentity(sd)
+		_ containers.Dict[string, int] = containers.ViewMapIdentity(m)
 	)
 
-	// ADR 0011 consequence: a PROJECTING set view satisfies Elems[R] but not
-	// Set[R], because Has takes the element type while All yields the projection.
-	sp := containers.ViewHashSet(containers.NewHashSet(&item{}), projectItem)
-	var _ containers.Elems[itemView] = sp
+	// A projecting set view satisfies Set[NT], which ADR 0011 recorded as lost
+	// and ADR 0012 restored: Has takes NT and All yields NT.
+	reg := &item{Name: "x"}
+	hsp := containers.NewHashSet(reg)
+	pv := containers.ViewHashSet(hsp, itemKeys{known: map[string]*item{"x": reg}})
+	var _ containers.Set[string] = pv
+	if !pv.Has("x") || pv.Has("nope") {
+		t.Error("projecting set view membership is wrong")
+	}
 }

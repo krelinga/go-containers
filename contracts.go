@@ -40,14 +40,20 @@ type Elems2[K, V any] interface {
 // Set is the read-only contract for set-like containers: everything Elems
 // offers, plus the question a set exists to answer.
 //
+// T is unconstrained. Implementations that need comparable elements say so in
+// their own type parameters; the contract never needed to, and a view whose
+// elements are a projected type may not be comparable at all. See ADR 0012.
+//
 // Satisfied by *HashSet[T] and *SortedSet[T]. Take this rather than MutableSet
 // when a function only needs to read, so it cannot write through the argument.
-type Set[T comparable] interface {
+type Set[T any] interface {
 	Elems[T]
 	Has(T) bool
 }
 
 // Dict is the read-only contract for key-value containers.
+//
+// K is unconstrained, for the reason given on Set.
 //
 // Satisfied by Map[K, V] as a value and *SortedDict[K, V] as a pointer. That
 // asymmetry is inherent to Go: value receivers satisfy from a value, pointer
@@ -56,7 +62,7 @@ type Set[T comparable] interface {
 // Dict carries only Get, not Floor, Ceil, Min, Max or Range, because Map cannot
 // provide them. Generic code over Dict cannot do ordered reads; see ADR 0008's
 // follow-up on a contract for ordered containers.
-type Dict[K comparable, V any] interface {
+type Dict[K any, V any] interface {
 	Elems2[K, V]
 	Get(K) (V, bool)
 }
@@ -67,7 +73,7 @@ type Dict[K comparable, V any] interface {
 // Difference and Clone — because Go has no covariant returns, so a method
 // returning a concrete *HashSet cannot satisfy an interface method returning
 // the interface. That is the ceiling ADR 0002 documented for set algebra.
-type MutableSet[T comparable] interface {
+type MutableSet[T any] interface {
 	Set[T]
 	Add(...T)
 	Remove(...T)
@@ -85,7 +91,7 @@ type MutableSet[T comparable] interface {
 //
 // Whether an iterator reflects writes made after it was created is likewise
 // unspecified; see Elems2.
-type MutableDict[K comparable, V any] interface {
+type MutableDict[K any, V any] interface {
 	Dict[K, V]
 	Set(K, V)
 	Delete(K)
