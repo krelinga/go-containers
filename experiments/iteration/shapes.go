@@ -95,3 +95,152 @@ func derivedBackward[V any](seq iter.Seq[V]) iter.Seq[V] {
 		}
 	}
 }
+
+// ---- element size ---------------------------------------------------------
+//
+// The derived-is-free finding was measured with int values, 8 bytes. A Seq2
+// passes its value BY VALUE into yield, so a consumer that drops it has already
+// paid for the copy. Whether that matters depends entirely on the value's width.
+
+// Big is 1024 bytes.
+type Big [128]int64
+
+// nativeKeysOnly never touches the value: the floor for a key-only walk.
+func nativeKeysOnly[T any](s []T) iter.Seq[int] {
+	return func(yield func(int) bool) {
+		for i := range s {
+			if !yield(i) {
+				return
+			}
+		}
+	}
+}
+
+// nativeAllBig yields index and value, so every element is copied into yield.
+func nativeAllBig(s []Big) iter.Seq2[int, Big] {
+	return func(yield func(int, Big) bool) {
+		for i := range s {
+			if !yield(i, s[i]) {
+				return
+			}
+		}
+	}
+}
+
+// An All that yields a POINTER to the value instead of the value.
+func nativeAllBigPtr(s []Big) iter.Seq2[int, *Big] {
+	return func(yield func(int, *Big) bool) {
+		for i := range s {
+			if !yield(i, &s[i]) {
+				return
+			}
+		}
+	}
+}
+
+func derivedKeysBig(seq iter.Seq2[int, Big]) iter.Seq[int] {
+	return func(yield func(int) bool) {
+		for k := range seq {
+			if !yield(k) {
+				return
+			}
+		}
+	}
+}
+
+func derivedKeysBigPtr(seq iter.Seq2[int, *Big]) iter.Seq[int] {
+	return func(yield func(int) bool) {
+		for k := range seq {
+			if !yield(k) {
+				return
+			}
+		}
+	}
+}
+
+func derivedValuesBig(seq iter.Seq2[int, Big]) iter.Seq[Big] {
+	return func(yield func(Big) bool) {
+		for _, v := range seq {
+			if !yield(v) {
+				return
+			}
+		}
+	}
+}
+
+func nativeValuesBig(s []Big) iter.Seq[Big] {
+	return func(yield func(Big) bool) {
+		for i := range s {
+			if !yield(s[i]) {
+				return
+			}
+		}
+	}
+}
+
+// The realistic case for this library: All comes back through an interface, so
+// the call is dynamic and the compiler cannot see that the consumer drops the
+// value. ADR 0013's views return iterators exactly this way.
+type BigSource interface {
+	All() iter.Seq2[int, Big]
+	Values() iter.Seq[Big]
+	Keys() iter.Seq[int]
+}
+
+type bigSlice struct{ s []Big }
+
+func (b bigSlice) All() iter.Seq2[int, Big] { return nativeAllBig(b.s) }
+func (b bigSlice) Values() iter.Seq[Big]    { return nativeValuesBig(b.s) }
+func (b bigSlice) Keys() iter.Seq[int]      { return nativeKeysOnly(b.s) }
+
+func NewBigSource(s []Big) BigSource { return bigSlice{s} }
+
+// Does the cost of a dropped value scale with its width? If it does, the copy
+// is happening; if it is flat, the compiler is eliding it.
+
+type Sz64 [8]int64    // 64 B
+type Sz1K [128]int64  // 1 KiB
+type Sz8K [1024]int64 // 8 KiB
+
+func allOf[T any](s []T) iter.Seq2[int, T] {
+	return func(yield func(int, T) bool) {
+		for i := range s {
+			if !yield(i, s[i]) {
+				return
+			}
+		}
+	}
+}
+
+func keysOf[T any](s []T) iter.Seq[int] {
+	return func(yield func(int) bool) {
+		for i := range s {
+			if !yield(i) {
+				return
+			}
+		}
+	}
+}
+
+func dropValue[K, V any](seq iter.Seq2[K, V]) iter.Seq[K] {
+	return func(yield func(K) bool) {
+		for k := range seq {
+			if !yield(k) {
+				return
+			}
+		}
+	}
+}
+
+// Returned through an interface so the call is opaque, as a view's is.
+type seqSource[T any] interface {
+	all() iter.Seq2[int, T]
+	keys() iter.Seq[int]
+}
+
+type sliceSource[T any] struct{ s []T }
+
+func (x sliceSource[T]) all() iter.Seq2[int, T] { return allOf(x.s) }
+func (x sliceSource[T]) keys() iter.Seq[int]    { return keysOf(x.s) }
+
+func newSource[T any](s []T) seqSource[T] { return sliceSource[T]{s} }

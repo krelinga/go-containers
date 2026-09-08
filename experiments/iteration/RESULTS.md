@@ -17,25 +17,59 @@ elements.
 `Seq` — the extra yield argument is nearly free. This is the price of the
 contract, not of any option below.
 
-## 2. Deriving one shape from another is free
+## 2. Deriving one shape from another is free only for small elements
 
 The question behind problem 1: does each shape need its own method, or can the
 extras be free functions, as `maps.Keys` is?
 
-| | | allocs |
+With `int` elements it looks free:
+
+| 1024 `int` elements | | allocs |
 |---|---|---|
 | `Values`, native | 1.167 µs | 0 |
 | `Values`, derived from an `All` | **1.160 µs** | 0 |
 | `Keys`, derived from an `All` | 1.154 µs | 0 |
-| `All`, native | 1.200 µs | 0 |
 | `All`, derived from a `Values` | 1.278 µs (+6.5%) | 0 |
 
-**Wrapping an iterator in another iterator costs nothing measurable**, and never
-allocates. Dropping a value from a pair, or dropping a key, is free; inventing an
-index costs 6.5%, which is the counter.
+**That result does not generalise, and taking it at face value would have been a
+mistake.** An `iter.Seq2` passes its value *by value* into `yield`, so a consumer
+that drops it has already paid for the copy. Widening the element exposes it —
+256 elements, per-element figures:
 
-So the shape question is not a performance question. Any of these can be a free
-function without a caller noticing.
+| element width | `Keys` native | `Keys` derived, value dropped | value actually consumed |
+|---|---|---|---|
+| 64 B | 1.31 ns | 3.31 ns (**2.5x**) | 3.30 ns |
+| 1 KiB | 1.20 ns | 17.9 ns (**14.9x**) | 23.7 ns |
+| 8 KiB | 1.19 ns | 72.8 ns (**61x**) | 102.4 ns |
+
+Three things fall out.
+
+**A native key walk is flat.** 1.2 ns per element at every width, because it never
+touches the value.
+
+**A derived one scales with the value's width**, at roughly memory bandwidth. The
+copy is real and linear.
+
+**Dropping a value costs nearly as much as using it** — 17.9 ns against 23.7 ns at
+1 KiB, 72.8 against 102.4 at 8 KiB. A caller who wants only the keys pays
+70–80% of the price of the data they discard.
+
+### Why the first table said otherwise
+
+The `int` measurement, and an earlier one at 1 KiB that showed only +3.6%, were
+built from concrete non-generic functions calling each other directly. The
+compiler inlined the chain, saw the value was unused, and elided the copy.
+
+The table above routes the iterator through a **generic** interface, which is
+what this library actually does — `Elems2[K, V]` is generic, and any free
+function over it would be too. The elision stops, and the copy appears in full.
+
+**So the elision is real but fragile**: it depends on the compiler seeing the
+whole chain, which generics and interfaces both defeat. An API cannot rely on it.
+
+This is also why `maps.Keys` exists in the standard library as its own function
+rather than something users derive from `maps.All`: `for k := range m` never
+materialises the value, and no wrapper around `maps.All` can avoid doing so.
 
 ## 3. Reversing is free natively, and expensive derived
 
@@ -51,26 +85,32 @@ free function cannot do it: **an `iter.Seq` only runs forwards**, so reversing o
 means buffering every element first — 3.4x, twelve allocations and 24.6 KiB for a
 1024-element sequence, growing with the sequence.
 
-## 4. The asymmetry, which is the finding
+## 4. What each of the two can and cannot be done from outside
 
-**Shape can be converted by a free function. Direction cannot.**
+An `iter.Seq` is a *push* iterator: it calls the caller's `yield` once per
+element, in order, by value. Two consequences, and they are not the same.
 
-An `iter.Seq` is a push iterator: it calls the caller's `yield` once per element,
-in order, and the caller cannot ask for the next element or for the previous one.
-That makes per-element transformation free — you wrap `yield` — and reversal
-impossible without materialising the whole sequence.
+**Shape can be converted from outside, but not always cheaply.** Wrapping `yield`
+to drop a key or a value works, and costs nothing when the discarded half is
+small. It costs the full copy when it is not, because the value reaches `yield`
+before anything can decline it — 14.9x a native key walk at 1 KiB.
 
-The consequence for an API is direct:
+**Direction cannot be converted from outside at all.** A push iterator runs
+forwards and offers no way to ask for the previous element, so reversing means
+buffering the whole sequence: 3.4x, twelve allocations, and memory linear in the
+length.
 
-- **Shape** (`All` / `Values` / `Keys`) can live in free functions, or in
-  methods, purely on ergonomic grounds. Nothing measurable is at stake.
-- **Direction** must come from the container, which knows its own backing. A
-  container that does not offer `Backward` cannot have one added by a caller at
-  any acceptable price.
+So both are reasons for a container to offer a method, for different reasons:
 
-Every ordered container in this library is slice-backed, so `Backward` is free
-for all of them. A doubly-linked list would be too. Only the hash containers
-cannot offer it, and they have no order to reverse.
+| | can a free function do it? | what it costs |
+|---|---|---|
+| drop a small value or key | yes | nothing |
+| drop a **wide** value | yes | ~the cost of using it |
+| invent an index | yes | ~6.5% |
+| **reverse** | **no** | buffers the whole sequence |
+
+A container knows its backing, so it can walk keys without touching values and
+walk backwards without buffering. Nothing outside it can do either.
 
 ## Conclusions
 
@@ -78,12 +118,21 @@ Durable:
 
 1. `iter.Seq` costs ~5.6x raw ranging, and `iter.Seq2` costs ~4% over `iter.Seq`.
    That is the contract's price and is unaffected by the shape questions.
-2. Converting between iteration shapes is free and allocation-free: dropping a
-   key or value costs nothing measurable, and inventing an index costs ~6.5%.
-3. Reverse iteration over a slice backing costs the same as forward.
-4. Reversing a forward `iter.Seq` from outside requires buffering it: 3.4x, and
+2. Converting between iteration shapes is free **only when the discarded half is
+   small**. An iter.Seq2 passes its value by value, so a consumer that drops it
+   still pays the copy: 2.5x a native key walk at 64 B, 14.9x at 1 KiB, 61x at
+   8 KiB — 70–80% of what consuming the value would have cost. A native key walk
+   is flat at ~1.2 ns per element at every width.
+3. **The compiler elides that copy when it can see the whole chain, and
+   generics and interfaces both defeat it.** A measurement built from concrete
+   inlinable functions reports the cost as zero; the same measurement through a
+   generic interface reports it in full. An API cannot rely on the elision.
+4. Reverse iteration over a slice backing costs the same as forward.
+5. Reversing a forward `iter.Seq` from outside requires buffering it: 3.4x, and
    allocation linear in the sequence.
-5. **Therefore shape is an ergonomics decision and direction is a capability
-   decision.** A caller can convert shapes; only a container can reverse.
+6. **Direction is a capability only a container can provide.** Shape can be
+   converted from outside, but not for free once the discarded half is wide —
+   so both shape and direction are reasons for a container to offer a method,
+   for different reasons.
 
 Perishable: every absolute number above.
