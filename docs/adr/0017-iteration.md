@@ -967,6 +967,11 @@ func AllFrom[K, V any](seq iter.Seq2[K, V]) Collector2[K, V]
 func Items[T any](vs ...T) Collector[T]
 ```
 
+What each reports for size: `KeysOf`, `ValuesOf` and `AllOf` forward whatever the
+source's `CanLen` says, or `(0, false)` when it has none. `Items` knows its own
+length, so `(len(vs), true)`. `ItemsFrom` and `AllFrom` take a bare iterator and
+report `(0, false)`.
+
 **Consumers.** One per container, not one per source shape:
 
 ```go
@@ -977,6 +982,10 @@ func CollectHashDict[K comparable, V any](c Collector2[K, V]) *HashDict[K, V]
 func (v *Vector[T]) AppendAll(c Collector[T])
 func (s *HashSet[T]) AddAll(c Collector[T])
 func (d *HashDict[K, V]) SetAll(c Collector2[K, V])
+
+// Ordered containers add two more; see the two sections below.
+func (d *SortedDict[K, V]) Backward() HoldsAll[K, V]
+func (d *SortedDict[K, V]) Range(lo, hi K) RangeAll[K, V]
 ```
 
 **Caller code:**
@@ -1000,9 +1009,13 @@ Collector[int] does not implement Collector[string] (wrong type for method AsSeq
 
 **What it takes from the directions.** 1A, for the native `Keys`/`Values` that
 `HoldsKeys` and `HoldsValues` require — without them `KeysOf` cannot avoid the
-discarded-value copy. 2B, since `SizeHint` carries the length and the `X`/`XSeq`
-split collapses. 5B and 5C, of which the collector constructors are a
+discarded-value copy. 2B, since a `Collector` carries the length and the
+`X`/`XSeq` split collapses. 5B, of which the collector constructors are a
 generalisation. 5A and 5D become unnecessary.
+
+5C's optional-interface upgrade survives in a different place: `KeysOf` no longer
+needs it, because `HoldsAll` requires a native `Keys()` outright, but `CanLen`
+uses exactly that pattern for the size.
 
 ### Reverse, as a source rather than a method per operation
 
@@ -1040,9 +1053,12 @@ in call to KeysOf, type HoldsAll[string, int] of d.Backward()
 does not match HoldsKeys[T] (cannot infer T)
 ```
 
-Verified with the embedding in place: Go permits the repeated `Len()`, inference
-reaches through it, and `KeysOf(d.Backward())` yields `[c b a]` while
-`ValuesOf(d.Backward())` yields `[3 2 1]`. The reverse source is one word — a
+Verified with the embedding in place: inference reaches through it, and
+`KeysOf(d.Backward())` yields `[c b a]` while `ValuesOf(d.Backward())` yields
+`[3 2 1]`. (An earlier draft put a size method on both halves, so the embedding
+declared it twice and relied on Go permitting that. With the size moved to
+`CanLen`, the two halves have disjoint method sets and the question does not
+arise.) The reverse source is one word — a
 pointer to the container it reverses — so **`d.Backward()` boxes with zero
 allocations.**
 
@@ -1099,9 +1115,10 @@ lastKey(sub)                                          // generic code takes it t
 ```
 
 Verified: a sub-range of `[a b c d e]` over `[1, 4)` yields `[b c d]` forward and
-`[d c b]` backward, `KeysOf(sub.Backward())` collects `[d c b]` with a
-`SizeHint` of 3, and a generic function over `RangeAll` accepts a sub-range as
-readily as a container.
+`[d c b]` backward, `KeysOf(sub.Backward())` collects `[d c b]`, and a generic
+function over `RangeAll` accepts a sub-range as readily as a container. It
+reports **no** size hint, per the consequence below — an early draft measured a
+hint of 3 here, from an index-bounded range that has since been rejected.
 
 Three consequences worth stating:
 
@@ -1141,20 +1158,12 @@ This also answers ADR `0013`'s deferred "should `Range` return a view?". It
 returns a *source*, which is enough: a source offers iteration and nothing else,
 so there is no mutation to deny and no seal to need.
 
-**What proposal A does not cover.** Reverse over a **sub-range** is still
-uncovered: `Range(lo, hi)` returns an `iter.Seq2`, not a source, so it cannot be
-reversed by this mechanism. Covering it means `Range` returning a source or a
-view, which is ADR `0013`'s deferred follow-up in another guise.
-
-And proposal A **assumes problem 4's answer rather than settling it**: `HoldsKeys`, `HoldsValues` and `HoldsAll` encode the
-caller-key/position/value taxonomy directly, so adopting proposal A commits to
-it. Proposal A therefore cannot land before problem 4 is decided, though the
-sharpest instance — whether a set is a `HoldsKeys` or a `HoldsValues` — is now
-settled in favour of `HoldsKeys`.
-
-**Surface.** Six constructors, one `Collect` and one bulk method per container:
-about twenty declarations covering every source-shape × target combination,
-against eighteen functions under 5A covering a third of them.
+**Surface.** Six constructors, one `Collect` and one bulk method per container,
+plus `Backward` on the ordered ones and `Range` on the sorted ones — roughly
+thirty declarations for the whole proposal, of which about twenty are what
+direction 5A's eighteen functions were trying to do. 5A covered a third of the
+source-shape × target combinations and nothing else; this covers all of them and
+adds reverse and sub-ranges on top.
 
 **Rules settled while reviewing the proposal:**
 
@@ -1174,9 +1183,10 @@ against eighteen functions under 5A covering a third of them.
   nothing in the interface distinguishes them. This inherits ADR `0006`'s
   existing non-guarantee and makes it more visible, so it wants documenting on
   `Collector` itself.
-- **Sealing costs callers nothing.** A caller's own type with `Len()` and
-  `Values()` satisfies `HoldsValues[T]` and works with `ValuesOf` directly;
-  sealing only prevents implementing `Collector`, which nothing needs to do.
+- **Sealing costs callers nothing.** A caller's own type needs one method —
+  `Values()` — to satisfy `HoldsValues[T]` and work with `ValuesOf`; a `Len()`
+  alongside it is picked up as a size hint. Sealing only prevents implementing
+  `Collector`, which nothing needs to do.
 - **No consumer-side helper is provided.** A `Collector` carries both an
   `AsSlice` and an `AsSeq`, so a consumer *may* branch on which is available —
   but nothing in the package does it for them. `AsSeq` always works, and that
@@ -1195,10 +1205,11 @@ against eighteen functions under 5A covering a third of them.
   cases that will be hand-written regardless. A helper that materialises a slice
   was rejected outright: it is the best option when the collector already has a
   slice and the worst when it does not.
-- **`Elems` and `Elems2` may not survive.** `HoldsValues[T]` is `Elems[T]` with
-  `All` renamed, and `HoldsAll[K, V]` is `Elems2[K, V]`. ADR `0006` says their
-  purpose *is* carrying a length, and that purpose moves to `SizeHint`. Whether
-  they are renamed, kept as aliases, or removed is part of adopting this.
+- **`Elems` and `Elems2` are removed**, not renamed or kept as aliases.
+  `HoldsValues[T]` is `Elems[T]` with `All` renamed and the length dropped;
+  `HoldsAll[K, V]` is `Elems2[K, V]` likewise. ADR `0006` says their purpose *is*
+  carrying a length, and that job moves to `CanLen`. The library has no external
+  users, so there is nothing to keep them for.
 
 ### Proposal A, as it stands
 
@@ -1267,7 +1278,7 @@ func (d *SortedDict[K, V]) Range(lo, hi K) RangeAll[K, V]
 | `RangeKeys` / `RangeAll` name reversibility | so it can appear in a signature; `Range` returns one, and a container is the widest one |
 | a sub-range cannot be sub-ranged | `RangeAll` has no `Range`, as a reverse source has no `Backward` |
 | there is no `RangeValues` | nothing in the taxonomy is values-only |
-| **`Elems` and `Elems2` are removed**, not renamed or aliased | the `Holds*` family replaces them, `SizeHint` takes over the length job, and the library has no external users to break |
+| **`Elems` and `Elems2` are removed**, not renamed or aliased | the `Holds*` family replaces them, `CanLen` takes over the length job, and the library has no external users to break |
 
 **Verified, not assumed.** Inference resolves `KeysOf(d)` and `ValuesOf(d)` on a
 dict that has both, with no type arguments, and a mismatch is a compile error
