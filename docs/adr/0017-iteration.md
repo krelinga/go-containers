@@ -660,26 +660,50 @@ for k, nval := range sv.All() { }                    // k is the container's raw
 The difference is one identifier in one line, which is a fair measure of how much
 is at stake: this is a coherence question, not an ergonomics one.
 
-### What problem 4 still owes
+### What problem 4 settles
 
-Settled since this problem was written: **a set is a `HoldsKeys`** — its element
-is its key and it has no value. Three things remain.
+All of it. The taxonomy is adopted — **caller key, position, value** — and the
+three questions it left are answered.
 
-1. **Do ordered containers convert their keys?** The anomaly above, and the only
-   substantive one. ADR `0012` decision 3 says values only, on a safety argument
-   that is sound and silent on abstraction. Changing it also costs ADR `0016`'s
-   `SortedDictView` embedding `DictView`, which depends on ordered views
-   converting values only.
-2. **Are positions ever converted?** The taxonomy says no — an index or a cursor
-   is already opaque or trivial, and a conversion would have nothing to protect
-   and nothing to abstract. Stated but never confirmed, and it is what makes
-   `CanViewVector` a `ValueViewer` rather than needing a key half.
-3. **"Key" now means two things, which is the bug this ADR opened on.**
-   `HoldsKeys[int]` covers a `Vector`'s index, because positions are keys for
-   iteration and construction. `KeyViewer`'s round trip does *not* cover it,
-   because positions are not keys for conversion. Both are correct and the word
-   is doing two jobs — exactly what `All` was doing when this ADR started. It
-   wants either a stated scope or a second word.
+**1. Ordered containers keep converting values only.** ADR `0012` decision 3
+stands unchanged. Its safety argument is sound: `cmp.Ordered` admits only
+immutable value types, so there is nothing for a key conversion to protect. The
+abstraction it forgoes — a consumer of `SortedDictView[K, NV]` naming the raw
+`K` — is not worth reopening ADR `0016`'s `SortedDictView` embedding `DictView`,
+which only type-checks *because* ordered views convert values only.
+
+So the one thing that contradicts the taxonomy stays, deliberately, and is
+recorded as an exception rather than an oversight: **ordered containers treat
+caller keys as positions.**
+
+**2. Positions are never converted.** An index or a cursor is assigned by the
+container, so a conversion would have nothing to protect and nothing to
+abstract. This is what makes `CanViewVector` and `CanViewSlice` `ValueViewer`s
+with no key half, and it is now a stated rule rather than an accident of how they
+were written.
+
+**3. "Key" keeps two scopes, documented rather than renamed.**
+
+`HoldsKeys[int]` covers a `Vector`'s index; `KeyViewer`'s round trip does not.
+The word spans caller keys and positions in one family and only caller keys in
+the other. Three reasons not to fix that by renaming:
+
+- **It cannot be misused.** Every view constructor names its own
+  `CanView<Container>` interface, so the pairing is fixed at the signature:
+  `ViewVector` asks for a `ValueViewer` and no caller can cause a key conversion
+  on a `Vector`. This is a homonym, not a collision — unlike `All`, which was a
+  collision that *blocked* designs. Nothing here is blocked.
+- **Go's own vocabulary agrees.** `slices.All` returns `iter.Seq2[int, E]`,
+  putting a slice index in the key position of a pair. Calling a `Vector`'s index
+  a key for iteration follows the language rather than inventing anything.
+- **Renaming costs more than it buys.** `Keys()` matches `maps.Keys`, which is
+  half the point of problem 1. And splitting the source family into `HoldsKeys`
+  and a `HoldsPositions` would mean two `HoldsAll` variants, which breaks the
+  uniformity that lets `Backward()` return a single interface.
+
+The scope is therefore stated, not renamed: **`HoldsKeys` means the handle a
+container addresses elements by. `KeyViewer` means a key the caller supplies and
+can hand back.** Positions are the first and not the second.
 
 ## Directions for problem 5
 
@@ -1112,12 +1136,13 @@ no spelling.
 
 **What remains open.**
 
-- **Reverse over a sub-range.** `Range(lo, hi)` returns an `iter.Seq2`, not a
-  source, so nothing can reverse it. Closing this means `Range` returning a
-  source or a view — ADR `0013`'s deferred follow-up.
-- **Problem 4 must be decided first.** The source interfaces encode its taxonomy,
-  so adopting proposal A commits to it. Its sharpest instance — whether a set is
-  a `HoldsKeys` — is now settled.
+- **Reverse over a sub-range**, and it is the only one left. `Range(lo, hi)`
+  returns an `iter.Seq2`, not a source, so nothing can reverse it. Closing it
+  means `Range` returning a source or a view — ADR `0013`'s deferred follow-up.
+
+**Problem 4 is settled** and no longer gates this proposal — the taxonomy is
+adopted, ordered containers keep values-only conversion as a recorded exception,
+positions are never converted, and "key" keeps two documented scopes.
 
 **The cost to callers**, stated plainly: every existing set and vector iteration
 changes. `s.All()` becomes `s.Keys()` and `v.All()` becomes `v.Values()`. That is
