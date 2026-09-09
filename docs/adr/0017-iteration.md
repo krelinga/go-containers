@@ -893,12 +893,63 @@ discarded-value copy. 2B, since `SizeHint` carries the length and the `X`/`XSeq`
 split collapses. 5B and 5C, of which the collector constructors are a
 generalisation. 5A and 5D become unnecessary.
 
-**What proposal A does not cover.** It leaves **problem 3 untouched** — a
-`Collector` is one-directional, and reverse iteration is a container capability
-that nothing here provides. And it **assumes problem 4's answer rather than
-settling it**: `HoldsKeys`, `HoldsValues` and `HoldsAll` encode the
+### Reverse, as a source rather than a method per operation
+
+A container that can be read backwards has one method, returning **a source**
+rather than an iterator:
+
+```go
+// Every shape a forward source offers, reversed.
+type Backward[K, V any] interface {
+	HoldsKeys[K]
+	HoldsValues[V]
+	HoldsAll[K, V]
+}
+
+func (d *SortedDict[K, V]) Backwards() Backward[K, V]
+func (v *Vector[T]) Backwards() Backward[int, T]
+func (s *SortedSet[T]) Backwards() HoldsKeys[T]   // one shape, so no combining
+```
+
+The reuse is the point: a reverse source plugs into everything a forward one
+does, so reverse composes with the whole `Collector` machinery rather than
+needing its own vocabulary.
+
+```go
+for k, v := range sd.Backwards().All() { }          // iterate in reverse
+for _, v := range sd.Backwards().All() { }          // reverse values, discarding
+                                                    // a narrow key -- free
+containers.CollectVector(containers.KeysOf(sd.Backwards()))  // collect in reverse
+containers.CollectHashSet(containers.ValuesOf(v.Backwards()))
+```
+
+**The return type must be the combined interface, not one of the three.**
+Declaring `Backwards() HoldsAll[K, V]` fixes the static type, and the concrete
+type's other methods stop being reachable:
+
+```
+in call to KeysOf, type HoldsAll[string, int] of d.Backwards()
+does not match HoldsKeys[T] (cannot infer T)
+```
+
+Verified, along with the fix: a combined interface embedding all three compiles,
+Go permits the repeated `Len()`, and inference resolves `KeysOf` and `ValuesOf`
+on it. The reverse source is one word — a pointer to the container it reverses —
+so **`d.Backwards()` boxes with zero allocations.**
+
+The returned source deliberately has no `Backwards()` of its own, so a double
+reverse is a compile error rather than a no-op.
+
+**What proposal A does not cover.** Reverse over a **sub-range** is still
+uncovered: `Range(lo, hi)` returns an `iter.Seq2`, not a source, so it cannot be
+reversed by this mechanism. Covering it means `Range` returning a source or a
+view, which is ADR `0013`'s deferred follow-up in another guise.
+
+And proposal A **assumes problem 4's answer rather than settling it**: `HoldsKeys`, `HoldsValues` and `HoldsAll` encode the
 caller-key/position/value taxonomy directly, so adopting proposal A commits to
-it. Proposal A therefore cannot land before problem 4 is decided.
+it. Proposal A therefore cannot land before problem 4 is decided — and
+`SortedSet.Backwards()`'s return type is the sharpest instance, since it depends
+on whether a set's element is a key or a value.
 
 **Surface.** Six constructors, one `Collect` and one bulk method per container:
 about twenty declarations covering every source-shape × target combination,
