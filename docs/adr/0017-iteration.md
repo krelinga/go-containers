@@ -1006,6 +1006,81 @@ allocations.**
 The returned source deliberately has no `Backward()` of its own, so a double
 reverse is a compile error rather than a no-op.
 
+### Reversibility as a named capability, and what `Range` returns
+
+`Backward()` alone is a method, not a type, so reversibility cannot appear in a
+signature. Two interfaces give it a name:
+
+```go
+type RangeKeys[T any] interface {
+	HoldsKeys[T]
+	Backward() HoldsKeys[T]
+}
+
+type RangeAll[K, V any] interface {
+	HoldsAll[K, V]
+	Backward() HoldsAll[K, V]
+}
+```
+
+`SortedSet` satisfies `RangeKeys[T]`; `SortedDict` satisfies `RangeAll[K, V]`;
+`Vector` satisfies `RangeAll[int, T]`. Generic code can now demand
+reversibility:
+
+```go
+func lastKey[K, V any](r RangeAll[K, V]) (K, bool) {
+	for k := range r.Backward().Keys() { return k, true }
+	var zero K
+	return zero, false
+}
+```
+
+**And `Range` returns one of these rather than a sequence.**
+
+```go
+func (d *SortedDict[K, V]) Range(lo, hi K) RangeAll[K, V]
+func (s *SortedSet[T]) Range(lo, hi T) RangeKeys[T]
+```
+
+That is what the names are for: a `RangeAll` is *what `Range` gives you*, and a
+whole container is simply the widest one. **This closes the sub-range reverse
+gap**, which was proposal A's last open item, and it closes it by composition
+rather than by adding a method per ordered operation:
+
+```go
+sub := sd.Range(lo, hi)
+for k, v := range sub.All() { }                       // forward over the range
+for k, v := range sub.Backward().All() { }            // reversed over the range
+containers.CollectVector(containers.KeysOf(sub.Backward()))
+lastKey(sub)                                          // generic code takes it too
+```
+
+Verified: a sub-range of `[a b c d e]` over `[1, 4)` yields `[b c d]` forward and
+`[d c b]` backward, `KeysOf(sub.Backward())` collects `[d c b]` with a
+`SizeHint` of 3, and a generic function over `RangeAll` accepts a sub-range as
+readily as a container.
+
+Three consequences worth stating:
+
+- **A sub-range must know its own length**, because `RangeAll` embeds `HoldsAll`.
+  Over a sorted slice that is two binary searches, which today's `Range` — a bare
+  `iter.Seq2` — does not have to do.
+- **A sub-range cannot be sub-ranged.** `RangeAll` has no `Range` of its own, so
+  `sd.Range(a, b).Range(c, d)` is a compile error. Deliberate, and the same shape
+  as `Backward()` returning a source with no `Backward()`.
+- **Boxing costs differ.** A container into a `RangeAll` is **0 allocations**,
+  being a pointer; a sub-range is **1**, being a pointer plus two indices and so
+  not pointer-shaped. Today's `Range` returns a closure, which allocates too, so
+  this is a wash rather than a regression.
+
+There is deliberately **no `RangeValues`**. Sets are `HoldsKeys` and dicts and
+sequences are `HoldsAll`, so nothing in the taxonomy is values-only — the
+asymmetry follows from problem 4 rather than being arbitrary.
+
+This also answers ADR `0013`'s deferred "should `Range` return a view?". It
+returns a *source*, which is enough: a source offers iteration and nothing else,
+so there is no mutation to deny and no seal to need.
+
 **What proposal A does not cover.** Reverse over a **sub-range** is still
 uncovered: `Range(lo, hi)` returns an `iter.Seq2`, not a source, so it cannot be
 reversed by this mechanism. Covering it means `Range` returning a source or a
@@ -1080,6 +1155,10 @@ type HoldsKeys[T any] interface   { Len() int; Keys() iter.Seq[T] }
 type HoldsValues[T any] interface { Len() int; Values() iter.Seq[T] }
 type HoldsAll[K, V any] interface { HoldsKeys[K]; HoldsValues[V]; All() iter.Seq2[K, V] }
 
+// Sources that also read backwards. Range returns one; a container is the widest.
+type RangeKeys[T any] interface   { HoldsKeys[T]; Backward() HoldsKeys[T] }
+type RangeAll[K, V any] interface { HoldsAll[K, V]; Backward() HoldsAll[K, V] }
+
 // The primitive.
 type Collector[T any] interface {
 	SizeHint() int
@@ -1105,6 +1184,7 @@ func Items[T any](vs ...T) Collector[T]
 func CollectVector[T any](c Collector[T]) *Vector[T]
 func (v *Vector[T]) AppendAll(c Collector[T])
 func (v *Vector[T]) Backward() HoldsAll[int, T]
+func (d *SortedDict[K, V]) Range(lo, hi K) RangeAll[K, V]
 ```
 
 **Settled.**
@@ -1121,6 +1201,9 @@ func (v *Vector[T]) Backward() HoldsAll[int, T]
 | reverse is a source, named `Backward` | matching `slices.Backward`; composes with every `Collector` constructor |
 | a reverse source has no `Backward` | double reverse is a compile error |
 | sealing costs callers nothing | a caller's type with `Len` and `Values` is a `HoldsValues` already |
+| `RangeKeys` / `RangeAll` name reversibility | so it can appear in a signature; `Range` returns one, and a container is the widest one |
+| a sub-range cannot be sub-ranged | `RangeAll` has no `Range`, as a reverse source has no `Backward` |
+| there is no `RangeValues` | nothing in the taxonomy is values-only |
 | **`Elems` and `Elems2` are removed**, not renamed or aliased | the `Holds*` family replaces them, `SizeHint` takes over the length job, and the library has no external users to break |
 
 **Verified, not assumed.** Inference resolves `KeysOf(d)` and `ValuesOf(d)` on a
@@ -1134,11 +1217,10 @@ Problem 2, by collapsing `X`/`XSeq` into one argument type. Problem 3, for whole
 containers. Problem 5, entirely — `CollectVector(KeysOf(d))` is the case that had
 no spelling.
 
-**What remains open.**
-
-- **Reverse over a sub-range**, and it is the only one left. `Range(lo, hi)`
-  returns an `iter.Seq2`, not a source, so nothing can reverse it. Closing it
-  means `Range` returning a source or a view — ADR `0013`'s deferred follow-up.
+**What remains open: nothing.** The last item — reverse over a sub-range — is
+closed by `Range` returning a `RangeAll` rather than an `iter.Seq2`, which also
+answers ADR `0013`'s deferred "should `Range` return a view?" in the negative:
+it returns a source, and a source has nothing to deny.
 
 **Problem 4 is settled** and no longer gates this proposal — the taxonomy is
 adopted, ordered containers keep values-only conversion as a recorded exception,
