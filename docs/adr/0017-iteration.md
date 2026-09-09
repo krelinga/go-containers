@@ -871,29 +871,30 @@ learns which.
 
 ```go
 type Collector[T any] interface {
-	SizeHint() int
+	SizeHint() (int, bool)
 	AsSlice() []T
 	AsSeq() iter.Seq[T]
 	sealedCollector()
 }
 
 type Collector2[K, V any] interface {
-	SizeHint() int
+	SizeHint() (int, bool)
 	AsSeq2() iter.Seq2[K, V]
 	sealedCollector()
 }
 ```
 
-`SizeHint` returns 0 when the size is not known, so the consumer never has to ask
-whether a length exists. `AsSlice` returns nil when the entries were not a slice
+`SizeHint` reports whether it knows, so "empty" and "unknown" stop being the same
+answer, and a constructor forwards the source's hint rather than calling a
+length. `AsSlice` returns nil when the entries were not a slice
 to begin with, so a consumer can take a memmove fast path when one is available
 and fall back otherwise. `AsSeq`/`AsSeq2` always work.
 
 **Sources.** A container advertises which shapes it can produce:
 
 ```go
-type HoldsKeys[T any] interface   { Len() int; Keys() iter.Seq[T] }
-type HoldsValues[T any] interface { Len() int; Values() iter.Seq[T] }
+type HoldsKeys[T any] interface   { SizeHint() (int, bool); Keys() iter.Seq[T] }
+type HoldsValues[T any] interface { SizeHint() (int, bool); Values() iter.Seq[T] }
 
 // A pair source must also produce each half natively.
 type HoldsAll[K, V any] interface {
@@ -902,6 +903,13 @@ type HoldsAll[K, V any] interface {
 	All() iter.Seq2[K, V]
 }
 ```
+
+**The sources carry `SizeHint() (int, bool)`, not `Len() int`.** The bool is what
+lets a source *decline* — and it has to be on the source, not only on
+`Collector`, or a mandatory `Len()` forces the work regardless of what the
+collector could say. A container answers `(len, true)`; anything that would have
+to compute a length answers `(0, false)`. Containers keep `Len() int` as an
+ordinary method; it is simply not what the contract asks for.
 
 The embedding is not just tidiness. It means **anything that can produce pairs
 must offer a cheap key-only and value-only walk**, which is what stops
@@ -1062,9 +1070,26 @@ readily as a container.
 
 Three consequences worth stating:
 
-- **A sub-range must know its own length**, because `RangeAll` embeds `HoldsAll`.
-  Over a sorted slice that is two binary searches, which today's `Range` — a bare
-  `iter.Seq2` — does not have to do.
+- **A sub-range holds its bounds as keys, not indices, and declines to offer a
+  size.** That is what `SizeHint`'s bool buys. Measured over 4096 keys:
+  constructing an index-bounded range costs **48.5 ns** for two binary searches,
+  a key-bounded one **3.4 ns**. More importantly the index form is *wrong* once
+  the container changes — inserting a key inside the range makes it miss an
+  element, and inserting one before it slides the whole window:
+
+  ```
+  before insert:        byIndex=[b d]   byKey=[b d]
+  after inserting "c":  byIndex=[b c]   byKey=[b c d]
+  after inserting "a":  byIndex=[a b]   byKey=[a b c d]
+  ```
+
+  A key-bounded range re-derives its bounds per operation, so it always reflects
+  the container as it stands. Verified: after the container grows, the same
+  sub-range yields the current contents of its interval.
+
+  **A `Vector`'s range cannot have this property**, because a sequence's keys
+  *are* positions — there is no mutation-stable bound to hold. Sorted containers
+  get stable ranges; sequences do not.
 - **A sub-range cannot be sub-ranged.** `RangeAll` has no `Range` of its own, so
   `sd.Range(a, b).Range(c, d)` is a compile error. Deliberate, and the same shape
   as `Backward()` returning a source with no `Backward()`.
@@ -1151,8 +1176,8 @@ reversed source rather than an iterator.
 
 ```go
 // Sources -- what a container advertises.
-type HoldsKeys[T any] interface   { Len() int; Keys() iter.Seq[T] }
-type HoldsValues[T any] interface { Len() int; Values() iter.Seq[T] }
+type HoldsKeys[T any] interface   { SizeHint() (int, bool); Keys() iter.Seq[T] }
+type HoldsValues[T any] interface { SizeHint() (int, bool); Values() iter.Seq[T] }
 type HoldsAll[K, V any] interface { HoldsKeys[K]; HoldsValues[V]; All() iter.Seq2[K, V] }
 
 // Sources that also read backwards. Range returns one; a container is the widest.
@@ -1161,13 +1186,13 @@ type RangeAll[K, V any] interface { HoldsAll[K, V]; Backward() HoldsAll[K, V] }
 
 // The primitive.
 type Collector[T any] interface {
-	SizeHint() int
+	SizeHint() (int, bool)
 	AsSlice() []T
 	AsSeq() iter.Seq[T]
 	sealedCollector()
 }
 type Collector2[K, V any] interface {
-	SizeHint() int
+	SizeHint() (int, bool)
 	AsSeq2() iter.Seq2[K, V]
 	sealedCollector()
 }
@@ -1197,7 +1222,8 @@ func (d *SortedDict[K, V]) Range(lo, hi K) RangeAll[K, V]
 | `KeysOf` requires a native `Keys()` | no silent fallback to deriving, which would cost 14.9x at wide values |
 | `Collector2` has no `AsSlice` | pairs have no contiguous form |
 | no consumer-side helper | `AsSeq` always works; the branch is hand-written where it is worth ~2x and skipped where it is worth ~15% |
-| `SizeHint() == 0` means unknown | a consumer never asks whether a length exists |
+| `SizeHint() (int, bool)`, on the sources as well as on `Collector` | the bool lets a source decline; a mandatory `Len()` would force the work regardless |
+| a sub-range holds **key** bounds and declines a hint | 3.4 ns to construct against 48.5 ns, and correct when the container changes |
 | reverse is a source, named `Backward` | matching `slices.Backward`; composes with every `Collector` constructor |
 | a reverse source has no `Backward` | double reverse is a compile error |
 | sealing costs callers nothing | a caller's type with `Len` and `Values` is a `HoldsValues` already |
