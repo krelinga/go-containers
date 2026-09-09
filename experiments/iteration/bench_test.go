@@ -368,3 +368,41 @@ func BenchmarkCrossContainer(b *testing.B) {
 	b.Run("NarrowValues", func(b *testing.B) { benchCross[int](b, n) })
 	b.Run("WideValues", func(b *testing.B) { benchCross[Sz1K](b, n) })
 }
+
+// ---- 8. can a shared helper hide the AsSlice branch? ---------------------
+
+var sinkMap map[string]struct{}
+
+func BenchmarkConsumerShape(b *testing.B) {
+	const n = 1024
+	src := make([]string, n)
+	for i := range src {
+		src[i] = string(rune('a'+i%26)) + string(rune('a'+(i/26)%26)) + string(rune('a'+(i/676)%26))
+	}
+
+	fromSlice := FromSlice(src)
+	fromSeq := FromSeq(n, sliceCollector[string]{src}.AsSeq())
+
+	for name, c := range map[string]Collector[string]{"SliceBacked": fromSlice, "SeqBacked": fromSeq} {
+		b.Run(name+"/HandBranch", func(b *testing.B) {
+			for b.Loop() {
+				sinkMap = buildHandBranch(c)
+			}
+		})
+		b.Run(name+"/EachHelper", func(b *testing.B) {
+			for b.Loop() {
+				sinkMap = buildEach(c)
+			}
+		})
+		b.Run(name+"/SeqOnly", func(b *testing.B) {
+			for b.Loop() {
+				sinkMap = buildSeqOnly(c)
+			}
+		})
+		b.Run(name+"/ViaSliceHelper", func(b *testing.B) {
+			for b.Loop() {
+				sinkMap = buildViaSlice(c)
+			}
+		})
+	}
+}

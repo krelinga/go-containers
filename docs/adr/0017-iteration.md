@@ -896,3 +896,29 @@ generalisation. 5A and 5D become unnecessary.
 **Surface.** Six constructors, one `Collect` and one bulk method per container:
 about twenty declarations covering every source-shape × target combination,
 against eighteen functions under 5A covering a third of them.
+
+**Rules settled while reviewing the proposal:**
+
+- **`AsSlice` returns non-nil only for a collector built from a caller-owned
+  slice** — `Items(vs...)`, or `ItemsFrom` over one. It never exposes a
+  container's backing array, which would hand out the interior ADR `0001` exists
+  to protect and `Vector` was built to own.
+- **`KeysOf` requires a native `Keys()`; it does not fall back to deriving from
+  `All()`.** A container that wants to be a key source provides the method. This
+  makes proposal A **depend on direction 1A** rather than merely preferring it,
+  and the dependency is deliberate: the fallback would silently cost 14.9x at
+  wide values.
+- **`Collector2` has no `AsSlice`**, because there is no natural contiguous form
+  for pairs. Stated so the asymmetry does not read as an oversight.
+- **Reusability follows `iter.Seq`, and is not specified.** A collector over a
+  container can be walked repeatedly; one over a single-use iterator cannot, and
+  nothing in the interface distinguishes them. This inherits ADR `0006`'s
+  existing non-guarantee and makes it more visible, so it wants documenting on
+  `Collector` itself.
+- **Sealing costs callers nothing.** A caller's own type with `Len()` and
+  `Values()` satisfies `HoldsValues[T]` and works with `ValuesOf` directly;
+  sealing only prevents implementing `Collector`, which nothing needs to do.
+- **`Elems` and `Elems2` may not survive.** `HoldsValues[T]` is `Elems[T]` with
+  `All` renamed, and `HoldsAll[K, V]` is `Elems2[K, V]`. ADR `0006` says their
+  purpose *is* carrying a length, and that purpose moves to `SizeHint`. Whether
+  they are renamed, kept as aliases, or removed is part of adopting this.
