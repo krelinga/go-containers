@@ -382,15 +382,18 @@ for k, v := range d.All() { }     // pairs
 for k := range d.Keys() { }       // keys -- never materialises a User
 for val := range d.Values() { }   // values
 
-for e := range s.Values() { }     // a set's elements -- WAS s.All()
+for e := range s.Keys() { }       // a set's elements -- WAS s.All(); a set's
+                                  // element IS its key, per problem 4
 for i, e := range v.All() { }     // WAS v.AllIndexed()
 for e := range v.Values() { }     // WAS v.All()
 ```
 
 The first three read well and the last three are the cost: **every existing set
 and vector iteration in every caller changes**, and the two that change are the
-ones that already looked right. `s.All()` becoming `s.Values()` is the single
-most disruptive line in this ADR.
+ones that already looked right. `s.All()` becoming `s.Keys()` is the single most
+disruptive line in this ADR, and the least comfortable — "the keys of a set"
+is correct under the taxonomy and still reads oddly. `s.Values()` would read
+better and would contradict problem 4.
 
 ### 1B. Keep one `All` per container; add free functions for other shapes
 
@@ -454,7 +457,7 @@ for k, v := range d.All().Seq { }              // pairs -- note the .Seq
 for k := range d.Keys().Seq { }                // keys
 for val := range d.Values().Seq { }            // values
 
-for e := range s.Values().Seq { }
+for e := range s.Keys().Seq { }   // a set's element is its key
 for i, e := range v.All().Seq { }
 ```
 
@@ -842,8 +845,24 @@ and fall back otherwise. `AsSeq`/`AsSeq2` always work.
 ```go
 type HoldsKeys[T any] interface   { Len() int; Keys() iter.Seq[T] }
 type HoldsValues[T any] interface { Len() int; Values() iter.Seq[T] }
-type HoldsAll[K, V any] interface { Len() int; All() iter.Seq2[K, V] }
+
+// A pair source must also produce each half natively.
+type HoldsAll[K, V any] interface {
+	HoldsKeys[K]
+	HoldsValues[V]
+	All() iter.Seq2[K, V]
+}
 ```
+
+The embedding is not just tidiness. It means **anything that can produce pairs
+must offer a cheap key-only and value-only walk**, which is what stops
+`KeysOf(dict)` falling back to deriving and paying 14.9x at wide values. A source
+that genuinely has only pairs — a zip of two iterators, say — goes through
+`AllFrom(seq)` and never claims to be a `HoldsAll`.
+
+**A set is a `HoldsKeys`, not a `HoldsValues`**, per problem 4's taxonomy: a
+set's element is its key, and a set has no value. So `KeysOf(mySet)` is the
+spelling and `ValuesOf(mySet)` does not compile.
 
 **Constructors.** Six, covering every source:
 
@@ -899,17 +918,14 @@ A container that can be read backwards has one method, returning **a source**
 rather than an iterator:
 
 ```go
-// Every shape a forward source offers, reversed.
-type Backward[K, V any] interface {
-	HoldsKeys[K]
-	HoldsValues[V]
-	HoldsAll[K, V]
-}
-
-func (d *SortedDict[K, V]) Backwards() Backward[K, V]
-func (v *Vector[T]) Backwards() Backward[int, T]
-func (s *SortedSet[T]) Backwards() HoldsKeys[T]   // one shape, so no combining
+func (d *SortedDict[K, V]) Backwards() HoldsAll[K, V]
+func (v *Vector[T]) Backwards() HoldsAll[int, T]
+func (s *SortedSet[T]) Backwards() HoldsKeys[T]
 ```
+
+**No new interface is needed.** Because `HoldsAll` embeds the other two, a
+`HoldsAll[K, V]` is already a `HoldsKeys[K]` and a `HoldsValues[V]`, so the
+static return type keeps every shape reachable.
 
 The reuse is the point: a reverse source plugs into everything a forward one
 does, so reverse composes with the whole `Collector` machinery rather than
@@ -923,19 +939,20 @@ containers.CollectVector(containers.KeysOf(sd.Backwards()))  // collect in rever
 containers.CollectHashSet(containers.ValuesOf(v.Backwards()))
 ```
 
-**The return type must be the combined interface, not one of the three.**
-Declaring `Backwards() HoldsAll[K, V]` fixes the static type, and the concrete
-type's other methods stop being reachable:
+This only works because of the embedding. An earlier draft declared
+`HoldsAll` without it, and the static return type then hid the concrete type's
+other methods:
 
 ```
 in call to KeysOf, type HoldsAll[string, int] of d.Backwards()
 does not match HoldsKeys[T] (cannot infer T)
 ```
 
-Verified, along with the fix: a combined interface embedding all three compiles,
-Go permits the repeated `Len()`, and inference resolves `KeysOf` and `ValuesOf`
-on it. The reverse source is one word — a pointer to the container it reverses —
-so **`d.Backwards()` boxes with zero allocations.**
+Verified with the embedding in place: Go permits the repeated `Len()`, inference
+reaches through it, and `KeysOf(d.Backwards())` yields `[c b a]` while
+`ValuesOf(d.Backwards())` yields `[3 2 1]`. The reverse source is one word — a
+pointer to the container it reverses — so **`d.Backwards()` boxes with zero
+allocations.**
 
 The returned source deliberately has no `Backwards()` of its own, so a double
 reverse is a compile error rather than a no-op.
@@ -947,9 +964,9 @@ view, which is ADR `0013`'s deferred follow-up in another guise.
 
 And proposal A **assumes problem 4's answer rather than settling it**: `HoldsKeys`, `HoldsValues` and `HoldsAll` encode the
 caller-key/position/value taxonomy directly, so adopting proposal A commits to
-it. Proposal A therefore cannot land before problem 4 is decided — and
-`SortedSet.Backwards()`'s return type is the sharpest instance, since it depends
-on whether a set's element is a key or a value.
+it. Proposal A therefore cannot land before problem 4 is decided, though the
+sharpest instance — whether a set is a `HoldsKeys` or a `HoldsValues` — is now
+settled in favour of `HoldsKeys`.
 
 **Surface.** Six constructors, one `Collect` and one bulk method per container:
 about twenty declarations covering every source-shape × target combination,
