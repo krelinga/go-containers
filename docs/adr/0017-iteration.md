@@ -918,9 +918,9 @@ A container that can be read backwards has one method, returning **a source**
 rather than an iterator:
 
 ```go
-func (d *SortedDict[K, V]) Backwards() HoldsAll[K, V]
-func (v *Vector[T]) Backwards() HoldsAll[int, T]
-func (s *SortedSet[T]) Backwards() HoldsKeys[T]
+func (d *SortedDict[K, V]) Backward() HoldsAll[K, V]   // matches slices.Backward
+func (v *Vector[T]) Backward() HoldsAll[int, T]
+func (s *SortedSet[T]) Backward() HoldsKeys[T]
 ```
 
 **No new interface is needed.** Because `HoldsAll` embeds the other two, a
@@ -932,11 +932,11 @@ does, so reverse composes with the whole `Collector` machinery rather than
 needing its own vocabulary.
 
 ```go
-for k, v := range sd.Backwards().All() { }          // iterate in reverse
-for _, v := range sd.Backwards().All() { }          // reverse values, discarding
+for k, v := range sd.Backward().All() { }          // iterate in reverse
+for _, v := range sd.Backward().All() { }          // reverse values, discarding
                                                     // a narrow key -- free
-containers.CollectVector(containers.KeysOf(sd.Backwards()))  // collect in reverse
-containers.CollectHashSet(containers.ValuesOf(v.Backwards()))
+containers.CollectVector(containers.KeysOf(sd.Backward()))  // collect in reverse
+containers.CollectHashSet(containers.ValuesOf(v.Backward()))
 ```
 
 This only works because of the embedding. An earlier draft declared
@@ -944,17 +944,17 @@ This only works because of the embedding. An earlier draft declared
 other methods:
 
 ```
-in call to KeysOf, type HoldsAll[string, int] of d.Backwards()
+in call to KeysOf, type HoldsAll[string, int] of d.Backward()
 does not match HoldsKeys[T] (cannot infer T)
 ```
 
 Verified with the embedding in place: Go permits the repeated `Len()`, inference
-reaches through it, and `KeysOf(d.Backwards())` yields `[c b a]` while
-`ValuesOf(d.Backwards())` yields `[3 2 1]`. The reverse source is one word — a
-pointer to the container it reverses — so **`d.Backwards()` boxes with zero
+reaches through it, and `KeysOf(d.Backward())` yields `[c b a]` while
+`ValuesOf(d.Backward())` yields `[3 2 1]`. The reverse source is one word — a
+pointer to the container it reverses — so **`d.Backward()` boxes with zero
 allocations.**
 
-The returned source deliberately has no `Backwards()` of its own, so a double
+The returned source deliberately has no `Backward()` of its own, so a double
 reverse is a compile error rather than a no-op.
 
 **What proposal A does not cover.** Reverse over a **sub-range** is still
@@ -1015,3 +1015,88 @@ against eighteen functions under 5A covering a third of them.
   `All` renamed, and `HoldsAll[K, V]` is `Elems2[K, V]`. ADR `0006` says their
   purpose *is* carrying a length, and that purpose moves to `SizeHint`. Whether
   they are renamed, kept as aliases, or removed is part of adopting this.
+
+### Proposal A, as it stands
+
+**One sentence.** Every bulk constructor and bulk mutator takes a `Collector`,
+which abstracts away where a sequence of entries comes from; containers advertise
+what shapes they can produce; and a container that reads backwards returns a
+reversed source rather than an iterator.
+
+**The surface**, complete:
+
+```go
+// Sources -- what a container advertises.
+type HoldsKeys[T any] interface   { Len() int; Keys() iter.Seq[T] }
+type HoldsValues[T any] interface { Len() int; Values() iter.Seq[T] }
+type HoldsAll[K, V any] interface { HoldsKeys[K]; HoldsValues[V]; All() iter.Seq2[K, V] }
+
+// The primitive.
+type Collector[T any] interface {
+	SizeHint() int
+	AsSlice() []T
+	AsSeq() iter.Seq[T]
+	sealedCollector()
+}
+type Collector2[K, V any] interface {
+	SizeHint() int
+	AsSeq2() iter.Seq2[K, V]
+	sealedCollector()
+}
+
+// Six constructors.
+func KeysOf[T any](h HoldsKeys[T]) Collector[T]
+func ValuesOf[T any](h HoldsValues[T]) Collector[T]
+func AllOf[K, V any](h HoldsAll[K, V]) Collector2[K, V]
+func ItemsFrom[T any](seq iter.Seq[T]) Collector[T]
+func AllFrom[K, V any](seq iter.Seq2[K, V]) Collector2[K, V]
+func Items[T any](vs ...T) Collector[T]
+
+// One Collect and one bulk method per container, plus Backward where ordered.
+func CollectVector[T any](c Collector[T]) *Vector[T]
+func (v *Vector[T]) AppendAll(c Collector[T])
+func (v *Vector[T]) Backward() HoldsAll[int, T]
+```
+
+**Settled.**
+
+| | |
+|---|---|
+| `HoldsAll` embeds `HoldsKeys` and `HoldsValues` | so pair sources must offer cheap half-walks, and `Backward` needs no interface of its own |
+| a set is a `HoldsKeys` | its element is its key; `ValuesOf(set)` does not compile |
+| `AsSlice` is non-nil only for caller-owned slices | never a container's backing array |
+| `KeysOf` requires a native `Keys()` | no silent fallback to deriving, which would cost 14.9x at wide values |
+| `Collector2` has no `AsSlice` | pairs have no contiguous form |
+| no consumer-side helper | `AsSeq` always works; the branch is hand-written where it is worth ~2x and skipped where it is worth ~15% |
+| `SizeHint() == 0` means unknown | a consumer never asks whether a length exists |
+| reverse is a source, named `Backward` | matching `slices.Backward`; composes with every `Collector` constructor |
+| a reverse source has no `Backward` | double reverse is a compile error |
+| sealing costs callers nothing | a caller's type with `Len` and `Values` is a `HoldsValues` already |
+
+**Verified, not assumed.** Inference resolves `KeysOf(d)` and `ValuesOf(d)` on a
+dict that has both, with no type arguments, and a mismatch is a compile error
+naming the method. Inference also reaches *through* the embedding, which the
+un-embedded form failed to do. `d.Backward()` boxes with zero allocations.
+`KeysOf(d.Backward())` yields `[c b a]`.
+
+**Which problems it closes.** Problem 1, by requiring native per-shape methods.
+Problem 2, by collapsing `X`/`XSeq` into one argument type. Problem 3, for whole
+containers. Problem 5, entirely — `CollectVector(KeysOf(d))` is the case that had
+no spelling.
+
+**What remains open.**
+
+- **Reverse over a sub-range.** `Range(lo, hi)` returns an `iter.Seq2`, not a
+  source, so nothing can reverse it. Closing this means `Range` returning a
+  source or a view — ADR `0013`'s deferred follow-up.
+- **What becomes of `Elems` and `Elems2`.** `HoldsValues` is `Elems` with `All`
+  renamed and `HoldsAll` is `Elems2`; `SizeHint` takes over the length-carrying
+  job ADR `0006` gave them. Renamed, aliased, or removed is undecided.
+- **Problem 4 must be decided first.** The source interfaces encode its taxonomy,
+  so adopting proposal A commits to it. Its sharpest instance — whether a set is
+  a `HoldsKeys` — is now settled.
+
+**The cost to callers**, stated plainly: every existing set and vector iteration
+changes. `s.All()` becomes `s.Keys()` and `v.All()` becomes `v.Values()`. That is
+the price of the whole proposal, and it is paid at every call site in every
+program using this library.
