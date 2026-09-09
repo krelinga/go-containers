@@ -893,6 +893,13 @@ discarded-value copy. 2B, since `SizeHint` carries the length and the `X`/`XSeq`
 split collapses. 5B and 5C, of which the collector constructors are a
 generalisation. 5A and 5D become unnecessary.
 
+**What proposal A does not cover.** It leaves **problem 3 untouched** — a
+`Collector` is one-directional, and reverse iteration is a container capability
+that nothing here provides. And it **assumes problem 4's answer rather than
+settling it**: `HoldsKeys`, `HoldsValues` and `HoldsAll` encode the
+caller-key/position/value taxonomy directly, so adopting proposal A commits to
+it. Proposal A therefore cannot land before problem 4 is decided.
+
 **Surface.** Six constructors, one `Collect` and one bulk method per container:
 about twenty declarations covering every source-shape × target combination,
 against eighteen functions under 5A covering a third of them.
@@ -918,6 +925,24 @@ against eighteen functions under 5A covering a third of them.
 - **Sealing costs callers nothing.** A caller's own type with `Len()` and
   `Values()` satisfies `HoldsValues[T]` and works with `ValuesOf` directly;
   sealing only prevents implementing `Collector`, which nothing needs to do.
+- **No consumer-side helper is provided.** A `Collector` carries both an
+  `AsSlice` and an `AsSeq`, so a consumer *may* branch on which is available —
+  but nothing in the package does it for them. `AsSeq` always works, and that
+  guarantee is what makes the absence of a helper acceptable: a consumer with no
+  opinion writes one loop and takes the hit.
+
+  The hit is small where it lands and large where it matters, which is why this
+  is not a shortcut. Against a **map-backed** target the branch is worth ~15%,
+  since a map insert at ~13 ns dominates the iterator's ~1 ns. Against a
+  **slice-backed** target it is worth ~2x, because there the fast path is a
+  memmove rather than a cheaper loop. So the branch gets hand-written in the two
+  or three places it is worth 2x, and skipped everywhere it is worth 15%.
+
+  A callback helper was measured at 4–8% over a hand-written branch — cheap
+  enough to be viable, and rejected anyway, because it earns its keep only in the
+  cases that will be hand-written regardless. A helper that materialises a slice
+  was rejected outright: it is the best option when the collector already has a
+  slice and the worst when it does not.
 - **`Elems` and `Elems2` may not survive.** `HoldsValues[T]` is `Elems[T]` with
   `All` renamed, and `HoldsAll[K, V]` is `Elems2[K, V]`. ADR `0006` says their
   purpose *is* carrying a length, and that purpose moves to `SizeHint`. Whether

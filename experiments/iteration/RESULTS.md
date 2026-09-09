@@ -142,6 +142,32 @@ asserts for a `Keys() iter.Seq[K]` and falls back to deriving when the source ha
 none. That is the `io.WriterTo` pattern, and it only pays off if containers offer
 the native walk.
 
+## 6. How much a consumer's fast path is worth, by target
+
+Proposal A gives a `Collector` both an `AsSlice` and an `AsSeq`, so every
+consumer could branch on which is available. Building a 1024-entry map:
+
+| | slice-backed collector | seq-backed collector |
+|---|---|---|
+| hand-written branch | **11.86 µs** | 13.51 µs |
+| an `Each(c, f)` callback helper | 12.86 µs (+8.4%) | 14.12 µs (+4.5%) |
+| `AsSeq()` only, no branch | 13.59 µs (+14.6%) | **13.50 µs** |
+| a helper materialising a slice | 12.00 µs (+1.2%) | 15.43 µs (+14.2%) |
+
+**The branch is worth ~15% for a map-backed target**, because the map insert
+(~13 ns) dominates the iterator overhead (~1 ns). A callback helper recovers
+about half of that; it costs far less than the yield indirection it replaces,
+which was the worry.
+
+**It is worth much more for a slice-backed target**, and qualitatively so:
+`AppendMany(s...)` measured 2.1x the iterator route in
+`experiments/sliceadapter`, because that path is a memmove rather than a cheaper
+loop.
+
+The last row is the trap. Materialising a slice is the best option when the
+collector already has one and the worst when it does not — it optimises the case
+that is already fast and allocates in the common one.
+
 ## Conclusions
 
 Durable:
@@ -164,7 +190,11 @@ Durable:
    narrow values and 6.3x at wide ones against today's route, with half the
    memory and 6 allocations against 15. Fully adapted, the cost is flat in value
    width.
-7. **Direction is a capability only a container can provide.** Shape can be
+7. A consumer's `AsSlice` fast path is worth ~15% against a map-backed target and
+   ~2x against a slice-backed one, where it is a memmove rather than a cheaper
+   loop. A callback helper costs 4–8% over hand-writing the branch — much less
+   than the yield indirection it replaces.
+8. **Direction is a capability only a container can provide.** Shape can be
    converted from outside, but not for free once the discarded half is wide —
    so both shape and direction are reasons for a container to offer a method,
    for different reasons.
