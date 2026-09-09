@@ -198,9 +198,13 @@ lives.
 If a container is a bag of *(handle, value)* pairs, then the general contract is
 `Elems2` and `Elems` is the degenerate case:
 
-- a **dict** is key/value → `Elems2[K, V]`
-- a **sequence** is position/value → `Elems2[int, T]`
-- a **set** has keys and no values → `Elems[T]` is the honest shape
+- a **dict** is key/value → `HoldsAll[K, V]`
+- a **sequence** is position/value → `HoldsAll[int, T]`
+- a **set** has keys and no values → `HoldsKeys[T]` is the honest shape
+
+(Written with the `Holds*` names, which replace `Elems` and `Elems2` outright
+under proposal A. ADR `0006` gave those interfaces one job — carrying a length —
+and `SizeHint` takes it over.)
 
 Which makes `Vector` an `Elems2[int, T]` whose values can also be walked alone —
 exactly direction 1A below, arrived at from semantics rather than from matching
@@ -656,6 +660,27 @@ for k, nval := range sv.All() { }                    // k is the container's raw
 The difference is one identifier in one line, which is a fair measure of how much
 is at stake: this is a coherence question, not an ergonomics one.
 
+### What problem 4 still owes
+
+Settled since this problem was written: **a set is a `HoldsKeys`** — its element
+is its key and it has no value. Three things remain.
+
+1. **Do ordered containers convert their keys?** The anomaly above, and the only
+   substantive one. ADR `0012` decision 3 says values only, on a safety argument
+   that is sound and silent on abstraction. Changing it also costs ADR `0016`'s
+   `SortedDictView` embedding `DictView`, which depends on ordered views
+   converting values only.
+2. **Are positions ever converted?** The taxonomy says no — an index or a cursor
+   is already opaque or trivial, and a conversion would have nothing to protect
+   and nothing to abstract. Stated but never confirmed, and it is what makes
+   `CanViewVector` a `ValueViewer` rather than needing a key half.
+3. **"Key" now means two things, which is the bug this ADR opened on.**
+   `HoldsKeys[int]` covers a `Vector`'s index, because positions are keys for
+   iteration and construction. `KeyViewer`'s round trip does *not* cover it,
+   because positions are not keys for conversion. Both are correct and the word
+   is doing two jobs — exactly what `All` was doing when this ADR started. It
+   wants either a stated scope or a second word.
+
 ## Directions for problem 5
 
 ### 5A. Add the constructors
@@ -1072,6 +1097,7 @@ func (v *Vector[T]) Backward() HoldsAll[int, T]
 | reverse is a source, named `Backward` | matching `slices.Backward`; composes with every `Collector` constructor |
 | a reverse source has no `Backward` | double reverse is a compile error |
 | sealing costs callers nothing | a caller's type with `Len` and `Values` is a `HoldsValues` already |
+| **`Elems` and `Elems2` are removed**, not renamed or aliased | the `Holds*` family replaces them, `SizeHint` takes over the length job, and the library has no external users to break |
 
 **Verified, not assumed.** Inference resolves `KeysOf(d)` and `ValuesOf(d)` on a
 dict that has both, with no type arguments, and a mismatch is a compile error
@@ -1089,9 +1115,6 @@ no spelling.
 - **Reverse over a sub-range.** `Range(lo, hi)` returns an `iter.Seq2`, not a
   source, so nothing can reverse it. Closing this means `Range` returning a
   source or a view — ADR `0013`'s deferred follow-up.
-- **What becomes of `Elems` and `Elems2`.** `HoldsValues` is `Elems` with `All`
-  renamed and `HoldsAll` is `Elems2`; `SizeHint` takes over the length-carrying
-  job ADR `0006` gave them. Renamed, aliased, or removed is undecided.
 - **Problem 4 must be decided first.** The source interfaces encode its taxonomy,
   so adopting proposal A commits to it. Its sharpest instance — whether a set is
   a `HoldsKeys` — is now settled.
