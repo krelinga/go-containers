@@ -1029,9 +1029,15 @@ func NewVector[T any](cs ...Collector[T]) *Vector[T]
 func NewHashSet[T comparable](cs ...Collector[T]) *HashSet[T]
 func NewHashDict[K comparable, V any](cs ...Collector2[K, V]) *HashDict[K, V]
 
-func (v *Vector[T]) AppendAll(c Collector[T])
-func (s *HashSet[T]) AddAll(c Collector[T])
-func (d *HashDict[K, V]) SetAll(c Collector2[K, V])
+func (v *Vector[T]) AppendAll(cs ...Collector[T])
+func (s *HashSet[T]) AddAll(cs ...Collector[T])
+func (d *HashDict[K, V]) SetAll(cs ...Collector2[K, V])
+
+// Removal is by KEY, so it takes Collector, never Collector2.
+func (s *HashSet[T]) Delete(k T)
+func (s *HashSet[T]) DeleteAll(cs ...Collector[T])
+func (d *HashDict[K, V]) Delete(k K)
+func (d *HashDict[K, V]) DeleteAll(cs ...Collector[K])
 
 // Ordered containers add two more; see the two sections below.
 func (d *SortedDict[K, V]) Backward() HoldsAll[K, V]
@@ -1098,11 +1104,71 @@ per-element iteration against a memmove, which is exactly what `AsSlice` is
 reserved to recover; that reservation and this decision stay coherent, because
 fixing it once on `Collector` fixes it for every constructor at once.
 
+### Bulk removal, and `Remove` becoming `Delete`
+
+Removal was missing from every earlier draft: a caller could bulk-*add* from any
+source and could only remove one element at a time. `Collector` makes the
+symmetric operation nearly free, so it is added.
+
+```go
+func (s *HashSet[T]) Delete(k T)
+func (s *HashSet[T]) DeleteAll(cs ...Collector[T])
+func (d *HashDict[K, V]) Delete(k K)
+func (d *HashDict[K, V]) DeleteAll(cs ...Collector[K])
+```
+
+**`HashSet.Remove` and `SortedSet.Remove` become `Delete`.** That is problem 4's
+taxonomy applied: a set's element *is* its key, and the operation that removes a
+key is called `Delete` everywhere else in the package. One name for one idea.
+
+**`DeleteAll` takes `Collector[K]`, never `Collector2`.** You set pairs and you
+delete keys, which makes the signature identical across sets and dicts — again
+because a set's element is its key. It is the clearest payoff the taxonomy has
+produced.
+
+Four rules, and the third is the one that matters:
+
+- **Order is irrelevant.** Deletion is idempotent and commutative, so unlike
+  `New` and `AddAll`, the sequence in which collectors are drained cannot be
+  observed. Deleting a key that is not present is a no-op, exactly as `Delete`
+  is.
+- **Size hints are ignored** by the hash containers, which allocate nothing to
+  delete. A sorted container may still want one — bulk deletion from a sorted
+  slice is the mirror of ADR `0004`'s bulk insertion, and a count would let it
+  compact in one pass rather than shifting per key. Left to the implementation.
+- **`DeleteAll` drains its collectors before deleting anything.** This is not an
+  optimisation, it is required for correctness. The obvious spelling of "empty
+  this container" is `d.DeleteAll(KeysOf(d))`, and deleting from a container
+  while walking it is exactly what ADR `0008`'s `MutableDict` forbids. Streaming
+  it silently corrupts a sorted container:
+
+  ```
+  streaming    d.DeleteAll(KeysOf(d)) -> [b]   (wanted [])
+  materialised same call              -> []
+  ```
+
+  Not an error, not a panic — a wrong answer, and only when the source happens to
+  be the receiver. `AddAll` has no equivalent hazard, because appending does not
+  shift existing elements while deletion does. The cost is one allocation of the
+  keys, which is noise against deletion that is already O(n) per key on a sorted
+  slice. **The abstraction is what makes this easy to write**, so the abstraction
+  pays for it.
+- **Zero collectors still touches the receiver**, per the eager-dereference rule
+  above: `d.DeleteAll()` on a nil receiver panics.
+
+`Vector` gets neither. It has no removal today, which is the oversight ADR `0015`
+records rather than something this proposal should settle.
+
+**Bulk methods are variadic in collectors**, matching `New`: `AddAll`, `SetAll`,
+`AppendAll` and `DeleteAll` all take `...Collector`. A single-collector form
+would have been the only place in the proposal that was not.
+
 ### What happens to the existing mutators
 
 The consumer list above shows the bulk methods and is silent on the rest, which
 leaves the obvious question: does a `Collector` subsume `Append`, or sit beside
-it? Measured, and the answer differs by arity.
+it? Measured, and the answer differs by arity. (Removal follows the same split,
+and is covered in the section above.)
 
 | | | allocs |
 |---|---|---|
@@ -1444,7 +1510,9 @@ func AllFromSized[K, V any](n int, seq iter.Seq2[K, V]) Collector2[K, V]
 
 // One constructor and one bulk method per container, plus Backward where ordered.
 func NewVector[T any](cs ...Collector[T]) *Vector[T]
-func (v *Vector[T]) AppendAll(c Collector[T])
+func (v *Vector[T]) AppendAll(cs ...Collector[T])
+func (s *HashSet[T]) Delete(k T)
+func (s *HashSet[T]) DeleteAll(cs ...Collector[T])
 func (v *Vector[T]) Backward() HoldsAll[int, T]
 func (d *SortedDict[K, V]) Range(lo, hi K) RangeAll[K, V]
 ```
@@ -1475,6 +1543,9 @@ table is an index, not a second statement of the rules.
 | `New<Container>(cs ...Collector[T])` replaces `New`, `Collect` and `CollectSeq` | eighteen functions become six, and several sources compose |
 | several collectors union in order, later wins | ADR `0004`'s rule; `slices.CompactFunc` keeps the first, so a sorted implementation must be tested with distinguishable values |
 | size hints sum, unknown ones skipped | a partial total costs an allocation, never a wrong result |
+| `Remove` becomes `Delete` on sets; `DeleteAll(cs ...Collector[K])` everywhere | a set's element is its key, so removal takes keys and the signature is identical across sets and dicts |
+| `DeleteAll` drains its collectors before deleting | `d.DeleteAll(KeysOf(d))` otherwise corrupts a sorted container silently |
+| every bulk method is variadic in collectors | uniform with `New`; nothing in the proposal takes exactly one |
 | **`Elems` and `Elems2` are removed**, not renamed or aliased | the `Holds*` family replaces them, `CanLen` takes over the length job, and the library has no external users to break |
 
 **Verified, not assumed.** Inference resolves `KeysOf(d)` and `ValuesOf(d)` on a
