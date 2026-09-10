@@ -1332,7 +1332,8 @@ func (v *Vector[T]) Backward() HoldsAll[int, T]
 func (d *SortedDict[K, V]) Range(lo, hi K) RangeAll[K, V]
 ```
 
-**Settled.**
+**Settled**, in summary. Each row's reasoning is in the sections above; this
+table is an index, not a second statement of the rules.
 
 | | |
 |---|---|
@@ -1359,18 +1360,38 @@ func (d *SortedDict[K, V]) Range(lo, hi K) RangeAll[K, V]
 **Verified, not assumed.** Inference resolves `KeysOf(d)` and `ValuesOf(d)` on a
 dict that has both, with no type arguments, and a mismatch is a compile error
 naming the method. Inference also reaches *through* the embedding, which the
-un-embedded form failed to do. `d.Backward()` boxes with zero allocations.
+un-embedded form failed to do. `d.Backward()` boxes with zero allocations, and
 `KeysOf(d.Backward())` yields `[c b a]`.
+
+Three later checks matter as much. A key-bounded sub-range stays correct when the
+container grows underneath it, where an index-bounded one silently misses
+elements. A `CanLen` assertion finds a container's length and finds nothing on a
+sub-range that has none. And the eager-dereference rule is confirmed in both
+directions — a nil receiver with an empty collector panics under the guarded
+implementation and **not** under the natural one.
 
 **Which problems it closes.** Problem 1, by requiring native per-shape methods.
 Problem 2, by collapsing `X`/`XSeq` into one argument type. Problem 3, for whole
 containers. Problem 5, entirely — `CollectVector(KeysOf(d))` is the case that had
 no spelling.
 
-**What remains open: nothing.** The last item — reverse over a sub-range — is
-closed by `Range` returning a `RangeAll` rather than an `iter.Seq2`, which also
-answers ADR `0013`'s deferred "should `Range` return a view?" in the negative:
-it returns a source, and a source has nothing to deny.
+**Nothing blocks this proposal.** The last blocking item — reverse over a
+sub-range — is closed by `Range` returning a `RangeAll` rather than an
+`iter.Seq2`, which also answers ADR `0013`'s deferred "should `Range` return a
+view?" in the negative: it returns a source, and a source has nothing to deny.
+
+Two things are deliberately deferred, neither of which changes anything decided
+above:
+
+- **`RangeAll` declares no `Range`**, so a sub-range cannot be narrowed and
+  generic code over one cannot narrow it either. The recursive declaration
+  compiles; it is left out to keep the interface minimal, and is the likeliest
+  thing to be added later.
+- **`Vector` has no `Range`.** Index bounds over the shipped `Vector` are stable
+  today, but only because nothing in its surface shifts an index — a `PopBack`
+  or `Remove` would end that silently. Deferred until there is something stable
+  to hold, which leaves a `Vector` sub-range with no spelling short of `At(i)` in
+  a loop.
 
 **Problem 4 is settled** and no longer gates this proposal — the taxonomy is
 adopted, ordered containers keep values-only conversion as a recorded exception,
