@@ -245,4 +245,30 @@ Durable:
     eager reverse construction cancels the boxing win. Perishable: the ratios,
     which depend on how expensive the underlying walk is.
 
+11. **Whether materialising to a slice beats iterating comes down entirely to
+    ownership.** Proposal D hands bulk operations a `[]T` that the source
+    guarantees is an independent copy. Against proposal A's collector, at 1024
+    elements:
+
+    | | A | D, constructor copies | D, constructor adopts |
+    |---|---|---|---|
+    | map keys -> vector | 8.097 µs, 6 allocs, 18.1 KiB | 8.766 µs, 2 allocs, 36.0 KiB | **6.991 µs, 1 alloc, 18.0 KiB** |
+    | slice -> vector | 3.305 µs, 6 allocs, 18.1 KiB | 3.835 µs, 2 allocs, 36.0 KiB | **1.949 µs, 1 alloc, 18.0 KiB** |
+    | -> map-backed set | 14.99 µs, 11 allocs | **14.17 µs, 7 allocs** | — |
+    | 1 KiB values x256 | 36.10 µs, 6 allocs, 256 KiB | 64.02 µs, 2 allocs, 512 KiB | **28.47 µs, 1 alloc, 256 KiB** |
+
+    A copying constructor does the work twice — materialise, then copy into the
+    destination — and **loses to A on time nearly everywhere while doubling peak
+    memory**; at 1 KiB values it is 1.8x slower. An adopting constructor does it
+    once and **beats A everywhere**, by 1.16x to 1.70x, at one allocation against
+    six.
+
+    Two things are durable regardless of that choice. **D's allocation count is
+    structurally lower** (1-2 against 6) because a slice's length is exact, so
+    the destination is sized in one shot and nothing boxes. And **D taxes plain
+    iteration**: walking a container's keys costs 7.255 µs and 18 KiB through
+    `KeySlice()` against 5.725 µs and **zero allocations** through an
+    `iter.Seq` — so a slice-based API has to keep its iterators too, rather than
+    replacing them.
+
 Perishable: every absolute number above.

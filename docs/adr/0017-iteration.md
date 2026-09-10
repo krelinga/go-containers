@@ -1,8 +1,9 @@
 # 17. The iteration contracts
 
 - **Status:** Proposed — and deliberately **not a decision**. This ADR states
-  three problems precisely, records the evidence, and sketches directions. It
-  decides nothing. A second ADR, or a revision of this one, should choose.
+  five problems precisely, records the evidence, sketches directions, and
+  develops three rival proposals. It decides nothing, except problem 4, which is
+  settled in place. A second ADR, or a revision of this one, should choose.
 - **Date:** 2026-09-08
 - **Evidence:** `experiments/iteration/` (`RESULTS.md`), with context from
   `experiments/vectorcost/`, `sliceadapter/`, `linkedlist/` and `sizedcollect/`.
@@ -14,7 +15,7 @@
 
 ## Context
 
-Iteration is the one thing every container here does, and three problems have
+Iteration is the one thing every container here does, and five problems have
 accumulated around it. Each was found while doing something else, each was
 deferred, and they are related closely enough that fixing one in isolation is
 likely to make another worse.
@@ -860,7 +861,9 @@ These were recorded elsewhere and belong here now:
 
 The directions above are per-problem alternatives. A proposal combines them into
 one coherent design and says which directions it takes. Proposals are numbered
-by letter; more may be added before this ADR decides.
+by letter; more may be added before this ADR decides. There are four: **A** a
+sealed `Collector` primitive, **B** a `Source` value, **C** no primitive at all,
+and **D** materialising to slices.
 
 The directions use the vocabulary of the time — `Elems`, `CollectX`,
 `CollectXSeq` — because they were written against the package as it stands.
@@ -1959,17 +1962,17 @@ summing rule to say it may over-allocate on overlapping sources.
 
 They are not variants; they disagree about what an abstraction is for.
 
-| | A | B | C |
-|---|---|---|---|
-| named types added | 8 | 2 | 0 |
-| free functions added | 8 | 2 | 0 |
-| bulk methods per container | 3 | 3 | 0 |
-| `for k := range d.Keys()` | works | **`.Seq`** | works |
-| size hint | automatic | automatic | **caller** |
-| reversibility | in the type system | a nil-able field | a named method |
-| a caller's own type as a source | via `Holds*` | via a literal | it is a loop |
-| cost of forgetting | cannot | cannot | **2.7x-3.7x, silent** |
-| measured cost per bulk call | baseline | -2 allocs, -40 ns, nil at scale | not built |
+| | A | B | C | D |
+|---|---|---|---|---|
+| named types added | 8 | 2 | 0 | **1** |
+| free functions added | 8 | 2 | 0 | **0** |
+| shape methods per dict | 3 | 3 | 3 | **6** |
+| `for k := range d.Keys()` | works | **`.Seq`** | works | works |
+| size hint | automatic | automatic | **caller** | **intrinsic** |
+| reversibility | in the type system | a nil-able field | a named method | `slices.Reverse` |
+| streaming / unbounded sources | yes | yes | yes | **no** |
+| cost of forgetting | cannot | cannot | **2.7x-3.7x, silent** | cannot |
+| measured against A | baseline | -2 allocs, nil at scale | not built | **1.16x-1.70x faster, if it adopts** |
 
 **A** buys the size hint with a wrapper at every call site. **B** buys it with the
 range syntax, and collapses eight types into two by demoting capability from
@@ -1978,8 +1981,10 @@ loop and an explicit `Grow` are better than any abstraction over them.
 
 The question this ADR now has to answer is narrow and stated: **is
 `NewVector(KeysOf(d))` worth eight named types and eight functions, when
-`NewVector(d.Keys())` costs one struct and the range syntax, and
-`v.Grow(d.Len())` plus a loop costs nothing at all?**
+`NewVector(d.Keys())` costs one struct and the range syntax,
+`v.Grow(d.Len())` plus a loop costs nothing at all, and
+`NewVector(d.KeySlice())` is both smaller and faster than all of them provided
+the constructor may keep the slice?**
 
 B has now been measured — see the section below. Its case rested on a value being
 cheaper than a boxed interface; that is true, and it turns out to buy about 40 ns
@@ -2060,3 +2065,158 @@ eagerly. A should check it is not doing the same: `Range(lo, hi)` returning a
 `RangeAll` must not construct the backward iterator until `Backward()` is called
 on it. Nothing in A's write-up says either way, and the cheap version is the one
 where `RangeAll` holds the bounds and builds a direction on demand.
+
+### Proposal D: materialise to a slice
+
+C's appeal was raw simplicity, bought by giving up the size hint — which
+measured at 2.7x-3.7x and is too much to give up. D keeps C's simplicity and
+gets the size back, by making the currency a **slice** rather than an iterator.
+A slice knows its own length, so the length stops being something the API has to
+carry.
+
+```go
+type KeyValue[K, V any] struct {
+	Key   K
+	Value V
+}
+```
+
+Containers gain slice-materialising methods alongside the iterators they already
+have:
+
+```go
+// HashDict -- iteration unchanged, bulk added
+func (d *HashDict[K, V]) Keys() iter.Seq[K]
+func (d *HashDict[K, V]) Values() iter.Seq[V]
+func (d *HashDict[K, V]) All() iter.Seq2[K, V]
+func (d *HashDict[K, V]) KeySlice() []K
+func (d *HashDict[K, V]) ValueSlice() []V
+func (d *HashDict[K, V]) AllSlice() []KeyValue[K, V]
+
+// A set's element is its key, so a set gets one.
+func (s *HashSet[T]) Keys() iter.Seq[T]
+func (s *HashSet[T]) KeySlice() []T
+
+// A vector is keyed by position.
+func (v *Vector[T]) ValueSlice() []T
+func (v *Vector[T]) AllSlice() []KeyValue[int, T]
+```
+
+And every bulk operation takes a slice:
+
+```go
+func NewVector[T any](vs []T) *Vector[T]
+func NewHashSet[T comparable](vs []T) *HashSet[T]
+func NewHashDict[K comparable, V any](kvs []KeyValue[K, V]) *HashDict[K, V]
+
+func (v *Vector[T]) AppendAll(vs []T)
+func (s *HashSet[T]) AddAll(vs []T)
+func (s *HashSet[T]) DeleteAll(ks []T)
+func (d *HashDict[K, V]) SetAll(kvs []KeyValue[K, V])
+func (d *HashDict[K, V]) DeleteAll(ks []K)
+```
+
+**The contract is the whole design.** A `*Slice` result is a **full, independent
+copy**: nothing the container does afterwards is visible through it, and nothing
+done to it is visible in the container. That single rule is what the rest falls
+out of.
+
+**Caller code:**
+
+```go
+containers.NewVector(d.KeySlice())            // problem 5, no wrapper, no primitive
+containers.NewHashSet(v.ValueSlice())
+v.AppendAll(other.ValueSlice())
+d.DeleteAll(d.KeySlice())                     // safe by construction
+ks := d.KeySlice(); slices.Reverse(ks)        // problem 3, no Backward needed
+slices.Sort(d.KeySlice())                     // the whole slices package applies
+```
+
+**What the contract buys, beyond simplicity:**
+
+- **The size stops being plumbed.** `SizeHint`, `CanLen`, `ItemsFromSized`,
+  `AllFromSized`, the hint-summing rule and its over-estimation erratum all
+  cease to exist. A slice's length is exact, always known, and free.
+- **The self-deletion hazard cannot happen.** A needed an explicit
+  "`DeleteAll` drains its collectors before deleting" rule, without which
+  `d.DeleteAll(KeysOf(d))` silently corrupts a sorted container. Under D the
+  argument is already a copy, so the bug is unconstructible rather than
+  documented.
+- **Problem 1 dissolves by naming.** `KeySlice`, `ValueSlice` and `AllSlice` are
+  three names for three shapes, so nothing collides the way two `All` methods do.
+- **Problem 3 is mostly free.** Reversal is `slices.Reverse` on a copy the caller
+  owns — no `Backward`, no `RangeKeys`, no `RangeAll`.
+- **The stdlib comes with it.** Sorting, compaction, filtering, chunking,
+  `slices.Concat` for unioning sources: all of it applies without this package
+  providing anything.
+
+**Count against A:** one named type against eight, zero free functions against
+eight.
+
+**Measured against proposal A** (`experiments/iteration`, `dslice.go`, finding
+11), at 1024 elements. The result is sharper than "it depends":
+
+| | A | D, copying | D, adopting |
+|---|---|---|---|
+| map keys → vector | 8.097 µs, 6 allocs, 18.1 KiB | 8.766 µs, 2 allocs, **36.0 KiB** | **6.991 µs**, 1 alloc, 18.0 KiB |
+| slice → vector | 3.305 µs, 6 allocs, 18.1 KiB | 3.835 µs, 2 allocs, **36.0 KiB** | **1.949 µs**, 1 alloc, 18.0 KiB |
+| → map-backed set | 14.99 µs, 11 allocs | **14.17 µs**, 7 allocs | — |
+| 1 KiB values ×256 | 36.10 µs, 6 allocs, 256 KiB | **64.02 µs**, 2 allocs, **512 KiB** | **28.47 µs**, 1 alloc, 256 KiB |
+
+**The copy is not the problem; doing it twice is.** A constructor that copies
+the slice it was handed materialises once and copies again into the destination,
+and that version **loses to A nearly everywhere while doubling peak memory** —
+1.8x slower at 1 KiB values, where the payload dominates. A constructor that
+adopts the slice does the work once and **beats A everywhere**, 1.16x to 1.70x,
+at one allocation against six.
+
+**So D's central question is ownership, and D cannot dodge it.** The
+`*Slice` contract already guarantees `d.KeySlice()` is a private copy, so
+adopting it is safe. What the constructor cannot know is whether the slice it
+received came from a `*Slice` method or from the caller's own live data, where
+adopting would silently alias. Three ways out, none free:
+
+- **Constructors copy.** Safe, obvious, and gives up the entire performance
+  case — D then exists purely for its simplicity.
+- **Constructors adopt, and it is documented.** `NewVector(d.KeySlice())` is
+  optimal, and a caller passing a slice they intend to keep must write
+  `NewVector(slices.Clone(mine))`. Fast, and a genuine footgun: Go's convention
+  is that a callee does *not* take ownership, so this violates an expectation
+  rather than an explicit rule.
+- **Two spellings**, one copying and one adopting. Recreates exactly the
+  `X`/`XSeq` twinning that problem 2 exists to remove.
+
+**This is the same question A already answered.** A deleted `AsSlice` partly to
+avoid "an ownership vocabulary and a rule about when a returned slice may be
+kept". D reintroduces that question from the other side and **cannot remove it**,
+because slices are D's entire surface rather than one optional accessor on it.
+Worth noting the symmetry: A's rejected `AsSlice` optimisation was worth 1.9x to
+a consumer that retains what it collects, and D-adopting measures 1.70x on the
+comparable case. These are two spellings of the same win.
+
+**What D costs, beyond ownership:**
+
+- **Plain iteration is taxed.** Walking keys via `KeySlice()` costs 7.255 µs and
+  18 KiB against 5.725 µs and **zero allocations** for `range d.Keys()`. So D
+  **must keep the `iter.Seq` methods**; the slices are an addition, not a
+  replacement. A dict ends with six shape methods rather than three, and D is
+  simpler in *types* while being larger in *per-container surface*.
+- **Peak memory doubles on any copying path**, which is worst exactly where it
+  is least affordable: wide values, where D-copying holds 512 KiB to A's 256 KiB.
+- **Laziness is gone.** `NewVector(KeysOf(huge))` under A streams; under D the
+  whole source is materialised first, whatever the destination does with it. A
+  consumer that stops early — a `Take(10)` over a million-element source — pays
+  for all million.
+- **Unbounded sources cannot be expressed at all.** A `Collector` over an
+  infinite `iter.Seq` is legal under A and impossible under D.
+
+**Where D lands.** It is the only proposal that gets C's simplicity without C's
+sacrifice: one named type, no free functions, no sealing question, no
+nil-collector question, no drain-before-delete hazard, and the size exact by
+construction rather than plumbed. Its cost is a second set of methods per
+container, doubled peak memory unless it adopts, and no streaming at all.
+
+**It is also the strongest rival A has.** B was measured and did not clear its
+own bar. C gave up 2.7x-3.7x. D, adopting, is **faster than A on every case
+measured** while being dramatically smaller — and the reason to hesitate is not
+performance but the ownership rule it needs to get there.
