@@ -1018,8 +1018,11 @@ the `Sized` pair report `(n, true)`.
 
 The `Sized` pair exists because `Collector` is sealed: a caller reading *n*
 records, or holding a length from anywhere else, otherwise has no way to say so
-and no way to implement a collector that could. A wrong `n` costs an allocation
-and never a wrong result, per ADR `0006`.
+and no way to implement a collector that could. **A wrong `n` is safe only
+downward**: an under-estimate degrades to the unsized cost, but an over-estimate
+retains the memory it asked for — 16x too large measures 3x *worse* than passing
+no hint at all. These constructors want a doc line saying **prefer an
+under-estimate**, not that a wrong `n` is harmless; see the erratum below.
 
 **Consumers.** Per container: one constructor, one bulk insert and one bulk
 delete — not one of each per source shape:
@@ -1098,9 +1101,12 @@ Three rules make that well-defined.
   has occurred in this repository once already.
 - **Size hints sum, and unknown ones are skipped.** `NewVector(KeysOf(d),
   ItemsFrom(seq))` presizes for the dict half rather than giving up because the
-  other half declined. A partial total under-reports, which costs an allocation
-  and never a wrong result, per ADR `0006`. Poisoning the whole sum on one
-  unknown would discard good information for nothing.
+  other half declined. A partial total under-reports, which degrades to the
+  unsized cost and never a wrong result. Poisoning the whole sum on one
+  unknown would discard good information for nothing. **Summing can also
+  over-report** — `NewHashSet(KeysOf(a), KeysOf(b))` on overlapping sources sums
+  to 2n for a set that holds n — which is the one direction that is not free;
+  bounded by the number of collectors, so mild, but see the erratum below.
 - **Zero collectors needs an explicit type argument** — `NewVector[int]()`, since
   there is nothing to infer from. That is exactly today's behaviour for
   `NewVector[int]()`, and it is rarely the right spelling anyway: ADR `0002`
@@ -1605,7 +1611,7 @@ table is an index, not a second statement of the rules.
 | there is no `RangeValues` | nothing in the taxonomy is values-only |
 | `New<Container>(cs ...Collector[T])` replaces `New`, `Collect` and `CollectSeq` | thirteen existing functions become five, and several sources compose |
 | several collectors union in order, later wins | ADR `0004`'s rule; `slices.CompactFunc` keeps the first, so a sorted implementation must be tested with distinguishable values |
-| size hints sum, unknown ones skipped | a partial total costs an allocation, never a wrong result |
+| size hints sum, unknown ones skipped | under-reporting degrades to the unsized cost; over-reporting on overlapping sources is the one unsafe direction, and is bounded by the collector count |
 | `Remove` becomes `Delete` on sets; `DeleteAll(cs ...Collector[K])` everywhere | a set's element is its key, so removal takes keys and the signature is identical across sets and dicts |
 | `DeleteAll` drains its collectors before deleting | `d.DeleteAll(KeysOf(d))` otherwise corrupts a sorted container silently |
 | every bulk method is variadic in collectors | uniform with `New`; nothing in the proposal takes exactly one |
@@ -1693,3 +1699,287 @@ whole-package break, and it is worth being honest that the proposal's benefits
 are mostly *coherence* rather than capability: problem 5's cross-container
 construction and problem 3's reverse iteration are genuinely new, and the rest is
 the same operations spelled consistently.
+
+### What proposals B and C are testing
+
+Proposal A above is complete and internally consistent. What follows does not
+amend it — it puts two rivals beside it so that adopting A is a choice rather
+than a default, and so the one measurement that would separate them is on the
+record.
+
+Proposal A settled into one shape early and was then refined for many rounds. It
+is worth naming what it never justified: **A's entire apparatus exists to move a
+length.** The sealed `Collector`, `SizeHint`, the `CanLen` assertion, and the
+`ItemsFromSized`/`AllFromSized` pair are all there so a consumer learns how big
+its input is. ADR `0006` says a missing hint costs an allocation and never a
+wrong result — which tells you the failure is benign, not that it is cheap.
+
+Proposals B and C attack that from opposite sides. B keeps the length and gives
+up something else to carry it more cheaply; C gives up the plumbing and makes the
+caller supply the length by hand.
+
+**There is a trilemma here, and it is a language fact rather than a taste.**
+Three things are wanted from whatever a container's `Keys()` returns:
+
+1. it can be ranged over directly — `for k := range d.Keys()`
+2. a length travels with it
+3. it needs no wrapper at the call site — `NewVector(d.Keys())`, not
+   `NewVector(KeysOf(d))`
+
+**No type gets all three**, because range-over-func requires the operand's core
+type to be a function, and a function type cannot carry a field:
+
+```
+cannot range over (dict{}).SizedKeys() (value of struct type Sized[string])
+```
+
+| | ranges directly | length travels | no wrapper |
+|---|---|---|---|
+| **A** — `iter.Seq` plus a sealed `Collector` | yes | yes | **no**: `KeysOf(d)` |
+| **B** — a `Source[T]` struct the container returns | **no**: `.Seq` | yes | yes |
+| **C** — bare `iter.Seq`, no primitive | yes | **no** | yes |
+
+A fourth corner was checked and is worse than all three. A *defined function
+type* — `type Source[T any] func(yield func(T) bool)` — does range directly and
+does carry methods, both verified. But it is a named type with a named
+counterpart, so it is not assignable to an `iter.Seq[T]` parameter:
+
+```
+type Source[string] of dict{}.Keys() does not match inferred type iter.Seq[string]
+```
+
+That severs the package from `slices.Collect`, `slices.Sorted`, `maps.Keys` and
+every other stdlib function taking an `iter.Seq`, in exchange for method syntax.
+**Rejected**, and recorded here so it is not rediscovered: the stdlib iterator
+vocabulary is worth more than dot-chaining.
+
+### Proposal B: `Source[T]`, a sized value the container hands you
+
+One concrete struct replaces A's six interfaces. A container returns it directly,
+so there is no wrapper to spell.
+
+```go
+type Source[T any] struct {
+	Seq  iter.Seq[T]     // forward; never nil
+	Back iter.Seq[T]     // backward; nil when the source has no order
+	N    int             // valid only when Known
+	Known bool
+}
+
+type Source2[K, V any] struct {
+	Seq   iter.Seq2[K, V]
+	Back  iter.Seq2[K, V]
+	N     int
+	Known bool
+}
+```
+
+```go
+func (d *HashDict[K, V]) Keys() Source[K]
+func (d *HashDict[K, V]) Values() Source[V]
+func (d *HashDict[K, V]) All() Source2[K, V]
+func (s *HashSet[T]) Keys() Source[T]
+func (v *Vector[T]) Values() Source[T]
+
+func NewVector[T any](srcs ...Source[T]) *Vector[T]
+func (v *Vector[T]) AppendAll(srcs ...Source[T])
+func (s *HashSet[T]) AddAll(srcs ...Source[T])
+func (s *HashSet[T]) DeleteAll(srcs ...Source[T])
+
+// Two free functions instead of eight constructors.
+func Items[T any](vs ...T) Source[T]
+func From[T any](seq iter.Seq[T]) Source[T]
+```
+
+**Caller code:**
+
+```go
+containers.NewVector(d.Keys())                  // problem 5, with no wrapper
+containers.NewHashSet(a.Keys(), b.Keys())       // unioned, still variadic
+v.AppendAll(containers.Items("a", "b"))
+for k := range d.Keys().Seq { ... }             // the tax, paid here
+```
+
+**What it collapses.** `HoldsKeys`, `HoldsValues`, `HoldsAll`, `CanLen`,
+`RangeKeys`, `RangeAll`, `Collector` and `Collector2` — eight named types in A —
+become `Source` and `Source2`. Reversibility stops being a *type* and becomes a
+**nil-able field**: `Backward` is `Source{Seq: s.Back, Back: s.Seq, ...}`, a
+struct copy with two fields swapped, no allocation and no boxing. `Range` returns
+a `Source2` whose `Back` is populated, which is all `RangeAll` ever meant.
+
+**What it costs, and it is not small.**
+
+- **`for k := range d.Keys()` stops compiling.** It becomes `range d.Keys().Seq`.
+  This lands on the single most common operation in the package, and it is the
+  reason B is not obviously better than A despite being much smaller.
+- **Capability leaves the type system.** A function that requires a reversible
+  source cannot say so in its signature; it takes a `Source[T]` and checks
+  `if s.Back == nil`. A's `RangeAll` is a compile-time promise, and B downgrades
+  it to a runtime one. This is the real axis between A and B: **declared
+  capability versus discovered capability.**
+- **The struct is public and its fields are public**, so its layout is the API.
+  A's `Collector` is sealed and can gain methods without breaking anyone;
+  `Source` cannot gain a field without changing every composite literal. A caller
+  who writes `Source[int]{Seq: s}` pins the shape forever. Mitigable by
+  unexporting the fields and adding accessors — which reintroduces method calls
+  and costs B its simplicity.
+- **A nil `Seq` is a panic with no seal to prevent it.** `var s Source[int]` is a
+  valid value whose `Seq` is nil, and `range` over a nil `iter.Seq` panics. A's
+  sealed interface makes the equivalent unconstructible.
+
+**What it likely wins**, unmeasured: `Source` is a value of four words passed
+directly, where A's `Collector` boxes into an interface — measured at 144 B for a
+single-element collector. B should be cheaper per bulk call. **This wants
+measuring before B is taken seriously**, and it is the one number that could
+justify paying the `.Seq` tax.
+
+### Proposal C: no primitive, and the caller sizes it
+
+C is the minimal proposal, and it exists because this ADR's own accounting admits
+that A's benefits are "mostly coherence rather than capability". C asks what is
+left if only the capability is bought.
+
+Containers expose the stdlib's vocabulary and nothing else:
+
+```go
+func (d *HashDict[K, V]) Keys() iter.Seq[K]
+func (d *HashDict[K, V]) Values() iter.Seq[V]
+func (d *HashDict[K, V]) All() iter.Seq2[K, V]
+func (d *SortedDict[K, V]) Backward() iter.Seq2[K, V]
+func (d *SortedDict[K, V]) Range(lo, hi K) iter.Seq2[K, V]
+func (d *SortedDict[K, V]) RangeBackward(lo, hi K) iter.Seq2[K, V]
+
+// The only addition: presizing, made explicit.
+func (v *Vector[T]) Grow(n int)
+func (s *HashSet[T]) Grow(n int)
+```
+
+**There are no bulk methods and no bulk constructors.** `AddAll`, `SetAll`,
+`AppendAll`, `DeleteAll`, `Collect<Container>` and the `*Seq` twins are all
+deleted rather than unified. Bulk anything is a range loop:
+
+```go
+var v containers.Vector[string]
+v.Grow(d.Len())
+for k := range d.Keys() {
+	v.Append(k)
+}
+```
+
+**Problem 5 dissolves rather than being solved.** "Put a dict's keys into a
+vector" needed a new spelling only because the operation was a *constructor*,
+and constructors multiply with the cross-product of source shapes and
+destinations. As a loop it is the same three lines for every pair of containers
+that will ever exist, including ones outside this package.
+
+**Problem 2 dissolves the same way.** The ragged matrix — `HashSet` missing two
+functions, `Map` missing three — stops being ragged when the matrix is empty.
+There is no consistency to maintain across containers because there is nothing to
+be consistent about.
+
+**Problem 1 is fixed directly** by the `Keys`/`Values`/`All` rename, which every
+proposal shares; it never needed a primitive.
+
+**Problem 3 is fixed by naming the four cases.** `Backward` and `RangeBackward`
+are two more methods on two containers, against A's `RangeKeys`/`RangeAll`
+machinery. Combinatorially worse if a fifth ordered container arrives, and
+completely clear until then.
+
+**The size hint becomes the caller's job, and this is C's central bet.** The
+measurement below shows presizing is worth **2.5x to 3.8x** — far too much to
+discard. C does not discard it; it moves it from a plumbed value to an explicit
+call. The caller writes `v.Grow(d.Len())` on the line above the loop, where it is
+visible, and where a caller who knows something the container does not — that the
+loop will `continue` past most of the input, say — can size it correctly, which
+no automatic hint can.
+
+**What it costs:**
+
+- **The hint can be forgotten, and forgetting is silent.** A caller who omits
+  `Grow` pays the full 3.8x and nothing tells them. A's plumbing cannot be
+  forgotten, and that is the strongest argument against C.
+- **Three lines instead of one**, at every bulk site.
+- **No signature can say "fillable".** A function that populates a caller's
+  container takes... nothing. There is no type for it, so the caller does the
+  filling and passes the result.
+- **Multi-source union is two loops**, which is fine, and gets the presize wrong
+  unless the caller sums the lengths by hand.
+- **The `for` loop is not free either.** A range loop over a container's
+  `iter.Seq` costs the same yield indirection every proposal pays, so C is not
+  faster than A per element — it is only smaller.
+
+**What it wins:** the entire `Collector` surface, the `Holds*` family, the eight
+constructor functions, the sealing question, the nil-collector question, the
+reusability question, the drain-before-delete correctness hazard — all of it
+stops existing, because none of it is built. `DeleteAll(KeysOf(d))` cannot
+silently corrupt a sorted container when there is no `DeleteAll`; the caller
+writing the loop has to materialise the keys themselves, and will see why.
+
+### What the measurement says about all three
+
+`experiments/iteration` finding 9 prices the thing A is built to carry:
+
+| build, 1024 elements | unsized | sized | |
+|---|---|---|---|
+| slice | 3.481 µs, 12 allocs, 24.6 KiB | 1.282 µs, 1 alloc, 8 KiB | **2.7x** |
+| map | 32.94 µs, 22 allocs, 72.7 KiB | 8.941 µs, 6 allocs, 36.1 KiB | **3.7x** |
+
+At 8 elements a slice still gains 3.5x and **a map gains nothing at all**, the
+runtime's small-map path allocating identically either way.
+
+**This vindicates A's central complexity.** A 2.7x-3.7x factor on every bulk
+build is not something to hand to callers and hope they remember, which is the
+strongest argument against C and the reason A's plumbing earns its keep.
+
+**It also produces an erratum against A.** Proposal A states, of
+`ItemsFromSized` and of the summing rule, that "a wrong *n* costs an allocation
+and never a wrong result, per ADR `0006`". Measured, that holds only when the
+hint is **too small**: hinting 16 for 1024 elements costs 3.425 µs against 3.481
+µs unsized, so the hint is merely wasted. Hinting **16x too large costs 10.58 µs
+and retains 128 KiB** — 8.3x the correct build, and 3x worse than passing no hint
+at all. An over-estimate does not trade an allocation; it trades transient
+allocation for retained memory.
+
+Two places in A over-estimate by construction:
+
+- **`ItemsFromSized(n, seq)` takes *n* from the caller**, who may be guessing.
+  A's framing invites a generous guess as the safe choice. It is the unsafe one.
+- **The summing rule over-reports on overlapping sources.**
+  `NewHashSet(KeysOf(a), KeysOf(b))` where `a` and `b` hold the same keys sums to
+  2n for a set that will hold n. Bounded at the number of collectors, so it is
+  mild — but it is over-estimation on the one path A added specifically to
+  compose sources, and A currently documents only the under-reporting direction
+  as benign.
+
+Neither sinks A. Both want the doc line on the `Sized` constructors to say
+**"prefer an under-estimate"** rather than "a wrong n is harmless", and the
+summing rule to say it may over-allocate on overlapping sources.
+
+### Where the three stand
+
+They are not variants; they disagree about what an abstraction is for.
+
+| | A | B | C |
+|---|---|---|---|
+| named types added | 8 | 2 | 0 |
+| free functions added | 8 | 2 | 0 |
+| bulk methods per container | 3 | 3 | 0 |
+| `for k := range d.Keys()` | works | **`.Seq`** | works |
+| size hint | automatic | automatic | **caller** |
+| reversibility | in the type system | a nil-able field | a named method |
+| a caller's own type as a source | via `Holds*` | via a literal | it is a loop |
+| cost of forgetting | cannot | cannot | **2.7x-3.7x, silent** |
+
+**A** buys the size hint with a wrapper at every call site. **B** buys it with the
+range syntax, and collapses eight types into two by demoting capability from
+compile time to run time. **C** buys nothing and builds nothing, betting that a
+loop and an explicit `Grow` are better than any abstraction over them.
+
+The question this ADR now has to answer is narrow and stated: **is
+`NewVector(KeysOf(d))` worth eight named types and eight functions, when
+`NewVector(d.Keys())` costs one struct and the range syntax, and
+`v.Grow(d.Len())` plus a loop costs nothing at all?**
+
+B is the one that has not been measured, and its whole case rests on a value
+being cheaper than a boxed interface. That measurement is the next thing this ADR
+owes.

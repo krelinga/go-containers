@@ -203,4 +203,20 @@ Durable:
    so both shape and direction are reasons for a container to offer a method,
    for different reasons.
 
+9. **A size hint is worth 2.7x-3.7x, and a bad one is worth less than none.**
+   Building 1024 elements from an iterator: a slice goes 3.481 µs -> 1.282 µs
+   (2.7x, 12 allocations -> 1, 24.6 KiB -> 8 KiB) and a map goes 32.94 µs ->
+   8.941 µs (3.7x, 22 -> 6, 72.7 KiB -> 36.1 KiB). At 8 elements a slice still
+   gains 3.5x; a map gains **nothing**, because the runtime's small-map path
+   allocates the same either way.
+
+   The asymmetry matters more than the size. An *under*-estimate degrades
+   gracefully to the unsized cost — hinting 16 for 1024 elements costs 3.425 µs
+   against 3.481 µs unsized, i.e. the hint is simply wasted. An *over*-estimate
+   does not: hinting 16x too large costs **10.58 µs and retains 128 KiB**, which
+   is 8.3x the correctly-sized build and **3x worse than passing no hint at
+   all**. ADR `0006`'s "a wrong hint costs an allocation, never a wrong result"
+   is true only in the under-estimating direction; over-estimating trades a
+   transient allocation for retained memory, which is the worse currency.
+
 Perishable: every absolute number above.
