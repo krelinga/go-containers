@@ -42,3 +42,47 @@ func TestSealSurvives(t *testing.T) {
 	var _ ifaceSetView[string] = viewIface(newPtrSet[string]())
 	t.Log("containers and views are disjoint sealed interfaces")
 }
+
+// Option (b)'s zero values, on both sides. A reference container's zero value
+// reads as empty (ADR 0014 decision 3); the question is whether a struct view's
+// does the same without help.
+func TestOptionBZeroValues(t *testing.T) {
+	var c nilRefSet[string]
+	if c.Len() != 0 || c.Has("x") || c.KeySlice() != nil {
+		t.Error("zero reference container should read as empty")
+	}
+	n := 0
+	for range c.Keys() {
+		n++
+	}
+	if n != 0 {
+		t.Error("zero reference container should iterate zero times")
+	}
+	t.Log("zero container: total reads, as designed")
+
+	// A struct view with NO nil handling: the naive shape.
+	var bare wrapSetView[string]
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("bare struct view did NOT panic on a zero value")
+			}
+		}()
+		_ = bare.Len()
+	}()
+	t.Log("zero struct view WITHOUT checks: panics, unlike the container")
+
+	// With the checks, it matches.
+	var checked nilWrapSetView[string]
+	if !checked.IsZero() || checked.Len() != 0 || checked.Has("x") || checked.KeySlice() != nil {
+		t.Error("checked zero struct view should read as empty")
+	}
+	m := 0
+	for range checked.Keys() {
+		m++
+	}
+	if m != 0 {
+		t.Error("checked zero struct view should iterate zero times")
+	}
+	t.Log("zero struct view WITH checks: matches the container")
+}

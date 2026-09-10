@@ -445,3 +445,132 @@ func BenchmarkIfaceIndexed(b *testing.B) {
 		}
 	})
 }
+
+// 7. Option (b) end to end: a reference container with nil-checked reads, and a
+// struct view with the nil checks that make its zero value match. This is the
+// complete shape, not a half of it.
+func BenchmarkOptionB(b *testing.B) {
+	vs := fixture(n)
+	ps := newPtrSet(vs...)
+	ns := newNilRefSet(vs...)
+	probe := vs[n/2]
+	iv := viewIface(ps)
+	nv := viewNilWrap(ps)
+
+	b.Run("container/Has/status-quo", func(b *testing.B) {
+		for b.Loop() {
+			sinkBool = ps.Has(probe)
+		}
+	})
+	b.Run("container/Has/optionB", func(b *testing.B) {
+		for b.Loop() {
+			sinkBool = ns.Has(probe)
+		}
+	})
+	b.Run("container/KeySlice/status-quo", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkStrs = ps.KeySlice()
+		}
+	})
+	b.Run("container/KeySlice/optionB", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkStrs = ns.KeySlice()
+		}
+	})
+
+	b.Run("view/Has/status-quo", func(b *testing.B) {
+		for b.Loop() {
+			sinkBool = iv.Has(probe)
+		}
+	})
+	b.Run("view/Has/optionB", func(b *testing.B) {
+		for b.Loop() {
+			sinkBool = nv.Has(probe)
+		}
+	})
+	b.Run("view/Keys/status-quo", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			c := 0
+			for range iv.Keys() {
+				c++
+			}
+			sinkInt = c
+		}
+	})
+	b.Run("view/Keys/optionB", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			c := 0
+			for range nv.Keys() {
+				c++
+			}
+			sinkInt = c
+		}
+	})
+	b.Run("view/KeySlice/status-quo", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkStrs = iv.KeySlice()
+		}
+	})
+	b.Run("view/KeySlice/optionB", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkStrs = nv.KeySlice()
+		}
+	})
+
+	// The emptiness check itself, which is the thing option (b) is buying.
+	b.Run("isempty/status-quo(==nil)", func(b *testing.B) {
+		for b.Loop() {
+			sinkBool = ps == nil
+		}
+	})
+	b.Run("isempty/optionB(IsZero)", func(b *testing.B) {
+		for b.Loop() {
+			sinkBool = nv.IsZero()
+		}
+	})
+}
+
+// 8. The nil-checked view iterator, two ways. A re-yield loop costs a second
+// closure; handing yield straight through does not.
+func BenchmarkNilCheckedIterator(b *testing.B) {
+	ps := newPtrSet(fixture(n)...)
+	iv := viewIface(ps)
+	nv := viewNilWrap(ps)
+
+	b.Run("no-check/iface", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			c := 0
+			for range iv.Keys() {
+				c++
+			}
+			sinkInt = c
+		}
+	})
+	b.Run("checked/re-yield", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			c := 0
+			for range nv.KeysReYield() {
+				c++
+			}
+			sinkInt = c
+		}
+	})
+	b.Run("checked/pass-through", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			c := 0
+			for range nv.Keys() {
+				c++
+			}
+			sinkInt = c
+		}
+	})
+}

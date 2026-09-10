@@ -376,3 +376,66 @@ func newPtrVec[T any](vs ...T) *ptrVec[T] { return &ptrVec[T]{es: slices.Clone(v
 func (v *ptrVec[T]) Len() int   { return len(v.es) }
 func (v *ptrVec[T]) At(i int) T { return v.es[i] }
 func (v *ptrVec[T]) Append(e T) { v.es = append(v.es, e) }
+
+// nilWrapSetView is option (b)'s view: a struct wrapping the sealed interface,
+// with the nil checks needed to make its zero value behave like a reference
+// container's. Without them a zero view panics on reads while a zero container
+// returns empty -- an inconsistency inside the option itself.
+type nilWrapSetView[T any] struct{ impl setViewImpl[T] }
+
+func viewNilWrap[T comparable](s *ptrSet[T]) nilWrapSetView[T] {
+	return nilWrapSetView[T]{ifaceSetViewImpl[T]{s}}
+}
+
+func (v nilWrapSetView[T]) IsZero() bool { return v.impl == nil }
+
+func (v nilWrapSetView[T]) Len() int {
+	if v.impl == nil {
+		return 0
+	}
+	return v.impl.Len()
+}
+
+func (v nilWrapSetView[T]) Has(t T) bool {
+	if v.impl == nil {
+		return false
+	}
+	return v.impl.Has(t)
+}
+
+// Keys is the shippable form: the nil check sits inside the closure, and hands
+// yield straight to the inner sequence rather than ranging over it. Re-yielding
+// costs a second closure -- see KeysReYield.
+func (v nilWrapSetView[T]) Keys() iter.Seq[T] {
+	impl := v.impl
+	return func(yield func(T) bool) {
+		if impl == nil {
+			return
+		}
+		impl.Keys()(yield)
+	}
+}
+
+// KeysReYield is the same check written the obvious way, kept as the negative
+// result: ranging over the inner sequence and re-yielding puts a second closure
+// on the heap.
+func (v nilWrapSetView[T]) KeysReYield() iter.Seq[T] {
+	impl := v.impl
+	return func(yield func(T) bool) {
+		if impl == nil {
+			return
+		}
+		for t := range impl.Keys() {
+			if !yield(t) {
+				return
+			}
+		}
+	}
+}
+
+func (v nilWrapSetView[T]) KeySlice() []T {
+	if v.impl == nil {
+		return nil
+	}
+	return v.impl.KeySlice()
+}

@@ -104,6 +104,56 @@ containers: `Union(ifaceSet[T]) ifaceSet[T]` satisfies itself where
 That ceiling has stood since ADR `0002` and this is the only shape that removes
 it.
 
+## 5. Option (b) end to end, and a refinement to the placement rule
+
+Option (b) is a reference container plus a struct-shaped view, both nil-checked
+so their zero values agree. Measured as the complete shape rather than half of
+it:
+
+| | status quo | option (b) |
+|---|---|---|
+| container `Has` | 4.289 ns | 4.382 ns |
+| container `KeySlice` | 420.8 ns, 1 alloc | 446.4 ns, 1 alloc |
+| view `Has` | 4.819 ns | 4.912 ns |
+| view `Keys` | 374.3 ns, 3 allocs | 368.9 ns, 3 allocs |
+| view `KeySlice` | 417.6 ns, 1 alloc | 419.0 ns, 1 alloc |
+| the emptiness check | 0.1890 ns (`== nil`) | 0.1874 ns (`IsZero()`) |
+
+**Free on every path, including the emptiness check itself.** `IsZero()` and
+`== nil` are indistinguishable, which is worth stating plainly: option (b) does
+not make the check cheaper or dearer, so its nil story is a lateral move rather
+than a win.
+
+**Both sides need the check, or they disagree.** A zero reference container reads
+as empty by design (ADR `0014` decision 3). A zero `struct{iface}` view **panics**
+on every method, because the field is a nil interface with nothing to dispatch
+to. Verified in `nil_test.go` across all three states. Making them agree means
+nil-checking every method on the view side too — roughly double the boilerplate
+of the container-only design, on every method of every container and every view.
+
+**The placement rule from ADR `0014` needs one more clause.** `0014` established
+that the check must sit *inside* the closure a method returns. That is necessary
+and not sufficient: how the checked closure reaches the inner sequence matters
+just as much.
+
+| nil-checked view iterator | | allocs |
+|---|---|---|
+| no check (bare interface) | 406.6 ns | 3 |
+| check, then **range and re-yield** | 481.9 ns | **5** |
+| check, then **hand `yield` through** | 404.8 ns | **3** |
+
+```go
+// costs a second closure on the heap
+for t := range impl.Keys() { if !yield(t) { return } }
+
+// free
+impl.Keys()(yield)
+```
+
+Ranging over the inner sequence and re-yielding builds a second closure; passing
+`yield` straight to it does not. **The full rule: the check goes inside the
+returned closure, and the closure must not re-yield.**
+
 ## Durable / perishable
 
 **Durable.** A reference struct is free relative to a pointer, on any method

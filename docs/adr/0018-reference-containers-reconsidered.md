@@ -113,12 +113,108 @@ allocation is gone. It is now:
 - **(a) reference containers, interface views** — two spellings: `c.IsZero()` for
   containers, `v == nil` for views.
 - **(b) reference containers, struct views** — one spelling, `IsZero()`
-  everywhere, at the cost of ADR `0013`'s substitutability.
+  everywhere, at the cost of ADR `0013`'s substitutability. Free at runtime;
+  expanded in full below.
 - **(c) the status quo** — one spelling, `== nil`, for both, and no method at all.
 - **(d) everything is an interface** — containers *and* views. One spelling,
   `== nil`, for both, no method at all, and the container/view representation
   split disappears entirely. Priced below; it is the only option that also
   removes ADR `0002`'s set-algebra ceiling.
+
+## Option (b), in full
+
+The closest of the four to adoptable, and the one whose case is most often
+stated backwards. Containers become one-word structs wrapping shared state, with
+value receivers; views become one-word structs wrapping the sealed interface.
+
+```go
+type HashSet[T comparable] struct{ st *hashSetState[T] }
+type SetView[NT any]       struct{ impl setViewImpl[NT] }
+
+func (s HashSet[T]) IsZero() bool { return s.st == nil }
+func (v SetView[NT]) IsZero() bool { return v.impl == nil }
+```
+
+**What it actually buys — and it is not the nil story.**
+
+ADR `0014` framed this whole question around how many spellings of "is this
+handle empty" the library ends up with, and on that metric **option (b) is a
+lateral move, not a win**. The status quo already has one spelling: `*HashSet[T]`
+is a pointer and `SetView[T]` is an interface, so `== nil` works on both, with no
+method. Option (b) also has one spelling, `IsZero()` — measured at 0.1874 ns
+against `== nil`'s 0.1890 ns, i.e. identical — but it is a method rather than an
+operator. **Nil is what option (b) pays, not what it earns.**
+
+What it earns is three things, none of which are about nil:
+
+- **`noCopy` and the copylocks caveat disappear.** Copies share, so there is
+  nothing to catch. This retires the hazard `CLAUDE.md` documents at length —
+  that copylocks is not in `go test`'s default vet subset, so a shallow-copy bug
+  passes `go test ./...` — by removing the bug class rather than the tooling gap.
+- **`HashDict` collapses into `Map`.** ADR `0007`'s value/pointer asymmetry is
+  the only thing keeping them apart, and their method sets are now identical.
+  A whole type, its two view constructors, its two view structs and a redundant
+  `CanViewHashDict` all go.
+- **Containers and views become the same kind of thing.** One word, freely
+  copied, reference-semantic. A caller stops changing representation at the
+  boundary.
+
+**What it costs at runtime: nothing.**
+
+| | status quo | option (b) |
+|---|---|---|
+| container `Has` | 4.289 ns | 4.382 ns |
+| container `KeySlice` | 420.8 ns, 1 alloc | 446.4 ns, 1 alloc |
+| view `Has` | 4.819 ns | 4.912 ns |
+| view `Keys` | 374.3 ns, 3 allocs | 368.9 ns, 3 allocs |
+| view `KeySlice` | 417.6 ns, 1 alloc | 419.0 ns, 1 alloc |
+| substitute ordered → base | 0.6482 ns | **0.2825 ns** |
+| the emptiness check | 0.1890 ns | 0.1874 ns |
+
+Free on every path, and the explicit conversion that replaces interface
+embedding is *cheaper* than the embedding. **Option (b) cannot be rejected on
+cost**, which is precisely what has changed since `0014`: it used to carry a
+6.8x charge on the `Elems2` path, and that path no longer exists.
+
+**What it costs in API shape, which is where it is actually decided.**
+
+- **ADR `0013` decision 2 dies.** An ordered view can no longer be handed to a
+  base-typed boundary implicitly — struct embedding is not subtyping. Every
+  ordered-to-base call site grows a `.Set()` or `.Dict()`, and a
+  `SortedDictView` cannot enter a `[]DictView` at all without one. Free at
+  runtime; a constant tax to read and write.
+- **Both sides need nil checks, or their zero values disagree.** This is the
+  cost most easily missed, and it was found by testing rather than reasoning: a
+  zero reference container reads as empty by design, but a zero `struct{iface}`
+  view **panics on every method**, because the field is a nil interface with
+  nothing to dispatch to. Making them agree means nil-checking every method on
+  the view side as well — roughly double the boilerplate of the container-only
+  design, spread across every method of every container and every view.
+- **ADR `0002`'s usable zero value reverses.** `var s HashSet[int]; s.Add(1)`
+  works today via addressability and would panic. That is a deliberate trade —
+  the zero value becomes "the empty container you may read but not write", which
+  is the semantics a reader already has for maps — but it is a reversal of an
+  accepted rule, and it will surface at real call sites.
+- **Error detection is lost where ADR `0017` made it matter more.** Reads on an
+  unconstructed container return empty instead of panicking, so
+  `NewVector(src.KeySlice()...)` on a zero `src` silently yields an empty
+  container. The library now has a test asserting every bulk method on every
+  container panics on a nil receiver; that net goes.
+- **The migration is the whole library.** Every container, every view, every
+  constructor, every contract assertion, every test.
+
+**One thing gets simpler, and is worth noting.** A struct whose only field is
+unexported cannot be built populated outside the package, so `sealedView()`
+becomes unnecessary — the seal is structural rather than a method — and
+`v.(*HashDict[K, V])` stops compiling because `v` is not an interface at all.
+
+**A refinement option (b) contributed regardless of its fate.** ADR `0014`
+established that a nil check must sit *inside* the closure a method returns.
+Necessary, and not sufficient: a checked closure that ranges over the inner
+sequence and re-yields builds a **second** closure — 481.9 ns and 5 allocations
+against 404.8 ns and 3 for handing `yield` straight through. The full rule is
+now recorded in `experiments/refcontainers/`: **the check goes inside the
+returned closure, and the closure must not re-yield.**
 
 ## Option (d): the entire public API as interfaces
 
@@ -228,7 +324,8 @@ without changing how every container is represented.
 **The status quo already has one nil spelling.** `*HashSet[T]` is a pointer and
 `SetView[T]` is an interface; `== nil` works on both, and neither needs a method.
 Option (a) *adds* a second vocabulary. Option (b) keeps one vocabulary but makes
-it a method call and spends ADR `0013` decision 2 to do it — an ordered view can
+it a method call — measured identical to `== nil`, so a lateral move rather than
+an improvement — and spends ADR `0013` decision 2 to do it — an ordered view can
 no longer be handed to a base-typed boundary implicitly, and a `SortedDictView`
 cannot enter a `[]DictView` without an explicit conversion at every site.
 
