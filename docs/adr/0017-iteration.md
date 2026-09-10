@@ -2194,6 +2194,89 @@ Worth noting the symmetry: A's rejected `AsSlice` optimisation was worth 1.9x to
 a consumer that retains what it collects, and D-adopting measures 1.70x on the
 comparable case. These are two spellings of the same win.
 
+#### Ownership: what Go actually does
+
+The question D cannot dodge has a settled answer in the standard library, and it
+is consistent enough to copy. All of the following was read out of this
+toolchain's own source rather than recalled.
+
+**The default is explicit non-retention.** `io` states it four times, and it is
+the expectation every Go programmer brings to a `[]T` parameter:
+
+```
+// Implementations must not retain p.
+        -- io/io.go:85, 98, 229, 248
+```
+
+**Ownership transfer is nevertheless real precedent.** Six public occurrences
+outside `runtime`, `cmd` and `internal`:
+
+| function | location | wording |
+|---|---|---|
+| `bytes.NewBuffer(buf)` | `bytes/buffer.go:482` | "takes ownership of buf, and the caller should not use buf after this call" |
+| `go/doc.New(pkg, …)` | `go/doc/doc.go:118` | "takes ownership of the AST pkg and may edit or overwrite it" |
+| `go/doc.NewFromFiles` | `go/doc/doc.go:254` | "takes ownership of the AST files and may edit them" |
+| `go/types.NewInterface` | `go/types/interface.go:35` | "takes ownership of the provided methods and may modify their types" |
+| `go/types.NewInterfaceType` | `go/types/interface.go:48` | as above |
+| `zip.Writer.CreateHeader(fh)` | `archive/zip/writer.go:267` | "takes ownership of fh and may mutate its fields. The caller must not modify fh after calling…" |
+
+Three things follow, and they answer the naming question directly.
+
+**1. None of them encode it in the name.** `NewBuffer`, `New`, `NewInterface`,
+`CreateHeader` are all maximally plain. The only name-level marker for aliasing
+anywhere in the standard library is `Unsafe`, confined to package `unsafe` and
+generated trie code. `math/big` documents aliasing accessors the same way —
+`Bits`/`SetBits`, "the result and abs share the same underlying array"
+(`math/big/int.go:105, 117`) — with plain names.
+
+**2. Go names the copy, not the alias.** `slices.Clone`, `bytes.Clone`,
+`maps.Clone` and `strings.Clone` all exist; there is no `Alias` or `NoCopy`
+counterpart in the public API. **This is the load-bearing point.** The vocabulary
+for opting *out* of a transfer is already idiomatic, so an adopting constructor
+is not an outlier — it is the shape the naming convention assumes, with
+`slices.Clone` as the caller's escape hatch.
+
+**3. The doc wording is near-templated** — two clauses, declaring the transfer
+and then stating the caller's concrete obligation. D should copy it:
+
+```go
+// NewVector creates a Vector using vs as its initial contents.
+// The new Vector takes ownership of vs, and the caller should not use
+// vs after this call. To keep using vs, pass slices.Clone(vs).
+func NewVector[T any](vs []T) *Vector[T]
+```
+
+**So D does not rename its constructors; it documents them.** Six of six say the
+name stays plain, and a `NewVectorOwned` would be the only such name in a
+library shaped like the standard one. The distinctness is carried by the
+*pairing* instead: `KeySlice()` announces "a fresh copy you own" on the producing
+side, so `NewVector(d.KeySlice())` reads as a matched handoff and
+`NewVector(mine)` reads as a decision.
+
+**One disanalogy, recorded so it is not discovered later.** In all six
+precedents the argument is a purpose-built thing whose reason for existing is to
+be handed over — a `Buffer`'s backing store, an AST, a `FileHeader`, a method
+list. D's constructors take a plain `[]T`, the most common type in Go, where the
+non-retention expectation is strongest and the argument is likeliest to be live
+caller data. The mechanic is identical; the blast radius is not. `bytes.NewBuffer`
+is a known footgun for exactly this reason, and it is one function where D would
+be every constructor.
+
+**Which suggests the split D should adopt**: transfer ownership in the
+**constructors only**, and let the mutating bulk methods copy.
+
+```go
+func NewVector[T any](vs []T) *Vector[T]        // takes ownership
+func (v *Vector[T]) AppendAll(vs []T)           // copies; does not retain vs
+```
+
+A constructor is installing a slice *as* the container's contents, which is
+precisely `bytes.NewBuffer`'s case. `AppendAll` is copying into storage that
+already exists and has no reason to retain anything, so it keeps the `io`
+default. That split costs D nothing measurable — appending into existing storage
+was always a copy — and confines the surprising rule to the one place with six
+precedents behind it.
+
 **What D costs, beyond ownership:**
 
 - **Plain iteration is taxed.** Walking keys via `KeySlice()` costs 7.255 µs and
@@ -2203,12 +2286,86 @@ comparable case. These are two spellings of the same win.
   simpler in *types* while being larger in *per-container surface*.
 - **Peak memory doubles on any copying path**, which is worst exactly where it
   is least affordable: wide values, where D-copying holds 512 KiB to A's 256 KiB.
+- **Reverse iteration is deferred.** `slices.Reverse` on an owned copy covers
+  the common case, and revisiting proposal A's `Backward`/`RangeKeys`/`RangeAll`
+  machinery is left to a later ADR should D be adopted — the one case it does not
+  cover is reading a large container backwards without materialising it.
 - **Laziness is gone.** `NewVector(KeysOf(huge))` under A streams; under D the
   whole source is materialised first, whatever the destination does with it. A
   consumer that stops early — a `Take(10)` over a million-element source — pays
   for all million.
 - **Unbounded sources cannot be expressed at all.** A `Collector` over an
   infinite `iter.Seq` is legal under A and impossible under D.
+
+#### What proposal D has not said yet
+
+D is specified as far as bulk construction, insertion and removal. Proposal A
+covers more than that, and the difference is not all detail. Listed worst first.
+
+**1. Views are unaddressed, and this one is structural.** All five view
+interfaces in `views.go` embed `Elems` or `Elems2` today. A replaces those with
+the `Holds*` family, so a view keeps satisfying the source contract and
+`NewVector(KeysOf(someView))` works. **Under D, unless the view interfaces also
+gain `KeySlice`/`ValueSlice`/`AllSlice`, a container cannot be built from a
+view at all** — and a view is precisely the read-only boundary a caller is meant
+to hand around. Adding them is safe, since a `*Slice` result is a copy by
+contract and hands out nothing the view protects; but it has to be decided, and
+it widens the sealed interfaces D was supposed to be simplifying.
+
+**2. `Elems` and `Elems2` have no stated fate, and they are load-bearing.** A
+deletes them and moves the length job to `CanLen`. D keeps iterators, so it needs
+*something* — but `Elems[T]` still declares `All() iter.Seq[T]`, which is
+problem 1 itself. D shows `Keys`/`Values`/`All` on a dict without saying whether
+the contract layer is renamed, narrowed, or dropped. Related:
+**`MutableSet` declares `Add(...T)` and `Remove(...T)`**, so whatever D decides
+about the mutators (item 6) changes `contracts.go` too.
+
+**3. Sub-ranges on the sorted containers.** `SortedSetView` and
+`SortedDictView` already have `Range(lo, hi)` returning an `iter.Seq`. A upgrades
+that to return a `RangeAll`, which also closed ADR `0013`'s deferred "should
+`Range` return a view?". D says nothing — presumably `RangeSlice(lo, hi) []K`,
+but a sub-range is the one case where materialising is most obviously wrong:
+the caller asked for a bounded window precisely because the container is large.
+*Direction* is deferred to a later ADR by decision; *bounds* are still open.
+
+**4. `Map`.** A gives it `SetAll` and `DeleteAll` and refuses `NewMap`, with
+reasons. D lists `HashDict` and is silent on `Map`, which is how problem 2's
+ragged matrix arose in the first place.
+
+**5. Inserting from an iterator.** A subsumes `AppendAllSeq`/`AddAllSeq`/
+`SetAllSeq` via `ItemsFrom`. Under D the bridge is `slices.Collect(seq)` and the
+twins die — almost certainly right, and unstated. Worth naming explicitly
+because it is the one place D forces an allocation a streaming API would not.
+
+**6. Single-element mutators and the renames.** A ruled that `Append(e T)`,
+`Set(k, v)` and their kin survive (a collector for one element measured 49x the
+direct call), that `HashSet.Add`/`SortedSet.Add` stop being variadic, and that
+`Remove` becomes `Delete`. None of that depends on the `Collector`, so D
+plausibly inherits all of it — but D has not said so, and the `Delete` rename is
+what makes `DeleteAll`'s name consistent under either proposal.
+
+**7. Multi-source union.** A composes with variadic collectors. D's constructors
+take one slice, so unioning is `slices.Concat(a.KeySlice(), b.KeySlice())` — a
+third copy. Making them variadic in slices (`NewVector(vss ...[]T)`) keeps
+`NewVector(d.KeySlice())` compiling unchanged and restores the union, at the cost
+of muddying the ownership rule: it would transfer ownership of *several* slices.
+
+**8. Duplicate resolution.** ADR `0004` fixes last-write-wins, and A restates it
+along with the trap that `slices.CompactFunc` keeps the **first** of each run, so
+a sorted implementation that sorts-and-compacts gets it backwards — a bug this
+repository has already had once. D inherits the same hazard the moment a slice
+contains duplicates, and says nothing.
+
+**9. The eager-dereference rule.** ADR `0002` requires every method to
+dereference its receiver on a path that always executes; A states that zero
+collectors still touches the receiver. `v.AppendAll(nil)` and `v.AppendAll([]T{})`
+are D's equivalent, and the rule has been violated three times historically.
+
+**None of these sink D.** Items 1 and 3 are the ones that could change its shape —
+views because D currently cannot build from one, and sub-ranges because
+materialising a window contradicts why the window was asked for. The rest are
+paragraphs D needs before it could be adopted, not open questions about whether
+it works.
 
 **Where D lands.** It is the only proposal that gets C's simplicity without C's
 sacrifice: one named type, no free functions, no sealing question, no
