@@ -1150,9 +1150,23 @@ Three consequences worth stating:
   the container as it stands. Verified: after the container grows, the same
   sub-range yields the current contents of its interval.
 
-  **A `Vector`'s range cannot have this property**, because a sequence's keys
-  *are* positions — there is no mutation-stable bound to hold. Sorted containers
-  get stable ranges; sequences do not.
+  **`Vector` gets no `Range`, and the reason is not the one it appears to be.**
+  An index-bounded range over the shipped `Vector` *is* stable: its whole surface
+  is `Len`, `At`, `Set`, `Append` and the bulk appends, none of which shifts an
+  existing index. Verified — after an `Append` a sub-range still shows the same
+  elements, and after a `Set` it shows the update, exactly as every other view in
+  this package does.
+
+  That stability is an artifact of an incomplete surface rather than a property
+  of sequences. `PopBack`, `Insert` or `Remove` are all plausible additions, and
+  the day one lands every outstanding index-bounded range silently starts
+  pointing at the wrong elements — no compile error, no failing test. **A
+  guarantee that depends on a method not existing yet is not a guarantee**, so
+  `Vector.Range` is left out until there is something stable for it to hold.
+
+  The cost is that a sub-range of a `Vector` has no spelling: `At(i)` in a loop
+  works and gives up bounds-check elimination. Recorded as a follow-up rather
+  than solved.
 - **A sub-range cannot be sub-ranged.** `RangeAll` has no `Range` of its own, so
   `sd.Range(a, b).Range(c, d)` is a compile error. Deliberate, and the same shape
   as `Backward()` returning a source with no `Backward()`.
