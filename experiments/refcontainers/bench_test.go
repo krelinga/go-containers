@@ -1,0 +1,311 @@
+package refcontainers
+
+import "testing"
+
+var (
+	sinkBool  bool
+	sinkInt   int
+	sinkStrs  []string
+	sinkBase  structSetView[string]
+	sinkIface ifaceSetView[string]
+	sinkWrap  wrapSetView[string]
+)
+
+const n = 64
+
+// BenchmarkNoOp is the zero-cost baseline: it is how harness overhead leaking
+// into the numbers above would show up.
+func BenchmarkNoOp(b *testing.B) {
+	for b.Loop() {
+		sinkInt++
+	}
+}
+
+// 1. The container shapes, on today's method set. ADR 0014 measured Has/Len/
+// Add/All/construct on a toy set; KeySlice is new since ADR 0017 and is on the
+// hot path for every bulk operation.
+func BenchmarkContainerShape(b *testing.B) {
+	vs := fixture(n)
+	ps := newPtrSet(vs...)
+	rs := newRefSet(vs...)
+	ns := newNilRefSet(vs...)
+	probe := vs[n/2]
+
+	b.Run("Has/ptr", func(b *testing.B) {
+		for b.Loop() {
+			sinkBool = ps.Has(probe)
+		}
+	})
+	b.Run("Has/ref", func(b *testing.B) {
+		for b.Loop() {
+			sinkBool = rs.Has(probe)
+		}
+	})
+	b.Run("Has/ref+nilcheck", func(b *testing.B) {
+		for b.Loop() {
+			sinkBool = ns.Has(probe)
+		}
+	})
+
+	b.Run("Len/ptr", func(b *testing.B) {
+		for b.Loop() {
+			sinkInt = ps.Len()
+		}
+	})
+	b.Run("Len/ref", func(b *testing.B) {
+		for b.Loop() {
+			sinkInt = rs.Len()
+		}
+	})
+	b.Run("Len/ref+nilcheck", func(b *testing.B) {
+		for b.Loop() {
+			sinkInt = ns.Len()
+		}
+	})
+
+	b.Run("Keys/ptr", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			c := 0
+			for range ps.Keys() {
+				c++
+			}
+			sinkInt = c
+		}
+	})
+	b.Run("Keys/ref", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			c := 0
+			for range rs.Keys() {
+				c++
+			}
+			sinkInt = c
+		}
+	})
+	b.Run("Keys/ref+nilcheck", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			c := 0
+			for range ns.Keys() {
+				c++
+			}
+			sinkInt = c
+		}
+	})
+
+	b.Run("KeySlice/ptr", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkStrs = ps.KeySlice()
+		}
+	})
+	b.Run("KeySlice/ref", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkStrs = rs.KeySlice()
+		}
+	})
+	b.Run("KeySlice/ref+nilcheck", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkStrs = ns.KeySlice()
+		}
+	})
+
+	b.Run("construct/ptr", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkInt = newPtrSet(vs...).Len()
+		}
+	})
+	b.Run("construct/ref", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkInt = newRefSet(vs...).Len()
+		}
+	})
+}
+
+// 2. The view shapes. ADR 0013's erratum -- iterating a view allocates three
+// times per call through a dynamic call -- is live in the shipped library, and
+// is the cost a struct view would remove rather than add.
+func BenchmarkViewShape(b *testing.B) {
+	vs := fixture(n)
+	ps := newPtrSet(vs...)
+	probe := vs[n/2]
+
+	b.Run("construct/iface", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkIface = viewIface(ps)
+		}
+	})
+	b.Run("construct/struct", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkBase = viewStruct(ps)
+		}
+	})
+
+	iv, sv := viewIface(ps), viewStruct(ps)
+
+	b.Run("Has/iface", func(b *testing.B) {
+		for b.Loop() {
+			sinkBool = iv.Has(probe)
+		}
+	})
+	b.Run("Has/struct", func(b *testing.B) {
+		for b.Loop() {
+			sinkBool = sv.Has(probe)
+		}
+	})
+
+	b.Run("Len/iface", func(b *testing.B) {
+		for b.Loop() {
+			sinkInt = iv.Len()
+		}
+	})
+	b.Run("Len/struct", func(b *testing.B) {
+		for b.Loop() {
+			sinkInt = sv.Len()
+		}
+	})
+
+	b.Run("Keys/iface", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			c := 0
+			for range iv.Keys() {
+				c++
+			}
+			sinkInt = c
+		}
+	})
+	b.Run("Keys/struct", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			c := 0
+			for range sv.Keys() {
+				c++
+			}
+			sinkInt = c
+		}
+	})
+
+	// The ADR 0017 path: bulk operations consume a view by materialising it.
+	b.Run("KeySlice/iface", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkStrs = iv.KeySlice()
+		}
+	})
+	b.Run("KeySlice/struct", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkStrs = sv.KeySlice()
+		}
+	})
+}
+
+// 3. Substitution -- ADR 0013 decision 2, an ordered view used where the base is
+// wanted. Free with interfaces (embedding); an explicit conversion with structs.
+func BenchmarkViewSubstitution(b *testing.B) {
+	ps := newPtrSet(fixture(n)...)
+	isv := viewIfaceSorted(ps)
+	ssv := viewStructSorted(ps)
+
+	b.Run("iface/embedding", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkIface = isv
+		}
+	})
+	b.Run("struct/explicit", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkBase = ssv.Set()
+		}
+	})
+}
+
+// 4. The honest struct-view shape: a struct wrapping the sealed interface,
+// which is what polymorphism over backings requires. The monomorphic form in
+// BenchmarkViewShape inlines and is not what the library could ship.
+func BenchmarkWrapView(b *testing.B) {
+	vs := fixture(n)
+	ps := newPtrSet(vs...)
+	probe := vs[n/2]
+	iv, wv := viewIface(ps), viewWrap(ps)
+
+	b.Run("construct/iface", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkIface = viewIface(ps)
+		}
+	})
+	b.Run("construct/wrap", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkWrap = viewWrap(ps)
+		}
+	})
+	b.Run("Has/iface", func(b *testing.B) {
+		for b.Loop() {
+			sinkBool = iv.Has(probe)
+		}
+	})
+	b.Run("Has/wrap", func(b *testing.B) {
+		for b.Loop() {
+			sinkBool = wv.Has(probe)
+		}
+	})
+	b.Run("Keys/iface", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			c := 0
+			for range iv.Keys() {
+				c++
+			}
+			sinkInt = c
+		}
+	})
+	b.Run("Keys/wrap", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			c := 0
+			for range wv.Keys() {
+				c++
+			}
+			sinkInt = c
+		}
+	})
+	b.Run("KeySlice/iface", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkStrs = iv.KeySlice()
+		}
+	})
+	b.Run("KeySlice/wrap", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkStrs = wv.KeySlice()
+		}
+	})
+
+	// Substitution, in the shape that could actually ship.
+	isv := viewIfaceSorted(ps)
+	wsv := viewWrapSorted(ps)
+	b.Run("substitute/iface", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkIface = isv
+		}
+	})
+	b.Run("substitute/wrap", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkWrap = wsv.Set()
+		}
+	})
+}

@@ -1,0 +1,196 @@
+# 18. Containers as reference types, reconsidered
+
+- **Status:** **Rejected — on a narrower basis than ADR `0014` gave.** The status
+  quo stands. But `0014`'s *decisive* argument is dead, and what replaces it is
+  weaker, so this should be read as a closer call than the one it supersedes.
+- **Date:** 2026-09-10
+- **Supersedes:** ADR **`0014`**, which is now historical. Its measurements
+  remain valid; its conclusion is reached here by a different route, and two of
+  its open questions have been answered by unrelated work.
+- **Evidence:** `experiments/refcontainers/` (`RESULTS.md`), which re-measures
+  against today's method set. Context from `experiments/reftypes/` (ADR `0014`'s
+  harness, still valid) and `experiments/viewiface/` §9.
+- **Relates to:** ADR `0002` (the container shape), `0007` (the value/pointer
+  asymmetry), `0009` (`HashDict`), `0013` (views as sealed interfaces),
+  `0017` (which removed `Elems`/`Elems2` and changed this calculus without
+  meaning to).
+
+## Why this is being reopened
+
+ADR `0014` rejected reference containers with a five-link chain. Three things
+have happened since, none of them aimed at this question, and they hit different
+links.
+
+**1. `Elems2` is gone, and with it `0014`'s decisive cost.** Link 4 read:
+*"Making views structs to match costs ADR `0013`'s hierarchy — struct embedding
+is not subtyping — plus an allocation whenever a view is passed to `Elems2`,
+which is what every sized constructor takes."* ADR `0017` deleted `Elems` and
+`Elems2` and made every bulk operation variadic in its element type. **Nothing
+in the library boxes a view into a foreign interface any more** — verified by
+grep, not assumed. The allocation half of that link no longer exists.
+
+**2. `Map` and `HashDict` converged on their own.** ADR `0014` left an open
+question — "what `Map` must gain before `HashDict` can be removed" — listing
+`NewHashDict`, `CollectHashDict`, `CollectHashDictSeq`, `SetAll` and
+`SetAllSeq`. ADR `0017` gave `Map` `SetAll` and `DeleteAll`, deleted the whole
+`Collect*` family, and refused `NewMap` on the grounds that a composite literal
+and `make` already construct one. Their method sets are now **identical except
+`NewHashDict`**:
+
+```
+HashDict: All AllSlice Clone Delete DeleteAll Get Keys KeySlice Len Set SetAll Values ValueSlice  + NewHashDict
+Map:      All AllSlice Clone Delete DeleteAll Get Keys KeySlice Len Set SetAll Values ValueSlice
+```
+
+So `HashDict`'s only remaining justification is ADR `0007`'s value/pointer
+asymmetry — precisely what reference containers dissolve. **This is a cost of
+the status quo that has grown since `0014`.**
+
+**3. The eager-dereference rule is now comprehensively tested.** ADR `0017` added
+`TestEmptyBulkCallsStillDereference`, which asserts that every bulk method on
+every container panics on a nil receiver even with zero arguments. That is a
+safety net reference semantics would remove, and it did not exist when `0014`
+was written.
+
+## What was re-measured
+
+From `experiments/refcontainers/`. Full tables in its `RESULTS.md`.
+
+**The representation is still free**, now on today's method set rather than
+`0014`'s toy set. `Has` 4.252 ns (pointer) against 4.215 ns (reference); `Keys`
+335.2 against 348.9; `KeySlice` — new since `0017`, and on the hot path for every
+bulk operation — 431.5 against 446.9; construction identical at 3 allocations
+either way. **What reference semantics costs is still paid in rules, not
+cycles.**
+
+**The nil check is now at or below the noise floor**, at ~1.7% on a point read
+against the **+8.5%** `0014` measured. The branch did not get cheaper; the
+baseline got more expensive, so the same fixed cost is a smaller share. The
+durable form is the weak one: a predictable nil branch is a fraction of a
+nanosecond.
+
+**Struct-shaped views are performance-neutral, where `0014` priced them at 6.8x
+on the constructor path:**
+
+| | sealed interface (today) | `struct{iface}` |
+|---|---|---|
+| construct | 0.3751 ns, 0 allocs | 0.3701 ns, 0 allocs |
+| `Has` | 4.871 ns | 4.828 ns |
+| `Keys` | 386.7 ns, 3 allocs | 384.6 ns, 3 allocs |
+| `KeySlice` | 420.8 ns, 1 alloc | 422.7 ns, 1 alloc |
+| substitute ordered → base | 0.6482 ns | **0.2825 ns** |
+
+The explicit conversion that replaces interface embedding is **cheaper than the
+embedding it replaces**. `0014` assumed it was a tax; it is not, at runtime.
+
+**One negative result, recorded because it nearly went the other way.** A first
+cut of the harness wrapped a *concrete* container, measured 0 allocations on
+`Keys` against the interface's 3, and appeared to show that struct views fix ADR
+`0013`'s live erratum. That was an inlining artifact of a monomorphic wrapper. A
+real `SetView[T]` must view a `HashSet`, a `SortedSet` or a converting view, so
+it has to wrap an **interface**, and the inner call stays dynamic — three
+allocations per iterator, unchanged. **A polymorphic view cannot wrap a concrete
+type, so monomorphic measurements of one are invalid.**
+
+## The chain, link by link
+
+`0014`'s argument was: *there is no way to give containers reference semantics
+without ending up with two spellings of "is this handle empty", or a worse hazard
+than the one being fixed.*
+
+| link | status |
+|---|---|
+| 1. A reference container must be a struct wrapping a pointer — methods cannot be declared on a defined pointer type, and a defined slice type needs a pointer receiver to grow | **holds** — a language fact |
+| 2. A struct cannot be compared to nil, so the emptiness check must be a method | **holds** |
+| 3. Views are sealed interfaces and theirs is `== nil`; declaring `IsNil()` on a view interface does not unify, since calling a method on a nil interface panics | **holds** |
+| 4. Making views structs costs the hierarchy **and an allocation on the `Elems2` path** | **half dead** — the allocation is gone, measured neutral; the hierarchy cost remains but is *ergonomic*, not runtime |
+| 5. The hybrid keeps two spellings **and** reintroduces the typed-nil trap | **holds** |
+
+So the options are no longer "two spellings, two spellings plus a trap, or one
+spelling bought with a lost hierarchy **and a per-call allocation**". The
+allocation is gone. It is now:
+
+- **(a) reference containers, interface views** — two spellings: `c.IsZero()` for
+  containers, `v == nil` for views.
+- **(b) reference containers, struct views** — one spelling, `IsZero()`
+  everywhere, at the cost of ADR `0013`'s substitutability.
+- **(c) the status quo** — one spelling, `== nil`, for both, and no method at all.
+
+## Decision
+
+**Rejected. The status quo stands.** But the reasoning is now narrower than
+`0014`'s, and worth stating precisely, because the old reason no longer applies.
+
+**The status quo already has one nil spelling.** `*HashSet[T]` is a pointer and
+`SetView[T]` is an interface; `== nil` works on both, and neither needs a method.
+Option (a) *adds* a second vocabulary. Option (b) keeps one vocabulary but makes
+it a method call and spends ADR `0013` decision 2 to do it — an ordered view can
+no longer be handed to a base-typed boundary implicitly, and a `SortedDictView`
+cannot enter a `[]DictView` without an explicit conversion at every site.
+
+**That conversion is free at runtime and not free to read.** The measurement says
+0.2825 ns. The cost is that every ordered-to-base call site grows a `.Dict()`,
+which is the kind of tax that is invisible in a benchmark and constant in a
+codebase.
+
+**And ADR `0017` raised the price of total reads.** Under decision 3 of `0014`,
+reads on a zero container succeed and return empty. That is exactly
+`maps.Collect(nilMap)`'s behaviour and defensible on its own — but the library
+now has a test asserting that *every* bulk method on *every* container panics on
+a nil receiver, and the bulk path is `NewVector(src.KeySlice()...)`. Under
+reference semantics an unconstructed source yields an empty slice and the
+constructor silently produces an empty container. **The error detection that
+ADR `0002`'s rule buys is worth more now that there are more places to lose it.**
+
+The container-side benefits are real, are not disputed, and are larger than they
+were: the representation is free, `noCopy` and the copylocks caveat would go, the
+copy-divergence hazard would be dissolved rather than policed, and `HashDict`
+would collapse into `Map`. They are still not worth a second nil vocabulary or a
+lost hierarchy.
+
+## What is now separately actionable
+
+**`HashDict` and `Map` have converged, and that does not need reference
+containers to resolve.** This is the one genuinely new thing on the table, and it
+deserves its own ADR rather than being buried here.
+
+Their method sets are identical but for the constructor. ADR `0009` built
+`HashDict` to resolve ADR `0007`'s value/pointer asymmetry; ADR `0017` closed the
+API gap without meaning to. Three options, none of which require this ADR to be
+accepted:
+
+- **Keep both.** The asymmetry stays: `Map` satisfies `MutableDict` as a value,
+  `HashDict` as a pointer. This is the status quo and costs a whole type, its two
+  view constructors, its two view structs, and a `CanViewHashDict` interface that
+  is already identical to `CanViewMap`.
+- **Delete `HashDict`, make `Map` the default.** Recovers ADR `0007`'s asymmetry
+  in exchange for removing a type. Worth asking how much that asymmetry actually
+  hurts now: both are reference-ish in practice, and `Map` additionally
+  round-trips through `encoding/json` where `HashDict` is silently lossy.
+- **Delete `Map`, keep `HashDict`.** Gives up builtin syntax, free conversion from
+  `map[K]V`, and working serialization — the four reasons ADR `0009` kept it.
+
+**Recorded, not decided.** It wants its own call-site evidence.
+
+## What survives from ADR 0014
+
+- **`experiments/reftypes/` is still valid** and is not superseded; this ADR adds
+  a second harness rather than replacing the first.
+- **`0014`'s "Choice B" is answered** — `Map` needs nothing further. See above.
+- **`0014`'s "Choice A"** (`IsZero` vs `IsNil`) is still open in principle and
+  still moot in practice.
+- **`0014`'s "Choice C"** — whether anything replaces copylocks as a guard —
+  remains unasked, because the guard remains.
+
+## If this is revisited again
+
+The blocker is unchanged in kind and cheaper in degree: **how does a caller ask
+"is this handle empty" with one spelling across containers and views, without
+giving up ADR `0013`'s substitutability?** Two of the three historical answers to
+that are now cheaper than they were, which is why this ADR exists — but none of
+them is free, and the status quo answers the question with no method at all.
+
+What would change the answer: a call site where the container/view representation
+split actually hurts, or an ADR that removes `HashDict` and finds ADR `0007`'s
+asymmetry intolerable in practice rather than in principle. Neither exists yet.
+Nothing needs re-running; `experiments/refcontainers/` holds the current numbers.

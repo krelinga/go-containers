@@ -1,9 +1,11 @@
 # 14. Containers as reference types
 
-- **Status:** **Rejected.** The status quo stands: ADR `0002`'s container shape
-  and ADR `0009`'s `HashDict` are unchanged. See "Why this was rejected". The
-  document is kept in full because the measurements and the dead ends are the
-  valuable part.
+- **Status:** **Rejected, and SUPERSEDED by ADR `0018`.** The status quo stands.
+  Read `0018` first: it reaches the same conclusion by a different route, because
+  this document's *decisive* argument — the allocation charged to struct views on
+  the `Elems2` path — no longer applies. ADR `0017` deleted `Elems2`. Two of the
+  open questions below have also been answered since. The measurements here
+  remain valid and the dead ends are still the valuable part.
 - **Date:** 2026-09-08
 - **Evidence:** `experiments/reftypes/` (`RESULTS.md`), with context from
   `experiments/copycost/`, `dispatch/`, `hashdict/` and `viewiface/`.
