@@ -6,6 +6,7 @@ var (
 	sinkBool  bool
 	sinkInt   int
 	sinkStrs  []string
+	sinkStr   string
 	sinkBase  structSetView[string]
 	sinkIface ifaceSetView[string]
 	sinkWrap  wrapSetView[string]
@@ -306,6 +307,141 @@ func BenchmarkWrapView(b *testing.B) {
 		b.ReportAllocs()
 		for b.Loop() {
 			sinkWrap = wsv.Set()
+		}
+	})
+}
+
+// 5. The all-interface shape: the container itself is a sealed interface.
+// ADR 0014 rejected this on cost against a toy method set; ADR 0017 changed the
+// method set, so it is re-priced here.
+func BenchmarkIfaceContainer(b *testing.B) {
+	vs := fixture(n)
+	ps := newPtrSet(vs...)
+	is := newIfaceSet(vs...)
+	probe := vs[n/2]
+
+	b.Run("Has/ptr", func(b *testing.B) {
+		for b.Loop() {
+			sinkBool = ps.Has(probe)
+		}
+	})
+	b.Run("Has/iface", func(b *testing.B) {
+		for b.Loop() {
+			sinkBool = is.Has(probe)
+		}
+	})
+	b.Run("Len/ptr", func(b *testing.B) {
+		for b.Loop() {
+			sinkInt = ps.Len()
+		}
+	})
+	b.Run("Len/iface", func(b *testing.B) {
+		for b.Loop() {
+			sinkInt = is.Len()
+		}
+	})
+
+	// Iteration: the shape that carries the per-call allocations.
+	b.Run("Keys/ptr", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			c := 0
+			for range ps.Keys() {
+				c++
+			}
+			sinkInt = c
+		}
+	})
+	b.Run("Keys/iface", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			c := 0
+			for range is.Keys() {
+				c++
+			}
+			sinkInt = c
+		}
+	})
+
+	// The ADR 0017 bulk path: a slice through a dynamic call carries no
+	// per-call allocation the way an iter.Seq does.
+	b.Run("KeySlice/ptr", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkStrs = ps.KeySlice()
+		}
+	})
+	b.Run("KeySlice/iface", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkStrs = is.KeySlice()
+		}
+	})
+
+	b.Run("construct/ptr", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkInt = newPtrSet(vs...).Len()
+		}
+	})
+	b.Run("construct/iface", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkInt = newIfaceSet(vs...).Len()
+		}
+	})
+
+	// Set algebra: impossible on a contract for concrete containers (ADR 0002),
+	// and the one thing this shape unlocks.
+	po := newPtrSet(fixture(n / 2)...)
+	io := newIfaceSet(fixture(n / 2)...)
+	b.Run("Union/ptr", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkInt = ps.Union(po).Len()
+		}
+	})
+	b.Run("Union/iface", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkInt = is.Union(io).Len()
+		}
+	})
+}
+
+// 6. Indexed access, the worst case for dispatch: At is close to free, so a
+// fixed indirect call is a large share of it.
+func BenchmarkIfaceIndexed(b *testing.B) {
+	vs := fixture(n)
+	pv := newPtrVec(vs...)
+	iv := newIfaceVec(vs...)
+
+	b.Run("At/ptr", func(b *testing.B) {
+		for b.Loop() {
+			sinkStr = pv.At(n / 2)
+		}
+	})
+	b.Run("At/iface", func(b *testing.B) {
+		for b.Loop() {
+			sinkStr = iv.At(n / 2)
+		}
+	})
+	b.Run("indexed-loop/ptr", func(b *testing.B) {
+		for b.Loop() {
+			t := 0
+			for i := range pv.Len() {
+				t += len(pv.At(i))
+			}
+			sinkInt = t
+		}
+	})
+	b.Run("indexed-loop/iface", func(b *testing.B) {
+		for b.Loop() {
+			t := 0
+			for i := range iv.Len() {
+				t += len(iv.At(i))
+			}
+			sinkInt = t
 		}
 	})
 }

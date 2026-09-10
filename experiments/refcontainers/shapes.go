@@ -268,3 +268,111 @@ func (v wrapSortedSetView[T]) Len() int { return v.impl.Len() }
 
 // Set is the explicit conversion that replaces interface embedding.
 func (v wrapSortedSetView[T]) Set() wrapSetView[T] { return wrapSetView[T]{v.impl} }
+
+// ---------------------------------------------------------------------------
+// The all-interface shape: the container itself is a sealed interface, so
+// containers and views are the same kind of thing and both spell emptiness
+// `== nil`.
+//
+// ADR 0014 rejected this on cost, measured against a toy method set. Today's
+// method set is different in one way that matters: ADR 0017 made KeySlice the
+// bulk path, and a slice returned through a dynamic call does not carry the
+// per-call allocations an iter.Seq does.
+// ---------------------------------------------------------------------------
+
+type ifaceSet[T comparable] interface {
+	Len() int
+	Has(T) bool
+	Add(T)
+	Keys() iter.Seq[T]
+	KeySlice() []T
+	// Set algebra on the contract, which ADR 0002 recorded as impossible for
+	// concrete containers: Union(*PtrSet) *PtrSet cannot satisfy
+	// Union(SetAlgebra) SetAlgebra. When the container IS the interface the two
+	// types coincide.
+	Union(ifaceSet[T]) ifaceSet[T]
+	sealedContainer()
+}
+
+type ifaceSetImpl[T comparable] struct{ m map[T]struct{} }
+
+func newIfaceSet[T comparable](vs ...T) ifaceSet[T] {
+	s := &ifaceSetImpl[T]{m: make(map[T]struct{}, len(vs))}
+	for _, v := range vs {
+		s.m[v] = struct{}{}
+	}
+	return s
+}
+
+func (s *ifaceSetImpl[T]) sealedContainer() {}
+func (s *ifaceSetImpl[T]) Len() int         { return len(s.m) }
+func (s *ifaceSetImpl[T]) Has(v T) bool     { _, ok := s.m[v]; return ok }
+func (s *ifaceSetImpl[T]) Add(v T)          { s.m[v] = struct{}{} }
+
+func (s *ifaceSetImpl[T]) Keys() iter.Seq[T] {
+	m := s.m
+	return func(yield func(T) bool) {
+		for v := range m {
+			if !yield(v) {
+				return
+			}
+		}
+	}
+}
+
+func (s *ifaceSetImpl[T]) KeySlice() []T {
+	out := make([]T, 0, len(s.m))
+	for v := range s.m {
+		out = append(out, v)
+	}
+	return out
+}
+
+func (s *ifaceSetImpl[T]) Union(o ifaceSet[T]) ifaceSet[T] {
+	out := &ifaceSetImpl[T]{m: make(map[T]struct{}, len(s.m)+o.Len())}
+	for v := range s.m {
+		out.m[v] = struct{}{}
+	}
+	for _, v := range o.KeySlice() {
+		out.m[v] = struct{}{}
+	}
+	return out
+}
+
+// The concrete equivalent, for the Union comparison.
+func (s *ptrSet[T]) Union(o *ptrSet[T]) *ptrSet[T] {
+	out := &ptrSet[T]{m: make(map[T]struct{}, len(s.m)+len(o.m))}
+	for v := range s.m {
+		out.m[v] = struct{}{}
+	}
+	for v := range o.m {
+		out.m[v] = struct{}{}
+	}
+	return out
+}
+
+// An indexed container is the worst case for dispatch: At is close to free, so
+// a fixed indirect-call cost is a large share of it.
+type ifaceVec[T any] interface {
+	Len() int
+	At(int) T
+	Append(T)
+	sealedContainer()
+}
+
+type ifaceVecImpl[T any] struct{ es []T }
+
+func newIfaceVec[T any](vs ...T) ifaceVec[T] { return &ifaceVecImpl[T]{es: slices.Clone(vs)} }
+
+func (v *ifaceVecImpl[T]) sealedContainer() {}
+func (v *ifaceVecImpl[T]) Len() int         { return len(v.es) }
+func (v *ifaceVecImpl[T]) At(i int) T       { return v.es[i] }
+func (v *ifaceVecImpl[T]) Append(e T)       { v.es = append(v.es, e) }
+
+type ptrVec[T any] struct{ es []T }
+
+func newPtrVec[T any](vs ...T) *ptrVec[T] { return &ptrVec[T]{es: slices.Clone(vs)} }
+
+func (v *ptrVec[T]) Len() int   { return len(v.es) }
+func (v *ptrVec[T]) At(i int) T { return v.es[i] }
+func (v *ptrVec[T]) Append(e T) { v.es = append(v.es, e) }

@@ -64,10 +64,52 @@ but a real `SetView[T]` must view a `HashSet`, a `SortedSet` or a converting
 view, so it has to wrap an interface, and the inner call stays dynamic. **The
 monomorphic measurement flatters the design and is not shippable.**
 
+## 4. The all-interface shape: free on the bulk path, 4.3x on an indexed loop
+
+Making the container itself a sealed interface, so containers and views are the
+same kind of thing. ADR `0014` priced this against a toy method set; ADR `0017`
+changed the method set.
+
+| 64 elements | `*ptrSet` | `ifaceSet` | |
+|---|---|---|---|
+| `KeySlice` (ADR `0017`'s bulk path) | 410.9 ns, 1 alloc | 421.7 ns, 1 alloc | **+2.6%** |
+| `Has` | 4.292 ns | 4.948 ns | +15% |
+| `Keys` (full walk) | 319.6 ns, **0 allocs** | 384.1 ns, **3 allocs** | +20% |
+| construct | 742.0 ns, 3 allocs | 796.2 ns, **5 allocs** | +7% |
+| `Union` | 1.546 µs, 3 allocs | 1.741 µs, **6 allocs** | +13% |
+| `Len` | 0.3734 ns | 1.181 ns | **+216%** |
+| `At` (indexed) | 0.4914 ns | 1.130 ns | **+130%** |
+| **indexed loop over 64** | 16.11 ns | 68.92 ns | **+328%** |
+
+**The bulk path is free through an interface.** A slice returned through a
+dynamic call carries no per-call allocation the way an `iter.Seq` does, so ADR
+`0017`'s currency is indifferent to dispatch. This is the one place the
+all-interface shape got cheaper since ADR `0014`.
+
+**Everything proportional to how cheap the operation is got no better.** The cost
+is a fixed indirect call, so it is invisible against a map probe and enormous
+against an index. An indexed loop is **4.3x**, because `At` cannot inline and
+bounds-check elimination is impossible through dispatch.
+
+**Nil semantics, verified rather than argued** (`nil_test.go`): a zero container
+interface `== nil` — one spelling for containers and views, no method needed —
+and **every method panics on it, reads included**. A nil builtin map reads fine;
+a nil interface has no dynamic type to dispatch to. The seal survives: a
+container carries `sealedContainer()` and a view `sealedView()`, so neither
+satisfies the other (`missing method sealedView`).
+
+**Set algebra on the contract compiles**, which it cannot for concrete
+containers: `Union(ifaceSet[T]) ifaceSet[T]` satisfies itself where
+`Union(*ptrSet[T]) *ptrSet[T]` cannot satisfy `Union(SetAlgebra) SetAlgebra`.
+That ceiling has stood since ADR `0002` and this is the only shape that removes
+it.
+
 ## Durable / perishable
 
 **Durable.** A reference struct is free relative to a pointer, on any method
-set. A nil branch is a fraction of a nanosecond and must sit inside the returned
+set. Dispatch is a fixed cost, so its *share* tracks how cheap the operation is:
+negligible on a map probe, dominant on an index — and free on a path whose
+result is a slice. A nil branch is a fraction of a nanosecond and must sit inside the returned
 closure. A struct wrapping an interface neither costs nor saves against the bare
 interface, because the dynamic call is still there — including the three
 allocations per iterator returned through one. Replacing interface embedding

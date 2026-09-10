@@ -8,7 +8,7 @@
   remain valid; its conclusion is reached here by a different route, and two of
   its open questions have been answered by unrelated work.
 - **Evidence:** `experiments/refcontainers/` (`RESULTS.md`), which re-measures
-  against today's method set. Context from `experiments/reftypes/` (ADR `0014`'s
+  against today's method set and prices the all-interface shape. Context from `experiments/reftypes/` (ADR `0014`'s
   harness, still valid) and `experiments/viewiface/` §9.
 - **Relates to:** ADR `0002` (the container shape), `0007` (the value/pointer
   asymmetry), `0009` (`HashDict`), `0013` (views as sealed interfaces),
@@ -115,6 +115,110 @@ allocation is gone. It is now:
 - **(b) reference containers, struct views** — one spelling, `IsZero()`
   everywhere, at the cost of ADR `0013`'s substitutability.
 - **(c) the status quo** — one spelling, `== nil`, for both, and no method at all.
+- **(d) everything is an interface** — containers *and* views. One spelling,
+  `== nil`, for both, no method at all, and the container/view representation
+  split disappears entirely. Priced below; it is the only option that also
+  removes ADR `0002`'s set-algebra ceiling.
+
+## Option (d): the entire public API as interfaces
+
+The one shape that answers the nil question completely. `HashSet[T]` stops being
+a struct and becomes a sealed interface, as `SetView[T]` already is:
+
+```go
+type HashSet[T comparable] interface {
+	Len() int
+	Has(T) bool
+	Keys() iter.Seq[T]
+	KeySlice() []T
+	Add(T)
+	AddAll(...T)
+	Union(HashSet[T]) HashSet[T]
+	sealedContainer()
+}
+
+func NewHashSet[T comparable](vs ...T) HashSet[T]
+```
+
+**What it gets right, and nothing else does.**
+
+- **One nil spelling, with no method.** `var s HashSet[int]` is a nil interface,
+  so `s == nil` compiles and works — the same spelling views already use. No
+  `IsZero`, no `IsNil`, no second vocabulary. Verified in `nil_test.go`.
+- **The container/view split disappears.** Both are one-word sealed interfaces.
+  A caller stops changing representation at the boundary, which is the thing ADR
+  `0014` wanted and could not reach.
+- **The seal survives in both directions.** A container carries
+  `sealedContainer()` and a view `sealedView()`, so neither satisfies the other:
+  `cannot use s … as ifaceSetView[string]: missing method sealedView`. Verified,
+  not assumed.
+- **ADR `0002`'s set-algebra ceiling dissolves.** `Union(HashSet[T]) HashSet[T]`
+  satisfies itself, where `Union(*HashSet[T]) *HashSet[T]` cannot satisfy
+  `Union(SetAlgebra[T]) SetAlgebra[T]` for want of covariant returns. **This is
+  the only option that removes it**, and it has stood since `0002`.
+- **`noCopy` and the copylocks caveat go**, as under any reference shape.
+- **`HashDict` and `Map` both satisfy one `Dict[K, V]`**, which is a cleaner
+  resolution of ADR `0007` than either reference option offers.
+
+**What it costs**, from `experiments/refcontainers/` finding 4:
+
+| 64 elements | pointer | interface | |
+|---|---|---|---|
+| `KeySlice` — ADR `0017`'s bulk path | 410.9 ns, 1 alloc | 421.7 ns, 1 alloc | **+2.6%** |
+| `Has` | 4.292 ns | 4.948 ns | +15% |
+| `Keys` | 319.6 ns, **0 allocs** | 384.1 ns, **3 allocs** | +20% |
+| construct | 742.0 ns, 3 allocs | 796.2 ns, **5 allocs** | +7% |
+| `Union` | 1.546 µs, 3 allocs | 1.741 µs, **6 allocs** | +13% |
+| `Len` | 0.3734 ns | 1.181 ns | **+216%** |
+| `At` | 0.4914 ns | 1.130 ns | **+130%** |
+| **indexed loop over 64** | 16.11 ns | 68.92 ns | **+328%** |
+
+**ADR `0017` did soften this, in exactly one place.** The bulk path is
+**effectively free** through an interface, because a slice returned through a
+dynamic call carries none of the per-call allocations an `iter.Seq` does. Since
+`0017` made slices the currency of every bulk operation, the shape of the library
+most exposed to dispatch is now the shape least affected by it. `0014` could not
+have known that.
+
+**Everything else got no better, because dispatch is a fixed cost and its share
+tracks how cheap the operation is.** Against a map probe it is noise. Against
+`Len` it is 216%. Against an index it is 130%, and against an *indexed loop* it
+is **4.3x**, because `At` cannot inline and bounds-check elimination is
+impossible through dispatch.
+
+**Two costs are decisive, and they are not the average ones.**
+
+**1. `Vector` becomes unusable for the thing it is for.** ADR `0015` accepted
+`Vector` knowing an indexed loop costs ~24% against a raw slice, on the argument
+that it earns its place at an API boundary and is explicitly *not* a replacement
+for `[]T` locally. At 4.3x that argument stops working: `0015`'s call-site
+evidence was gathered against a concrete type, and this shape invalidates it.
+The container whose entire justification is handing out a slice safely would
+become the one it is most expensive to read.
+
+**2. The zero value stops being readable, not merely unwritable.** This is where
+option (d) fails on its own terms. Every method on a nil container interface
+panics — **including reads** — because a nil interface has no dynamic type to
+dispatch to. A nil builtin `map` reads fine: `len` is 0, a lookup returns the
+zero value, a range runs zero times. So (d) buys one nil *spelling* at the cost
+of nil *semantics* that are strictly worse than the builtin it is imitating, and
+worse than the reference-struct options, which at least get total reads. ADR
+`0014` made this point about interface containers and it survives intact:
+**it fails the stated goal.**
+
+There is also a smaller structural cost worth naming: **every constructor becomes
+the only way to obtain a container.** `var s HashSet[int]` is not a usable empty
+set under (d) — it is a nil that panics — so ADR `0002`'s usable zero value is
+not bent as it would be under (a) or (b), it is gone. Every declaration site
+becomes a constructor call.
+
+**Verdict on (d): rejected, and it is the furthest from adoptable of the four.**
+It answers the nil-*spelling* question perfectly and the nil-*semantics* question
+worst. It is the only option that removes the set-algebra ceiling, which is a
+genuine and long-standing win — but paying 4.3x on indexed access and losing the
+usable zero value to get it is not a trade this library should make. If the
+set-algebra ceiling is ever worth attacking, it should be attacked directly,
+without changing how every container is represented.
 
 ## Decision
 
@@ -147,6 +251,13 @@ were: the representation is free, `noCopy` and the copylocks caveat would go, th
 copy-divergence hazard would be dissolved rather than policed, and `HashDict`
 would collapse into `Map`. They are still not worth a second nil vocabulary or a
 lost hierarchy.
+
+**And option (d) is rejected separately**, on grounds that have nothing to do
+with nil spelling: it costs 4.3x on an indexed loop, which invalidates ADR
+`0015`'s call-site evidence for `Vector`, and it makes the zero value panic on
+reads where a builtin map returns empty. It is the only option that removes ADR
+`0002`'s set-algebra ceiling; that is worth attacking directly if it is worth
+attacking at all.
 
 ## What is now separately actionable
 
