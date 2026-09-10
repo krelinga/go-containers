@@ -862,6 +862,11 @@ The directions above are per-problem alternatives. A proposal combines them into
 one coherent design and says which directions it takes. Proposals are numbered
 by letter; more may be added before this ADR decides.
 
+The directions use the vocabulary of the time — `Elems`, `CollectX`,
+`CollectXSeq` — because they were written against the package as it stands.
+Proposal A renames or removes several of those, and says so where it does. When
+the two disagree, the proposal is the later word.
+
 ### Proposal A: a `Collector` primitive
 
 Every bulk constructor and bulk mutator takes a `Collector`. A `Collector`
@@ -1016,12 +1021,13 @@ records, or holding a length from anywhere else, otherwise has no way to say so
 and no way to implement a collector that could. A wrong `n` costs an allocation
 and never a wrong result, per ADR `0006`.
 
-**Consumers.** One per container, not one per source shape:
+**Consumers.** One constructor and one bulk mutator per container, not one per
+source shape:
 
 ```go
-func CollectVector[T any](c Collector[T]) *Vector[T]
-func CollectHashSet[T comparable](c Collector[T]) *HashSet[T]
-func CollectHashDict[K comparable, V any](c Collector2[K, V]) *HashDict[K, V]
+func NewVector[T any](cs ...Collector[T]) *Vector[T]
+func NewHashSet[T comparable](cs ...Collector[T]) *HashSet[T]
+func NewHashDict[K comparable, V any](cs ...Collector2[K, V]) *HashDict[K, V]
 
 func (v *Vector[T]) AppendAll(c Collector[T])
 func (s *HashSet[T]) AddAll(c Collector[T])
@@ -1031,6 +1037,66 @@ func (d *HashDict[K, V]) SetAll(c Collector2[K, V])
 func (d *SortedDict[K, V]) Backward() HoldsAll[K, V]
 func (d *SortedDict[K, V]) Range(lo, hi K) RangeAll[K, V]
 ```
+
+### One constructor per container, variadic in collectors
+
+`New<Container>` takes any number of collectors and `Collect<Container>` goes
+away. Three functions per container become one:
+
+| today | after |
+|---|---|
+| `NewVector[T]()` | `NewVector[T]()` |
+| `NewVector(vs ...T)` | `NewVector(Items(vs...))` |
+| `CollectVector(src Elems[T])` | `NewVector(ValuesOf(src))` |
+| `CollectVectorSeq(seq)` | `NewVector(ItemsFrom(seq))` |
+
+Eighteen functions across six containers become six. It also removes a
+redundancy the old pair had grown: `NewVector(1, 2, 3)` and
+`CollectVector(Items(1, 2, 3))` were two spellings of one thing.
+
+**`Collect<Container>` disappears entirely**, which reaches outside this ADR:
+`0004`, `0006`, `0009` and `0015` all name those functions. They are not wrong —
+they describe the package as it was when each was written — but adopting proposal
+A means the names in them stop resolving, so each wants a pointer rather than a
+rewrite. The `Collect` prefix also echoed `slices.Collect` and `maps.Collect`,
+and that echo is given up; `NewVector(KeysOf(d))` reads well enough to be worth
+it.
+
+Several collectors are **unioned in order**, which is the composition the split
+form could not express:
+
+```go
+containers.NewHashSet(containers.KeysOf(a), containers.KeysOf(b))
+containers.NewVector(containers.ValuesOf(x), containers.ItemsFrom(seq))
+```
+
+Three rules make that well-defined.
+
+- **Order is significant, and later wins.** A `Vector` concatenates, a `HashSet`
+  unions, and a dict takes the last value for a repeated key. That follows ADR
+  `0004`, which fixed last-write-wins for bulk insertion — and its warning
+  applies with more force here, because several collectors give more ways to
+  produce a duplicate than one ever did. `slices.CompactFunc` keeps the **first**
+  of each run, so a sorted-dict implementation that sorts and compacts gets this
+  backwards, and the test must use **distinguishable values** to see it. That bug
+  has occurred in this repository once already.
+- **Size hints sum, and unknown ones are skipped.** `NewVector(KeysOf(d),
+  ItemsFrom(seq))` presizes for the dict half rather than giving up because the
+  other half declined. A partial total under-reports, which costs an allocation
+  and never a wrong result, per ADR `0006`. Poisoning the whole sum on one
+  unknown would discard good information for nothing.
+- **Zero collectors needs an explicit type argument** — `NewVector[int]()`, since
+  there is nothing to infer from. That is exactly today's behaviour for
+  `NewVector[int]()`, and it is rarely the right spelling anyway: ADR `0002`
+  gives every container a usable zero value, so `var v containers.Vector[int]` is
+  the idiomatic empty.
+
+**What it costs**, measured: constructing through a collector is 2–4x the
+variadic form — 99.5 ns against 23.8 ns for a three-element literal, 2.379 µs
+against 1.119 µs for 1024 elements. The large-input half of that gap is
+per-element iteration against a memmove, which is exactly what `AsSlice` is
+reserved to recover; that reservation and this decision stay coherent, because
+fixing it once on `Collector` fixes it for every constructor at once.
 
 ### What happens to the existing mutators
 
@@ -1079,9 +1145,10 @@ package with no variadic bulk forms at all.
 **Caller code:**
 
 ```go
-containers.CollectVector(containers.KeysOf(d))        // problem 5, solved
-containers.CollectHashSet(containers.ValuesOf(d))
-containers.CollectHashDict(containers.AllOf(v))       // a vector, keyed by index
+containers.NewVector(containers.KeysOf(d))            // problem 5, solved
+containers.NewHashSet(containers.ValuesOf(d))
+containers.NewHashDict(containers.AllOf(v))           // a vector, keyed by index
+containers.NewHashSet(containers.KeysOf(a), containers.KeysOf(b))  // unioned
 v.AppendAll(containers.Items("a", "b", "c"))
 v.AppendAll(containers.ItemsFrom(slices.Values(names)))
 ```
@@ -1128,8 +1195,8 @@ needing its own vocabulary.
 for k, v := range sd.Backward().All() { }          // iterate in reverse
 for _, v := range sd.Backward().All() { }          // reverse values, discarding
                                                     // a narrow key -- free
-containers.CollectVector(containers.KeysOf(sd.Backward()))  // collect in reverse
-containers.CollectHashSet(containers.ValuesOf(v.Backward()))
+containers.NewVector(containers.KeysOf(sd.Backward()))  // collect in reverse
+containers.NewHashSet(containers.ValuesOf(v.Backward()))
 ```
 
 This only works because of the embedding. An earlier draft declared
@@ -1198,7 +1265,7 @@ rather than by adding a method per ordered operation:
 sub := sd.Range(lo, hi)
 for k, v := range sub.All() { }                       // forward over the range
 for k, v := range sub.Backward().All() { }            // reversed over the range
-containers.CollectVector(containers.KeysOf(sub.Backward()))
+containers.NewVector(containers.KeysOf(sub.Backward()))
 lastKey(sub)                                          // generic code takes it too
 ```
 
@@ -1278,7 +1345,7 @@ This also answers ADR `0013`'s deferred "should `Range` return a view?". It
 returns a *source*, which is enough: a source offers iteration and nothing else,
 so there is no mutation to deny and no seal to need.
 
-**Surface.** Eight constructors, one `Collect` and one bulk method per container,
+**Surface.** Eight collector constructors, one `New` and one bulk method per container,
 plus `Backward` on the ordered ones and `Range` on the sorted ones — roughly
 thirty declarations for the whole proposal, of which about twenty are what
 direction 5A's eighteen functions were trying to do. 5A covered a third of the
@@ -1300,7 +1367,7 @@ adds reverse and sub-ranges on top.
   there is no way to catch it in the type system, so it is stated instead: *a
   consumer reads a collector once.*
 - **A nil `Collector` panics when used, and nothing checks for it.** `var c
-  Collector[int]` is a nil interface, so `CollectVector(c)` panics on first use.
+  Collector[int]` is a nil interface, so `NewVector(c)` panics on first use.
   Same rule as ADR `0013` decision 8 for views, restated here so it is not
   rediscovered.
 - **Bulk methods dereference their receiver eagerly, and constructors dereference
@@ -1375,8 +1442,8 @@ func Items[T any](vs ...T) Collector[T]
 func ItemsFromSized[T any](n int, seq iter.Seq[T]) Collector[T]
 func AllFromSized[K, V any](n int, seq iter.Seq2[K, V]) Collector2[K, V]
 
-// One Collect and one bulk method per container, plus Backward where ordered.
-func CollectVector[T any](c Collector[T]) *Vector[T]
+// One constructor and one bulk method per container, plus Backward where ordered.
+func NewVector[T any](cs ...Collector[T]) *Vector[T]
 func (v *Vector[T]) AppendAll(c Collector[T])
 func (v *Vector[T]) Backward() HoldsAll[int, T]
 func (d *SortedDict[K, V]) Range(lo, hi K) RangeAll[K, V]
@@ -1405,6 +1472,9 @@ table is an index, not a second statement of the rules.
 | `RangeKeys` / `RangeAll` name reversibility | so it can appear in a signature; `Range` returns one, and a container is the widest one |
 | a sub-range cannot be sub-ranged | `RangeAll` has no `Range`, as a reverse source has no `Backward` |
 | there is no `RangeValues` | nothing in the taxonomy is values-only |
+| `New<Container>(cs ...Collector[T])` replaces `New`, `Collect` and `CollectSeq` | eighteen functions become six, and several sources compose |
+| several collectors union in order, later wins | ADR `0004`'s rule; `slices.CompactFunc` keeps the first, so a sorted implementation must be tested with distinguishable values |
+| size hints sum, unknown ones skipped | a partial total costs an allocation, never a wrong result |
 | **`Elems` and `Elems2` are removed**, not renamed or aliased | the `Holds*` family replaces them, `CanLen` takes over the length job, and the library has no external users to break |
 
 **Verified, not assumed.** Inference resolves `KeysOf(d)` and `ValuesOf(d)` on a
@@ -1422,7 +1492,7 @@ implementation and **not** under the natural one.
 
 **Which problems it closes.** Problem 1, by requiring native per-shape methods.
 Problem 2, by collapsing `X`/`XSeq` into one argument type. Problem 3, for whole
-containers. Problem 5, entirely — `CollectVector(KeysOf(d))` is the case that had
+containers. Problem 5, entirely — `NewVector(KeysOf(d))` is the case that had
 no spelling.
 
 **Nothing blocks this proposal.** The last blocking item — reverse over a
