@@ -2117,7 +2117,7 @@ func (s *HashSet[T]) DeleteAll(ks ...T)
 func (d *HashDict[K, V]) SetAll(kvs ...KeyValue[K, V])
 func (d *HashDict[K, V]) DeleteAll(ks ...K)
 
-// Map is a collector target too, and still gets no constructor.
+// Map is a bulk target too, and still gets no constructor.
 func (m Map[K, V]) SetAll(kvs ...KeyValue[K, V])
 func (m Map[K, V]) DeleteAll(ks ...K)
 ```
@@ -2156,11 +2156,11 @@ out of.
 ```go
 containers.NewVector(d.KeySlice()...)          // problem 5, no wrapper, no primitive
 containers.NewHashSet(v.ValueSlice()...)
-containers.NewVector(1, 2, 3)                 // one spelling for literals too
+containers.NewVector(1, 2, 3)                  // one spelling for literals too
 v.AppendAll(other.ValueSlice()...)
 d.DeleteAll(d.KeySlice()...)                  // safe by construction
 ks := d.KeySlice(); slices.Reverse(ks)        // problem 3, no Backward needed
-slices.Sort(d.KeySlice())                     // the whole slices package applies
+slices.Sort(ks)                               // the whole slices package applies
 
 // Unioning is the caller's, not every signature's.
 containers.NewHashSet(slices.Concat(a.KeySlice(), b.KeySlice())...)
@@ -2214,14 +2214,15 @@ at one allocation against six.
 below. The adopting column is kept because it is the measurement a later ADR
 would act on, not because D claims it.
 
-**So ownership is D's central question — and D defers it.** The `*Slice`
+**So ownership is D's central question — and D answers it by declining it.** The `*Slice`
 contract already guarantees `d.KeySlice()` is a private copy, so adopting it is
 safe. What the constructor cannot know is whether the slice it received came from
 a `*Slice` method or from the caller's own live data, where adopting would
 silently alias. Three ways out:
 
-- **Constructors copy.** Safe, obvious, and gives up the entire performance
-  case — D then exists purely for its simplicity.
+- **Constructors copy.** Safe, obvious, and gives up the *adopting* win — which
+  the accounting below shows costs little on narrow elements and a great deal on
+  wide ones.
 - **Constructors adopt, and it is documented.** `NewVector(d.KeySlice()...)` is
   optimal, and a caller passing a slice they intend to keep must write
   `NewVector(slices.Clone(mine)...)`. Fast, and a genuine footgun: Go's convention
@@ -2236,17 +2237,19 @@ and what it leaves open.
 
 **This is the same question A already answered.** A deleted `AsSlice` partly to
 avoid "an ownership vocabulary and a rule about when a returned slice may be
-kept". D reintroduces that question from the other side and **cannot remove it**,
-because slices are D's entire surface rather than one optional accessor on it.
+kept". D faces that question from the other side, and — unlike A, which could simply
+delete the accessor — cannot avoid *asking* it, because slices are D's entire
+surface. It can still answer it in the negative, which is what it does.
 Worth noting the symmetry: A's rejected `AsSlice` optimisation was worth 1.9x to
 a consumer that retains what it collects, and D-adopting measures 1.70x on the
 comparable case. These are two spellings of the same win.
 
 #### Ownership: what Go actually does
 
-The question D cannot dodge has a settled answer in the standard library, and it
-is consistent enough to copy. All of the following was read out of this
-toolchain's own source rather than recalled.
+Ownership transfer has a settled shape in the standard library. D ends up
+going the other way, but the evidence is what makes that a decision rather than
+an oversight — and it is what a later ADR would build on. All of the following
+was read out of this toolchain's own source rather than recalled.
 
 **The default is explicit non-retention.** `io` states it four times, and it is
 the expectation every Go programmer brings to a `[]T` parameter:
@@ -2286,16 +2289,22 @@ also why a *copying* default costs callers nothing to express, since a caller wh
 wants to hand over a throwaway simply has nothing to write.
 
 **3. The doc wording is near-templated** — two clauses, declaring the transfer
-and then stating the caller's concrete obligation. D should copy it:
+and then stating the caller's concrete obligation:
+
+```go
+// NewVectorOwning creates a Vector using vs as its storage. It takes
+// ownership of vs, and the caller should not use vs after this call.
+// To keep using it, pass slices.Clone(mine).
+```
+
+That template is recorded for the ADR that adds such a constructor. **What D
+itself ships is the opposite**, and needs one clause rather than two:
 
 ```go
 // NewVector creates a Vector containing vs. The Vector copies vs and does
 // not retain it; the caller remains free to modify the slice afterwards.
 func NewVector[T any](vs ...T) *Vector[T]
 ```
-
-That is the wording D ships. The template above is what an adopting constructor
-would need, and is kept here for the ADR that adds one.
 
 **Read against D's actual decision, this evidence points the other way — and
 that is worth being explicit about.** Six of six precedents keep the name plain
@@ -2517,7 +2526,7 @@ kept rather than deferred.
 sacrifice: one named type, no free functions, no sealing question, no
 nil-collector question, no drain-before-delete hazard, and the size exact by
 construction rather than plumbed. Its cost is a second set of methods per
-container, doubled peak memory unless it adopts, and no streaming at all.
+container, doubled peak memory on every bulk build, and no streaming at all.
 
 **It is also the strongest rival A has**, though on simplicity rather than on
 speed. B was measured and did not clear its own bar. C gave up 2.7x-3.7x. D as
