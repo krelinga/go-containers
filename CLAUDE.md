@@ -39,8 +39,8 @@ write takes `SetView`/`DictView`; a caller holding a container wraps it with
 
 `callsites_test.go` holds every stdlib-vs-container comparison. Alongside: `docs/adr/` (design
 decisions) and `experiments/` (measurement harnesses, each its own module). **Check an ADR's
-status before treating it as binding** — most are Accepted, `0010` is Proposed, and `0014` is
-**Rejected**, so its contents describe a road not taken. `0017` is Accepted **as proposal D**; it
+status before treating it as binding** — most are Accepted, `0010` is Proposed, and `0014` and
+`0018` are **Rejected**, so their contents describe a road not taken; `0018` supersedes `0014`. `0017` is Accepted **as proposal D**; it
 also contains proposals A, B and C in full, which are *not* binding — they are the rejected
 alternatives, kept because what they cost is the reason D was chosen.
 
@@ -80,7 +80,8 @@ to a plain `go test` — a shallow-copy `Clone` that silently shares the underly
 - Single flat package at the repo root — add new container types as sibling files, not subpackages,
   unless there is a reason to split.
 - **Read `docs/adr/` before designing a container type.** Accepted ADRs are binding on new code;
-  `0014` is Rejected and is not.
+  `0014` and `0018` are Rejected and are not, and `0014` is **superseded by `0018`** — read the
+  later one.
 - **Containers stay pointers to non-copyable structs** (ADR `0002`). `0014` re-affirmed that after
   designing the alternative in full, and `0018` re-affirmed it again after `0017` invalidated
   `0014`'s decisive argument — read `0018`, not `0014`, for the current reasoning. Reference-type containers were measured to be *free*
