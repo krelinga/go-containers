@@ -2098,11 +2098,13 @@ func (s *HashSet[T]) Keys() iter.Seq[T]
 func (s *HashSet[T]) KeySlice() []T
 
 // A vector is keyed by position.
+func (v *Vector[T]) Values() iter.Seq[T]
+func (v *Vector[T]) All() iter.Seq2[int, T]
 func (v *Vector[T]) ValueSlice() []T
 func (v *Vector[T]) AllSlice() []KeyValue[int, T]
 ```
 
-And every bulk operation takes a slice:
+And every bulk operation is variadic in the element type:
 
 ```go
 func NewVector[T any](vs ...T) *Vector[T]
@@ -2137,6 +2139,24 @@ favourable:
   **visibly marked at the call site by the `...`**, which the `[]T` form had no
   way to signal.
 
+**Both verified, not read off the spec.** A spread costs **0.9363 ns against
+0.9256 ns** for a plain `[]T` parameter, at **zero allocations either way**, and
+the callee receives the identical backing array (`&got[0] == &src[0]`). A
+three-element literal allocates one 24-byte temporary, which is the thing being
+adopted and which the caller cannot reach.
+
+**But the capacity comes with it, and that is a hazard the `[]T` form shares.**
+Spreading `src[:2]` where `src` has 1024 elements hands the callee a slice of
+**len 2 and cap 1024** — measured, not theorised. A `Vector` that adopted it
+would write into `src[2]` on its first `Append`, corrupting data the caller never
+handed over and never stopped using. `bytes.NewBuffer` has the identical
+hazard.
+
+**The fix is one call and no copy**: an adopting constructor stores
+`slices.Clip(vs)`, which caps the slice at its length so any growth reallocates.
+Ownership then means exactly what it says — the elements handed over, and not the
+array behind them.
+
 **The contract is the whole design.** A `*Slice` result is a **full, independent
 copy**: nothing the container does afterwards is visible through it, and nothing
 done to it is visible in the container. That single rule is what the rest falls
@@ -2167,10 +2187,14 @@ containers.NewHashSet(slices.Concat(a.KeySlice(), b.KeySlice())...)
   `d.DeleteAll(KeysOf(d))` silently corrupts a sorted container. Under D the
   argument is already a copy, so the bug is unconstructible rather than
   documented.
-- **Problem 1 dissolves by naming.** `KeySlice`, `ValueSlice` and `AllSlice` are
-  three names for three shapes, so nothing collides the way two `All` methods do.
-- **Problem 3 is mostly free.** Reversal is `slices.Reverse` on a copy the caller
-  owns — no `Backward`, no `RangeKeys`, no `RangeAll`.
+- **Problem 1 is solved by the rename, not by the slices.** `Keys`/`Values`/`All`
+  replacing a single overloaded `All` is what removes the collision; `Elems` and
+  `Elems2` then have no job left. The `*Slice` names simply mirror that
+  vocabulary rather than introducing a second one.
+- **Problem 3 is covered for the common case.** Reversal is `slices.Reverse` on
+  a copy the caller owns — no `Backward`, no `RangeKeys`, no `RangeAll`. Reading
+  a large container backwards *without* materialising it is not covered, and is
+  deferred with the rest of the reverse machinery.
 - **The stdlib comes with it.** Sorting, compaction, filtering, chunking,
   `slices.Concat` for unioning sources: all of it applies without this package
   providing anything.
@@ -2212,6 +2236,9 @@ adopting would silently alias. Three ways out, none free:
   rather than an explicit rule.
 - **Two spellings**, one copying and one adopting. Recreates exactly the
   `X`/`XSeq` twinning that problem 2 exists to remove.
+
+The next section resolves this against standard-library precedent: **the
+constructors adopt and the bulk mutators copy.**
 
 **This is the same question A already answered.** A deleted `AsSlice` partly to
 avoid "an ownership vocabulary and a rule about when a returned slice may be
@@ -2285,11 +2312,12 @@ marker the plain `[]T` form could not provide.
 **One disanalogy, recorded so it is not discovered later.** In all six
 precedents the argument is a purpose-built thing whose reason for existing is to
 be handed over — a `Buffer`'s backing store, an AST, a `FileHeader`, a method
-list. D's constructors take a plain `[]T`, the most common type in Go, where the
-non-retention expectation is strongest and the argument is likeliest to be live
-caller data. The mechanic is identical; the blast radius is not. `bytes.NewBuffer`
-is a known footgun for exactly this reason, and it is one function where D would
-be every constructor.
+list. D's constructors take elements of the most common type in Go, where the
+non-retention expectation is strongest and a spread argument is likeliest to be
+live caller data. The mechanic is identical; the blast radius is not.
+`bytes.NewBuffer` is a known footgun for exactly this reason, and it is one
+function where D would be every constructor. The `...` at the call site narrows
+this — a literal call transfers nothing — but it does not close it.
 
 **Which suggests the split D should adopt**: transfer ownership in the
 **constructors only**, and let the mutating bulk methods copy.
@@ -2305,6 +2333,33 @@ already exists and has no reason to retain anything, so it keeps the `io`
 default. That split costs D nothing measurable — appending into existing storage
 was always a copy — and confines the surprising rule to the one place with six
 precedents behind it.
+
+**Open: the rule does not mean the same thing for every container.** Adoption is
+a property of the *backing store*, and this package has two kinds:
+
+| container | backing | what "takes ownership" would mean | worth |
+|---|---|---|---|
+| `Vector` | slice | the slice becomes the storage | the measured 1.16x-1.70x |
+| `SortedSet`, `SortedDict` | sorted slice | the storage, **after sorting it in place** | the same win |
+| `HashSet`, `HashDict`, `Map` | map | **nothing** — the elements must be inserted one at a time | nothing |
+
+Two consequences, and this ADR does not yet choose between them:
+
+- **For the hash containers the rule is pure cost.** A map cannot adopt a slice,
+  so `NewHashSet(mine...)` has to walk it and insert regardless. The measurement
+  shows this directly: the map-backed row is the one with no adopting column,
+  because there was nothing to adopt. Documenting ownership there asks callers
+  for vigilance that buys them nothing.
+- **For the sorted containers ownership means mutation, not just retention.**
+  `NewSortedSet(mine...)` adopting would **reorder the caller's slice**, and
+  compaction would drop elements from it. "The caller should not use it
+  afterwards" understates that; the stdlib's own fuller wording — "may edit or
+  overwrite it", "may mutate its fields" — is the honest phrasing, and is what
+  `go/doc.New` and `zip.CreateHeader` already say.
+
+The choice is between **one uniform rule** that is over-broad for half the
+containers, and a **per-container rule** that is accurate but means the reader
+must know the backing store to know what a constructor does with their data.
 
 **What D costs, beyond ownership:**
 
