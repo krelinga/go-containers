@@ -1983,7 +1983,7 @@ The question this ADR now has to answer is narrow and stated: **is
 `NewVector(KeysOf(d))` worth eight named types and eight functions, when
 `NewVector(d.Keys())` costs one struct and the range syntax,
 `v.Grow(d.Len())` plus a loop costs nothing at all, and
-`NewVector(d.KeySlice())` is both smaller and faster than all of them provided
+`NewVector(d.KeySlice()...)` is both smaller and faster than all of them provided
 the constructor may keep the slice?**
 
 B has now been measured — see the section below. Its case rested on a value being
@@ -2105,16 +2105,37 @@ func (v *Vector[T]) AllSlice() []KeyValue[int, T]
 And every bulk operation takes a slice:
 
 ```go
-func NewVector[T any](vs []T) *Vector[T]
-func NewHashSet[T comparable](vs []T) *HashSet[T]
-func NewHashDict[K comparable, V any](kvs []KeyValue[K, V]) *HashDict[K, V]
+func NewVector[T any](vs ...T) *Vector[T]
+func NewHashSet[T comparable](vs ...T) *HashSet[T]
+func NewHashDict[K comparable, V any](kvs ...KeyValue[K, V]) *HashDict[K, V]
 
-func (v *Vector[T]) AppendAll(vs []T)
-func (s *HashSet[T]) AddAll(vs []T)
-func (s *HashSet[T]) DeleteAll(ks []T)
-func (d *HashDict[K, V]) SetAll(kvs []KeyValue[K, V])
-func (d *HashDict[K, V]) DeleteAll(ks []K)
+func (v *Vector[T]) AppendAll(vs ...T)
+func (s *HashSet[T]) AddAll(vs ...T)
+func (s *HashSet[T]) DeleteAll(ks ...T)
+func (d *HashDict[K, V]) SetAll(kvs ...KeyValue[K, V])
+func (d *HashDict[K, V]) DeleteAll(ks ...K)
+
+// Map is a collector target too, and still gets no constructor.
+func (m Map[K, V]) SetAll(kvs ...KeyValue[K, V])
+func (m Map[K, V]) DeleteAll(ks ...K)
 ```
+
+**Bulk operations are variadic in the element type, not in the slice type.** A
+slice reaches them by spreading — `NewVector(d.KeySlice()...)` — which keeps one
+spelling for a literal list and for a materialised source, and leaves unioning to
+the caller (`slices.Concat(a.KeySlice(), b.KeySlice())...`) rather than building
+composition into every signature. Two consequences fall out, and both are
+favourable:
+
+- **A spread slice is passed unchanged.** The spec is explicit: a final argument
+  assignable to `[]T` and followed by `...` "is passed unchanged as the value for
+  a `...T` parameter". So the ownership transfer measured above survives the
+  change intact — `NewVector(ks...)` hands over `ks` itself, with no copy.
+- **A literal call is safe to adopt by construction.** `NewVector(1, 2, 3)`
+  builds a fresh slice the caller has no reference to, so there is nothing to
+  alias. Ownership only bites when a slice is spread — and that case is
+  **visibly marked at the call site by the `...`**, which the `[]T` form had no
+  way to signal.
 
 **The contract is the whole design.** A `*Slice` result is a **full, independent
 copy**: nothing the container does afterwards is visible through it, and nothing
@@ -2124,12 +2145,16 @@ out of.
 **Caller code:**
 
 ```go
-containers.NewVector(d.KeySlice())            // problem 5, no wrapper, no primitive
-containers.NewHashSet(v.ValueSlice())
-v.AppendAll(other.ValueSlice())
-d.DeleteAll(d.KeySlice())                     // safe by construction
+containers.NewVector(d.KeySlice()...)          // problem 5, no wrapper, no primitive
+containers.NewHashSet(v.ValueSlice()...)
+containers.NewVector(1, 2, 3)                 // one spelling for literals too
+v.AppendAll(other.ValueSlice()...)
+d.DeleteAll(d.KeySlice()...)                  // safe by construction
 ks := d.KeySlice(); slices.Reverse(ks)        // problem 3, no Backward needed
 slices.Sort(d.KeySlice())                     // the whole slices package applies
+
+// Unioning is the caller's, not every signature's.
+containers.NewHashSet(slices.Concat(a.KeySlice(), b.KeySlice())...)
 ```
 
 **What the contract buys, beyond simplicity:**
@@ -2151,7 +2176,9 @@ slices.Sort(d.KeySlice())                     // the whole slices package applie
   providing anything.
 
 **Count against A:** one named type against eight, zero free functions against
-eight.
+eight. The cost is on the other side of the ledger: three extra methods on every
+container and every view, since the slices are an addition to the iterators
+rather than a replacement for them.
 
 **Measured against proposal A** (`experiments/iteration`, `dslice.go`, finding
 11), at 1024 elements. The result is sharper than "it depends":
@@ -2178,9 +2205,9 @@ adopting would silently alias. Three ways out, none free:
 
 - **Constructors copy.** Safe, obvious, and gives up the entire performance
   case — D then exists purely for its simplicity.
-- **Constructors adopt, and it is documented.** `NewVector(d.KeySlice())` is
+- **Constructors adopt, and it is documented.** `NewVector(d.KeySlice()...)` is
   optimal, and a caller passing a slice they intend to keep must write
-  `NewVector(slices.Clone(mine))`. Fast, and a genuine footgun: Go's convention
+  `NewVector(slices.Clone(mine)...)`. Fast, and a genuine footgun: Go's convention
   is that a callee does *not* take ownership, so this violates an expectation
   rather than an explicit rule.
 - **Two spellings**, one copying and one adopting. Recreates exactly the
@@ -2240,18 +2267,20 @@ is not an outlier — it is the shape the naming convention assumes, with
 and then stating the caller's concrete obligation. D should copy it:
 
 ```go
-// NewVector creates a Vector using vs as its initial contents.
-// The new Vector takes ownership of vs, and the caller should not use
-// vs after this call. To keep using vs, pass slices.Clone(vs).
-func NewVector[T any](vs []T) *Vector[T]
+// NewVector creates a Vector containing vs. The new Vector takes ownership
+// of vs, so a slice spread into this call becomes the Vector's storage and
+// the caller should not use it afterwards. To keep using it, spread a copy:
+// NewVector(slices.Clone(mine)...).
+func NewVector[T any](vs ...T) *Vector[T]
 ```
 
 **So D does not rename its constructors; it documents them.** Six of six say the
 name stays plain, and a `NewVectorOwned` would be the only such name in a
 library shaped like the standard one. The distinctness is carried by the
 *pairing* instead: `KeySlice()` announces "a fresh copy you own" on the producing
-side, so `NewVector(d.KeySlice())` reads as a matched handoff and
-`NewVector(mine)` reads as a decision.
+side, so `NewVector(d.KeySlice()...)` reads as a matched handoff and
+`NewVector(mine...)` reads as a decision — the spread operator being the
+marker the plain `[]T` form could not provide.
 
 **One disanalogy, recorded so it is not discovered later.** In all six
 precedents the argument is a purpose-built thing whose reason for existing is to
@@ -2266,8 +2295,8 @@ be every constructor.
 **constructors only**, and let the mutating bulk methods copy.
 
 ```go
-func NewVector[T any](vs []T) *Vector[T]        // takes ownership
-func (v *Vector[T]) AppendAll(vs []T)           // copies; does not retain vs
+func NewVector[T any](vs ...T) *Vector[T]       // takes ownership
+func (v *Vector[T]) AppendAll(vs ...T)          // copies; does not retain vs
 ```
 
 A constructor is installing a slice *as* the container's contents, which is
@@ -2297,75 +2326,130 @@ precedents behind it.
 - **Unbounded sources cannot be expressed at all.** A `Collector` over an
   infinite `iter.Seq` is legal under A and impossible under D.
 
-#### What proposal D has not said yet
+#### What D settles beyond bulk construction
 
-D is specified as far as bulk construction, insertion and removal. Proposal A
-covers more than that, and the difference is not all detail. Listed worst first.
+**Views gain the `*Slice` methods.** Without them a container cannot be built
+from a view, and a view is the read-only boundary callers are meant to pass
+around. Adding them is safe by the same contract that makes the whole proposal
+work — a `*Slice` result is a copy, so it hands out nothing the view protects —
+and ADR `0013` established that **adding a method to a sealed interface is not a
+breaking change**, since nothing outside the package can implement one.
 
-**1. Views are unaddressed, and this one is structural.** All five view
-interfaces in `views.go` embed `Elems` or `Elems2` today. A replaces those with
-the `Holds*` family, so a view keeps satisfying the source contract and
-`NewVector(KeysOf(someView))` works. **Under D, unless the view interfaces also
-gain `KeySlice`/`ValueSlice`/`AllSlice`, a container cannot be built from a
-view at all** — and a view is precisely the read-only boundary a caller is meant
-to hand around. Adding them is safe, since a `*Slice` result is a copy by
-contract and hands out nothing the view protects; but it has to be decided, and
-it widens the sealed interfaces D was supposed to be simplifying.
+```go
+type SetView[NT any] interface {
+	Len() int
+	Keys() iter.Seq[NT]
+	KeySlice() []NT
+	Has(NT) bool
+	sealedView()
+}
 
-**2. `Elems` and `Elems2` have no stated fate, and they are load-bearing.** A
-deletes them and moves the length job to `CanLen`. D keeps iterators, so it needs
-*something* — but `Elems[T]` still declares `All() iter.Seq[T]`, which is
-problem 1 itself. D shows `Keys`/`Values`/`All` on a dict without saying whether
-the contract layer is renamed, narrowed, or dropped. Related:
-**`MutableSet` declares `Add(...T)` and `Remove(...T)`**, so whatever D decides
-about the mutators (item 6) changes `contracts.go` too.
+type DictView[NK, NV any] interface {
+	Len() int
+	Keys() iter.Seq[NK]
+	Values() iter.Seq[NV]
+	All() iter.Seq2[NK, NV]
+	KeySlice() []NK
+	ValueSlice() []NV
+	AllSlice() []KeyValue[NK, NV]
+	Get(NK) (NV, bool)
+	sealedView()
+}
 
-**3. Sub-ranges on the sorted containers.** `SortedSetView` and
-`SortedDictView` already have `Range(lo, hi)` returning an `iter.Seq`. A upgrades
-that to return a `RangeAll`, which also closed ADR `0013`'s deferred "should
-`Range` return a view?". D says nothing — presumably `RangeSlice(lo, hi) []K`,
-but a sub-range is the one case where materialising is most obviously wrong:
-the caller asked for a bounded window precisely because the container is large.
-*Direction* is deferred to a later ADR by decision; *bounds* are still open.
+type IndexedView[NT any] interface {
+	Len() int
+	Values() iter.Seq[NT]
+	All() iter.Seq2[int, NT]
+	ValueSlice() []NT
+	AllSlice() []KeyValue[int, NT]
+	At(int) NT
+	sealedView()
+}
+```
 
-**4. `Map`.** A gives it `SetAll` and `DeleteAll` and refuses `NewMap`, with
-reasons. D lists `HashDict` and is silent on `Map`, which is how problem 2's
-ragged matrix arose in the first place.
+The cost is real and should be stated: every one of the nine-plus unexported view
+structs implements three more methods, and a view that carries a viewer must
+apply the conversion per element while materialising. `NewVector(view.KeySlice()...)`
+then works, which is the point.
 
-**5. Inserting from an iterator.** A subsumes `AppendAllSeq`/`AddAllSeq`/
-`SetAllSeq` via `ItemsFrom`. Under D the bridge is `slices.Collect(seq)` and the
-twins die — almost certainly right, and unstated. Worth naming explicitly
-because it is the one place D forces an allocation a streaming API would not.
+**`Elems` and `Elems2` are removed**, as under proposal A and for a stronger
+reason: D's constructors take `...T`, so nothing needs a source *interface* at
+all. Their remaining job was carrying a length, and a slice carries its own.
+`MutableSet` and `MutableDict` declare the read methods directly instead of
+embedding them:
 
-**6. Single-element mutators and the renames.** A ruled that `Append(e T)`,
-`Set(k, v)` and their kin survive (a collector for one element measured 49x the
-direct call), that `HashSet.Add`/`SortedSet.Add` stop being variadic, and that
-`Remove` becomes `Delete`. None of that depends on the `Collector`, so D
-plausibly inherits all of it — but D has not said so, and the `Delete` rename is
-what makes `DeleteAll`'s name consistent under either proposal.
+```go
+type MutableSet[T any] interface {
+	Len() int
+	Keys() iter.Seq[T]
+	KeySlice() []T
+	Has(T) bool
+	Add(T)
+	Delete(T)
+}
+```
 
-**7. Multi-source union.** A composes with variadic collectors. D's constructors
-take one slice, so unioning is `slices.Concat(a.KeySlice(), b.KeySlice())` — a
-third copy. Making them variadic in slices (`NewVector(vss ...[]T)`) keeps
-`NewVector(d.KeySlice())` compiling unchanged and restores the union, at the cost
-of muddying the ownership rule: it would transfer ownership of *several* slices.
+**`Keys`/`Values`/`All` keep the meanings problem 1 and problem 4 settled.**
+`All` always yields pairs, `Keys` and `Values` each yield one half, a set is
+key-only so `KeySlice` is its one materialiser, and a `Vector` is keyed by
+position. The `*Slice` names mirror the iterator names exactly, so there is one
+vocabulary rather than two.
 
-**8. Duplicate resolution.** ADR `0004` fixes last-write-wins, and A restates it
-along with the trap that `slices.CompactFunc` keeps the **first** of each run, so
-a sorted implementation that sorts-and-compacts gets it backwards — a bug this
-repository has already had once. D inherits the same hazard the moment a slice
-contains duplicates, and says nothing.
+**`Range` keeps returning an `iter.Seq`, and there is no `RangeSlice`.** A
+sub-range is the one place materialising is plainly wrong: the caller asked for a
+bounded window *because* the container is large, and handing back a copy of the
+window defeats the request. A caller who wants the window as a slice writes
+`slices.Collect(v.Range(lo, hi))` and has said so. This leaves ADR `0013`'s
+deferred "should `Range` return a view?" exactly where it was, rather than
+answering it the way proposal A did.
 
-**9. The eager-dereference rule.** ADR `0002` requires every method to
-dereference its receiver on a path that always executes; A states that zero
-collectors still touches the receiver. `v.AppendAll(nil)` and `v.AppendAll([]T{})`
-are D's equivalent, and the rule has been violated three times historically.
+**Reverse iteration is deferred to a later ADR**, per the note above:
+`slices.Reverse` on an owned copy covers the common case, and the machinery A
+proposed can be revisited if the streaming-backwards case turns out to matter.
 
-**None of these sink D.** Items 1 and 3 are the ones that could change its shape —
-views because D currently cannot build from one, and sub-ranges because
-materialising a window contradicts why the window was asked for. The rest are
-paragraphs D needs before it could be adopted, not open questions about whether
-it works.
+**The single-element mutators and the renames are inherited from A**, none of
+which depended on the `Collector`:
+
+- `Append(e T)`, `Set(k, v)`, `Add(v T)`, `Has`, `Get` and `Delete(k)` stay as
+  single-element operations. A collector for one element measured 49x the direct
+  call; a one-element variadic is cheaper than that but still not free, and the
+  bulk form is right there.
+- **`HashSet.Add` and `SortedSet.Add` stop being variadic**, leaving `AddAll` as
+  the bulk spelling. After this **no method in the package is variadic except the
+  bulk ones**, which is the same end state A reached by a different route.
+- **`Remove` becomes `Delete`** on the sets. A set's element is its key, and the
+  operation that removes a key is `Delete` everywhere else — including on `Map`,
+  which already spells it that way.
+- **`Map` gains `SetAll` and `DeleteAll` and still gets no `NewMap`**, for the
+  reasons A gives: a composite literal and `make` already construct a `Map`,
+  which is the point of the type.
+
+**The `*Seq` twins are deleted, and `slices.Collect` is the bridge.**
+`AppendAllSeq(seq)` becomes `AppendAll(slices.Collect(seq)...)`. This is the one
+place D forces an allocation that a streaming API would not, and it is the
+honest price of the slice being the currency.
+
+**Duplicate resolution follows ADR `0004`: later wins.** Within a single call the
+last occurrence of a repeated key is the one that survives, matching bulk
+insertion as it already behaves. The trap A recorded applies unchanged and is
+worth repeating because this repository has hit it once already:
+**`slices.CompactFunc` keeps the *first* of each run**, so a sorted-container
+implementation that sorts-and-compacts gets last-wins backwards, and the test
+must use **distinguishable values** to catch it.
+
+**Zero arguments still touch the receiver.** `v.AppendAll()`,
+`d.DeleteAll()` and `NewVector[int]()` are all legal, and per ADR `0002`'s
+eager-dereference rule the methods must dereference the receiver on a path that
+always executes — a rule violated three times in this repository's history,
+every time via a loop that could run zero times. `NewVector[int]()` needs the
+explicit type argument, exactly as today.
+
+**One reversal to record.** A rejected `AppendMany(es ...T)`, answering ADR
+`0015`'s follow-up in the negative, on the grounds that the slice optimisation
+belonged on `Collector` where it would serve every consumer. D has no
+`Collector`, and `AppendAll(vs ...T)` *is* `AppendMany`. **D therefore answers
+ADR `0015`'s follow-up in the positive**, and the 1.47x that measurement found is
+kept rather than deferred.
 
 **Where D lands.** It is the only proposal that gets C's simplicity without C's
 sacrifice: one named type, no free functions, no sealing question, no
