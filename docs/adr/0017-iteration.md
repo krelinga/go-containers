@@ -1059,7 +1059,12 @@ away. Three functions per container become one:
 | `CollectVector(src Elems[T])` | `NewVector(ValuesOf(src))` |
 | `CollectVectorSeq(seq)` | `NewVector(ItemsFrom(seq))` |
 
-Eighteen functions across six containers become six. It also removes a
+**Thirteen functions become five.** Counted honestly against what exists rather
+than against a filled matrix: `SortedSet`, `HashDict`, `SortedDict` and `Vector`
+have all three today, `HashSet` has only `NewHashSet` (problem 2's ragged row),
+and `Map` has none. The eighteen a full 6x3 matrix would hold was never reached —
+which is the point of problem 2 — so the saving is thirteen down to five, and
+`Map` stays at zero for the reason given below. It also removes a
 redundancy the old pair had grown: `NewVector(1, 2, 3)` and
 `CollectVector(Items(1, 2, 3))` were two spellings of one thing.
 
@@ -1167,23 +1172,28 @@ a default — but "thin" was priced when a bulk insert meant two methods and an
 `Elems2`. One method taking collectors is cheap enough that leaving `Map` as the
 only dict that cannot be filled in bulk is harder to justify than adding it.
 
+Which forces the rest of `Map`'s row to be decided too, rather than left to the
+omission that produced the ragged matrix in problem 2:
+
+- **`DeleteAll` follows `SetAll` directly.** The same argument transfers intact —
+  `Map` would otherwise be the only dict that can be filled in bulk but not
+  emptied in bulk — and `Map` already spells the single-key form `Delete(k K)`.
+  It is the container the sets' `Remove`→`Delete` rename aligns *toward*, not
+  away from, so `Map` ends up with the same removal pair as every other dict.
+- **`NewMap` is refused**, and this is the one place ADR `0009`'s thinness still
+  does real work. `Map` exists so that builtin syntax applies to it:
+  `Map[string]int{"a": 1}` and `make(Map[string]int, n)` already construct one.
+  A `NewMap` would compete with a composite literal rather than enable anything,
+  and it is the only constructor in the package that would. **This is a real
+  exception to "one constructor per container", and it is recorded as such** so
+  that a later reader finds a decision rather than a gap.
+
+So `Map` ends at `Set`/`SetAll`/`Delete`/`DeleteAll` — every bulk *method* the
+other dicts have, and no constructor.
+
 **Bulk methods are variadic in collectors**, matching `New`: `AddAll`, `SetAll`,
 `AppendAll` and `DeleteAll` all take `...Collector`. A single-collector form
 would have been the only place in the proposal that was not.
-
-**`Map`'s other two cells are left open**, and this proposal should not decide
-them by omission the way the matrix in problem 2 was decided by omission:
-
-- **`DeleteAll`** is the live question. The argument just made for `SetAll`
-  transfers almost intact — `Map` would be the only dict that can be filled in
-  bulk but not emptied in bulk — and `Map` already spells the single-key form
-  `Delete(k K)`, so it is the container the sets' rename aligns *toward*, not
-  away from.
-- **`NewMap`** is the weaker case, and probably a genuine exception rather than
-  an oversight. `Map` exists so that builtin syntax works on it: `Map[string]int{
-  "a": 1}` and `make(Map[string]int, n)` already construct one, and a `NewMap`
-  would compete with a composite literal rather than enable anything. ADR `0009`'s
-  thinness is doing real work here in a way it was not for `SetAll`.
 
 ### What happens to the existing mutators
 
@@ -1553,7 +1563,7 @@ func NewHashDict[K comparable, V any](cs ...Collector2[K, V]) *HashDict[K, V]
 func (d *HashDict[K, V]) Set(k K, v V)
 func (d *HashDict[K, V]) SetAll(cs ...Collector2[K, V])   // Map gains this too
 func (d *HashDict[K, V]) Delete(k K)
-func (d *HashDict[K, V]) DeleteAll(cs ...Collector[K])    // by KEY, not pairs
+func (d *HashDict[K, V]) DeleteAll(cs ...Collector[K])    // by KEY, not pairs; Map too
 
 // Ordered containers add two; Vector has no removal.
 func (d *SortedDict[K, V]) Backward() HoldsAll[K, V]
@@ -1583,14 +1593,15 @@ table is an index, not a second statement of the rules.
 | `RangeKeys` / `RangeAll` name reversibility | so it can appear in a signature; `Range` returns one, and a container is the widest one |
 | a sub-range cannot be sub-ranged | `RangeAll` has no `Range`, as a reverse source has no `Backward` |
 | there is no `RangeValues` | nothing in the taxonomy is values-only |
-| `New<Container>(cs ...Collector[T])` replaces `New`, `Collect` and `CollectSeq` | eighteen functions become six, and several sources compose |
+| `New<Container>(cs ...Collector[T])` replaces `New`, `Collect` and `CollectSeq` | thirteen existing functions become five, and several sources compose |
 | several collectors union in order, later wins | ADR `0004`'s rule; `slices.CompactFunc` keeps the first, so a sorted implementation must be tested with distinguishable values |
 | size hints sum, unknown ones skipped | a partial total costs an allocation, never a wrong result |
 | `Remove` becomes `Delete` on sets; `DeleteAll(cs ...Collector[K])` everywhere | a set's element is its key, so removal takes keys and the signature is identical across sets and dicts |
 | `DeleteAll` drains its collectors before deleting | `d.DeleteAll(KeysOf(d))` otherwise corrupts a sorted container silently |
 | every bulk method is variadic in collectors | uniform with `New`; nothing in the proposal takes exactly one |
 | `HashSet.Add` and `SortedSet.Add` stop being variadic | the only variadic mutators in the package, and the only ones that never had a measured reason |
-| `Map` gains `SetAll` | one method taking collectors is cheap enough that being the only unfillable dict is not worth defending |
+| `Map` gains `SetAll` and `DeleteAll` | one method taking collectors is cheap enough that being the only dict that cannot be filled or emptied in bulk is not worth defending |
+| `Map` gets **no** `NewMap` | the one real exception to one-constructor-per-container: a composite literal and `make` already construct a `Map`, which is the point of the type |
 | **`Elems` and `Elems2` are removed**, not renamed or aliased | the `Holds*` family replaces them, `CanLen` takes over the length job, and the library has no external users to break |
 
 **Verified, not assumed.** Inference resolves `KeysOf(d)` and `ValuesOf(d)` on a
@@ -1613,7 +1624,7 @@ Problem 3, for whole containers and for sub-ranges. Problem 5, entirely —
 Problem 2 most thoroughly of all, and by more than the `X`/`XSeq` collapse it
 was originally scoped at: `New` and `Collect` fold into one variadic
 constructor, `HashSet` gains the bulk methods it never had, `Map` gains
-`SetAll`, the two variadic mutators stop being variadic, and bulk *removal* —
+`SetAll` and `DeleteAll`, the two variadic mutators stop being variadic, and bulk *removal* —
 which the problem statement did not think to ask for — exists for the first
 time.
 
