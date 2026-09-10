@@ -901,6 +901,12 @@ one, which ADR `0013` established when it chose sealed view interfaces. If a
 measured call site ever wants the 1.9x, `AsSlice` can be reintroduced then,
 against evidence rather than in anticipation.
 
+It is also the *designated* place for that optimisation. `AppendMany` was the
+alternative — a variadic bulk method buying the same win on one container — and
+is rejected below for exactly that reason: `AsSlice` buys it for every consumer
+of every collector, and a per-container method buys it once. **If the slice path
+is ever wanted, it goes here.**
+
 **Sources.** A container advertises which shapes it can produce:
 
 ```go
@@ -1051,18 +1057,24 @@ direction 2B, and it halves that half of the surface.
 **`AppendAll` changes its argument** from `Elems[T]` to `Collector[T]`, which is
 the whole point.
 
-**A variadic bulk form is still worth having, and less than ADR `0015` thought.**
-Its follow-up measured `AppendMany(es ...T)` at 2.1x the alternatives for
+**`AppendMany` is not added**, which answers ADR `0015`'s follow-up in the
+negative.
+
+That follow-up measured a variadic bulk form at 2.1x the alternatives for
 appending a plain slice. Against a `Collector` it is **1.47x**, because a
 collector carries a size hint where the bare iterator it was compared against did
-not — so most of that gap was the missing presize, and the residual is memmove
-against per-element iteration. Whether 1.47x justifies a fourth method on
-`Vector` is a judgement this ADR does not make; it belongs to `0015`'s
-mutator-consistency follow-up, now better informed.
+not — so most of the original gap was the missing presize, and the residual is
+memmove against per-element iteration.
 
-Note this is the cost that `AsSlice` would have recovered. Removing it as
-premature and keeping `AppendMany` are two answers to the same question, and
-only one of them needs to be taken.
+1.47x is real, and it is **the same 1.47x `AsSlice` would have recovered**.
+Those are two answers to one question, and they differ in reach: a variadic
+method buys it on one container, and `AsSlice` buys it for every consumer of
+every collector at once. So the slice optimisation, if it is ever wanted, goes on
+`Collector` — one place, all callers — rather than being spread a method at a
+time across the containers.
+
+That leaves `Vector` with two mutators, `Append` and `AppendAll`, and leaves the
+package with no variadic bulk forms at all.
 
 **Caller code:**
 
