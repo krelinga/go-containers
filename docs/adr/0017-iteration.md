@@ -1972,7 +1972,7 @@ They are not variants; they disagree about what an abstraction is for.
 | reversibility | in the type system | a nil-able field | a named method | `slices.Reverse` |
 | streaming / unbounded sources | yes | yes | yes | **no** |
 | cost of forgetting | cannot | cannot | **2.7x-3.7x, silent** | cannot |
-| measured against A | baseline | -2 allocs, nil at scale | not built | **1.16x-1.70x faster, if it adopts** |
+| measured against A | baseline | -2 allocs, nil at scale | not built | within 16% on narrow elements, **77% slower on wide**, a third of the allocations |
 
 **A** buys the size hint with a wrapper at every call site. **B** buys it with the
 range syntax, and collapses eight types into two by demoting capability from
@@ -2129,33 +2129,22 @@ the caller (`slices.Concat(a.KeySlice(), b.KeySlice())...`) rather than building
 composition into every signature. Two consequences fall out, and both are
 favourable:
 
-- **A spread slice is passed unchanged.** The spec is explicit: a final argument
-  assignable to `[]T` and followed by `...` "is passed unchanged as the value for
-  a `...T` parameter". So the ownership transfer measured above survives the
-  change intact — `NewVector(ks...)` hands over `ks` itself, with no copy.
-- **A literal call is safe to adopt by construction.** `NewVector(1, 2, 3)`
-  builds a fresh slice the caller has no reference to, so there is nothing to
-  alias. Ownership only bites when a slice is spread — and that case is
-  **visibly marked at the call site by the `...`**, which the `[]T` form had no
-  way to signal.
+- **A spread costs nothing.** Verified rather than read off the spec: passing
+  `src...` costs **0.9363 ns against 0.9256 ns** for a plain `[]T` parameter, at
+  **zero allocations either way**, and the callee receives the identical backing
+  array. The variadic form is free relative to taking a slice, so the choice
+  between them is about spelling, not cost.
+- **One spelling covers both cases.** `NewVector(1, 2, 3)` and
+  `NewVector(d.KeySlice()...)` are the same function, where a `[]T` parameter
+  would have forced either `NewVector([]int{1, 2, 3})` or a second entry point.
 
-**Both verified, not read off the spec.** A spread costs **0.9363 ns against
-0.9256 ns** for a plain `[]T` parameter, at **zero allocations either way**, and
-the callee receives the identical backing array (`&got[0] == &src[0]`). A
-three-element literal allocates one 24-byte temporary, which is the thing being
-adopted and which the caller cannot reach.
-
-**But the capacity comes with it, and that is a hazard the `[]T` form shares.**
-Spreading `src[:2]` where `src` has 1024 elements hands the callee a slice of
-**len 2 and cap 1024** — measured, not theorised. A `Vector` that adopted it
-would write into `src[2]` on its first `Append`, corrupting data the caller never
-handed over and never stopped using. `bytes.NewBuffer` has the identical
+**A note for the deferred optimisation below.** A spread carries the source's
+*capacity*, not just its length: spreading `src[:2]` from a 1024-element array
+hands the callee **len 2, cap 1024** — measured. That is harmless while
+constructors copy, which is what D proposes. It is a trap for any future
+constructor that adopts, which would write into `src[2]` on its first append and
+must therefore store `slices.Clip(vs)`. `bytes.NewBuffer` has the identical
 hazard.
-
-**The fix is one call and no copy**: an adopting constructor stores
-`slices.Clip(vs)`, which caps the slice at its length so any growth reallocates.
-Ownership then means exactly what it says — the elements handed over, and not the
-array behind them.
 
 **The contract is the whole design.** A `*Slice` result is a **full, independent
 copy**: nothing the container does afterwards is visible through it, and nothing
@@ -2221,11 +2210,15 @@ and that version **loses to A nearly everywhere while doubling peak memory** —
 adopts the slice does the work once and **beats A everywhere**, 1.16x to 1.70x,
 at one allocation against six.
 
-**So D's central question is ownership, and D cannot dodge it.** The
-`*Slice` contract already guarantees `d.KeySlice()` is a private copy, so
-adopting it is safe. What the constructor cannot know is whether the slice it
-received came from a `*Slice` method or from the caller's own live data, where
-adopting would silently alias. Three ways out, none free:
+**D proposes the copying column**, for the reasons in the ownership section
+below. The adopting column is kept because it is the measurement a later ADR
+would act on, not because D claims it.
+
+**So ownership is D's central question — and D defers it.** The `*Slice`
+contract already guarantees `d.KeySlice()` is a private copy, so adopting it is
+safe. What the constructor cannot know is whether the slice it received came from
+a `*Slice` method or from the caller's own live data, where adopting would
+silently alias. Three ways out:
 
 - **Constructors copy.** Safe, obvious, and gives up the entire performance
   case — D then exists purely for its simplicity.
@@ -2237,8 +2230,9 @@ adopting would silently alias. Three ways out, none free:
 - **Two spellings**, one copying and one adopting. Recreates exactly the
   `X`/`XSeq` twinning that problem 2 exists to remove.
 
-The next section resolves this against standard-library precedent: **the
-constructors adopt and the bulk mutators copy.**
+**D takes the first.** `New*` constructors — and every bulk mutator — copy their
+input and never retain it. The rest of this section records why, what it costs,
+and what it leaves open.
 
 **This is the same question A already answered.** A deleted `AsSlice` partly to
 avoid "an ownership vocabulary and a rule about when a returned slice may be
@@ -2286,28 +2280,35 @@ generated trie code. `math/big` documents aliasing accessors the same way —
 **2. Go names the copy, not the alias.** `slices.Clone`, `bytes.Clone`,
 `maps.Clone` and `strings.Clone` all exist; there is no `Alias` or `NoCopy`
 counterpart in the public API. **This is the load-bearing point.** The vocabulary
-for opting *out* of a transfer is already idiomatic, so an adopting constructor
-is not an outlier — it is the shape the naming convention assumes, with
-`slices.Clone` as the caller's escape hatch.
+for opting *out* of a transfer is already idiomatic — `NewVector(slices.Clone(mine)...)`
+needs no vocabulary this package has to invent. Note this cuts both ways: it is
+also why a *copying* default costs callers nothing to express, since a caller who
+wants to hand over a throwaway simply has nothing to write.
 
 **3. The doc wording is near-templated** — two clauses, declaring the transfer
 and then stating the caller's concrete obligation. D should copy it:
 
 ```go
-// NewVector creates a Vector containing vs. The new Vector takes ownership
-// of vs, so a slice spread into this call becomes the Vector's storage and
-// the caller should not use it afterwards. To keep using it, spread a copy:
-// NewVector(slices.Clone(mine)...).
+// NewVector creates a Vector containing vs. The Vector copies vs and does
+// not retain it; the caller remains free to modify the slice afterwards.
 func NewVector[T any](vs ...T) *Vector[T]
 ```
 
-**So D does not rename its constructors; it documents them.** Six of six say the
-name stays plain, and a `NewVectorOwned` would be the only such name in a
-library shaped like the standard one. The distinctness is carried by the
-*pairing* instead: `KeySlice()` announces "a fresh copy you own" on the producing
-side, so `NewVector(d.KeySlice()...)` reads as a matched handoff and
-`NewVector(mine...)` reads as a decision — the spread operator being the
-marker the plain `[]T` form could not provide.
+That is the wording D ships. The template above is what an adopting constructor
+would need, and is kept here for the ADR that adds one.
+
+**Read against D's actual decision, this evidence points the other way — and
+that is worth being explicit about.** Six of six precedents keep the name plain
+*because ownership transfer is that function's only mode*: there is one
+`bytes.NewBuffer`, and it always adopts. D has chosen the opposite default, so
+`New*` will already mean "copies" across the whole package. A later adopting
+constructor therefore **cannot** be plain-named without making two `New*`
+functions behave differently — the exact thing this decision exists to prevent.
+
+So the precedent's real lesson for D is narrower than it first appears: **name
+the mode that is not the default.** The doc template still applies verbatim to
+whatever that function ends up called, and `slices.Clone` remains the caller's
+escape hatch — but the naming conclusion inverts once the default does.
 
 **One disanalogy, recorded so it is not discovered later.** In all six
 precedents the argument is a purpose-built thing whose reason for existing is to
@@ -2319,47 +2320,53 @@ live caller data. The mechanic is identical; the blast radius is not.
 function where D would be every constructor. The `...` at the call site narrows
 this — a literal call transfers nothing — but it does not close it.
 
-**Which suggests the split D should adopt**: transfer ownership in the
-**constructors only**, and let the mutating bulk methods copy.
+**D adopts nothing, for this iteration.** Every `New*` constructor copies its
+input, matching the `io` default that a callee does not retain what it is
+handed. The precedent above is not wasted — it is what a *later* ADR would cite
+if the optimisation is wanted — but D as proposed does not spend it.
 
-```go
-func NewVector[T any](vs ...T) *Vector[T]       // takes ownership
-func (v *Vector[T]) AppendAll(vs ...T)          // copies; does not retain vs
-```
+**Why the uniform non-owning rule wins here**, beyond the obvious virtue that
+every constructor named `New*` then does the same thing:
 
-A constructor is installing a slice *as* the container's contents, which is
-precisely `bytes.NewBuffer`'s case. `AppendAll` is copying into storage that
-already exists and has no reason to retain anything, so it keeps the `io`
-default. That split costs D nothing measurable — appending into existing storage
-was always a copy — and confines the surprising rule to the one place with six
-precedents behind it.
+- **Two hazards stop existing rather than being managed.** The capacity leak
+  above — `src[:2]` arriving as len 2, cap 1024 — needs no `slices.Clip`, because
+  nothing is retained to leak through. And `NewSortedSet(mine...)` can no longer
+  reorder the caller's slice, because it sorts its own copy.
+- **The per-container asymmetry disappears.** Adoption is a property of the
+  backing store: it is worth the measured win for `Vector`, `SortedSet` and
+  `SortedDict`; it is worth **nothing at all** for `HashSet`, `HashDict` and
+  `Map`, which must insert element by element regardless and have no slice to
+  adopt. A uniform owning rule would have asked callers for vigilance that half
+  the containers could not repay. A uniform non-owning rule costs those three
+  containers nothing.
+- **The door stays genuinely open.** Adding a function is not a breaking change,
+  so an adopting constructor can arrive later under its own name, against a
+  measured call site rather than in anticipation — which is the same standard
+  this ADR applied when it removed A's `AsSlice`.
 
-**Open: the rule does not mean the same thing for every container.** Adoption is
-a property of the *backing store*, and this package has two kinds:
+**What it costs**, stated against the numbers already gathered. The shipped
+figure for D is the *copying* column, so D against A becomes:
 
-| container | backing | what "takes ownership" would mean | worth |
-|---|---|---|---|
-| `Vector` | slice | the slice becomes the storage | the measured 1.16x-1.70x |
-| `SortedSet`, `SortedDict` | sorted slice | the storage, **after sorting it in place** | the same win |
-| `HashSet`, `HashDict`, `Map` | map | **nothing** — the elements must be inserted one at a time | nothing |
+| | A | D, as proposed |
+|---|---|---|
+| map keys → vector | 8.097 µs, 6 allocs | 8.766 µs, 2 allocs — **8% slower** |
+| slice → vector | 3.305 µs, 6 allocs | 3.835 µs, 2 allocs — **16% slower** |
+| → map-backed set | 14.99 µs, 11 allocs | 14.17 µs, 7 allocs — **5% faster** |
+| 1 KiB values ×256 | 36.10 µs, 256 KiB | 64.02 µs, 512 KiB — **77% slower** |
 
-Two consequences, and this ADR does not yet choose between them:
+**D's performance case against A therefore mostly evaporates, and its
+simplicity case does not.** On narrow elements the two are within noise of each
+other in either direction; D still uses a third of the allocations. The one real
+loss is **wide elements, where copying twice costs 77% and doubles peak
+memory** — and that is exactly the call site a future adopting constructor would
+be introduced to fix, with a measurement already waiting for it.
 
-- **For the hash containers the rule is pure cost.** A map cannot adopt a slice,
-  so `NewHashSet(mine...)` has to walk it and insert regardless. The measurement
-  shows this directly: the map-backed row is the one with no adopting column,
-  because there was nothing to adopt. Documenting ownership there asks callers
-  for vigilance that buys them nothing.
-- **For the sorted containers ownership means mutation, not just retention.**
-  `NewSortedSet(mine...)` adopting would **reorder the caller's slice**, and
-  compaction would drop elements from it. "The caller should not use it
-  afterwards" understates that; the stdlib's own fuller wording — "may edit or
-  overwrite it", "may mutate its fields" — is the honest phrasing, and is what
-  `go/doc.New` and `zip.CreateHeader` already say.
-
-The choice is between **one uniform rule** that is over-broad for half the
-containers, and a **per-container rule** that is accurate but means the reader
-must know the backing store to know what a constructor does with their data.
+**Shape of the deferred optimisation**, so the later ADR starts from something:
+an adopting constructor should take **`[]T`, not `...T`**. Adoption is
+meaningless for a literal call, and the plain slice parameter makes the handover
+explicit at the call site instead of hiding it behind a spread. Naming is that
+ADR's problem; the six precedents above say it will be tempted to leave the name
+plain, and this package should not, because `New*` will already mean "copies".
 
 **What D costs, beyond ownership:**
 
@@ -2512,7 +2519,10 @@ nil-collector question, no drain-before-delete hazard, and the size exact by
 construction rather than plumbed. Its cost is a second set of methods per
 container, doubled peak memory unless it adopts, and no streaming at all.
 
-**It is also the strongest rival A has.** B was measured and did not clear its
-own bar. C gave up 2.7x-3.7x. D, adopting, is **faster than A on every case
-measured** while being dramatically smaller — and the reason to hesitate is not
-performance but the ownership rule it needs to get there.
+**It is also the strongest rival A has**, though on simplicity rather than on
+speed. B was measured and did not clear its own bar. C gave up 2.7x-3.7x. D as
+proposed is **within 16% of A on narrow elements in either direction, 77% slower
+on wide ones, and uses a third of the allocations** — while replacing eight named
+types and eight free functions with one struct and none. The performance case
+it could have made is deferred, deliberately, to keep every `New*` meaning one
+thing.
