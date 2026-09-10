@@ -872,7 +872,6 @@ learns which.
 ```go
 type Collector[T any] interface {
 	SizeHint() (int, bool)
-	AsSlice() []T
 	AsSeq() iter.Seq[T]
 	sealedCollector()
 }
@@ -884,11 +883,23 @@ type Collector2[K, V any] interface {
 }
 ```
 
-`SizeHint` reports whether it knows, so "empty" and "unknown" stop being the same
-answer, and a constructor forwards the source's hint rather than calling a
-length. `AsSlice` returns nil when the entries were not a slice
-to begin with, so a consumer can take a memmove fast path when one is available
-and fall back otherwise. `AsSeq`/`AsSeq2` always work.
+Two methods each, and the two are symmetric. `SizeHint` reports whether it knows,
+so "empty" and "unknown" stop being the same answer, and a constructor forwards
+the source's hint rather than calling a length. `AsSeq`/`AsSeq2` are the only way
+to read the entries.
+
+**There is deliberately no `AsSlice`.** An earlier draft had one, so that a
+consumer whose source was already a slice could take a memmove instead of an
+iterator. It was removed as premature: it is worth **1.9x** to a consumer that
+*retains* what it collects and **nothing measurable** to one that does not — and
+it cost an aliasing hazard, an ownership vocabulary (`Items` versus a
+no-copy variant), and a rule about when a returned slice may be kept.
+
+The option stays open at no cost. `Collector` is sealed, so **adding a method to
+it later is not a breaking change** — nothing outside this package implements
+one, which ADR `0013` established when it chose sealed view interfaces. If a
+measured call site ever wants the 1.9x, `AsSlice` can be reintroduced then,
+against evidence rather than in anticipation.
 
 **Sources.** A container advertises which shapes it can produce:
 
@@ -1167,17 +1178,11 @@ adds reverse and sub-ranges on top.
 
 **Rules settled while reviewing the proposal:**
 
-- **`AsSlice` returns non-nil only for a collector built from a caller-owned
-  slice** — `Items(vs...)`, or `ItemsFrom` over one. It never exposes a
-  container's backing array, which would hand out the interior ADR `0001` exists
-  to protect and `Vector` was built to own.
 - **`KeysOf` requires a native `Keys()`; it does not fall back to deriving from
   `All()`.** A container that wants to be a key source provides the method. This
   makes proposal A **depend on direction 1A** rather than merely preferring it,
   and the dependency is deliberate: the fallback would silently cost 14.9x at
   wide values.
-- **`Collector2` has no `AsSlice`**, because there is no natural contiguous form
-  for pairs. Stated so the asymmetry does not read as an oversight.
 - **Reusability follows `iter.Seq`, and is not specified.** A collector over a
   container can be walked repeatedly; one over a single-use iterator cannot, and
   nothing in the interface distinguishes them. This inherits ADR `0006`'s
@@ -1187,24 +1192,17 @@ adds reverse and sub-ranges on top.
   `Values()` — to satisfy `HoldsValues[T]` and work with `ValuesOf`; a `Len()`
   alongside it is picked up as a size hint. Sealing only prevents implementing
   `Collector`, which nothing needs to do.
-- **No consumer-side helper is provided.** A `Collector` carries both an
-  `AsSlice` and an `AsSeq`, so a consumer *may* branch on which is available —
-  but nothing in the package does it for them. `AsSeq` always works, and that
-  guarantee is what makes the absence of a helper acceptable: a consumer with no
-  opinion writes one loop and takes the hit.
+- **There is one way to read a collector, so there is nothing for a helper to
+  hide.** An earlier draft gave `Collector` an `AsSlice` alongside `AsSeq`, which
+  raised the question of whether the package should provide a helper to branch
+  between them. Removing `AsSlice` removes the question: every consumer writes
+  one loop over `AsSeq`.
 
-  The hit is small where it lands and large where it matters, which is why this
-  is not a shortcut. Against a **map-backed** target the branch is worth ~15%,
-  since a map insert at ~13 ns dominates the iterator's ~1 ns. Against a
-  **slice-backed** target it is worth ~2x, because there the fast path is a
-  memmove rather than a cheaper loop. So the branch gets hand-written in the two
-  or three places it is worth 2x, and skipped everywhere it is worth 15%.
-
-  A callback helper was measured at 4–8% over a hand-written branch — cheap
-  enough to be viable, and rejected anyway, because it earns its keep only in the
-  cases that will be hand-written regardless. A helper that materialises a slice
-  was rejected outright: it is the best option when the collector already has a
-  slice and the worst when it does not.
+  The measurements that informed that draft are kept, because they bound what was
+  given up. A hand-written branch beat an `AsSeq`-only consumer by ~15% against a
+  map-backed target and ~2x against a slice-backed one; a callback helper cost
+  4–8% over hand-writing it. Those are the numbers to re-read if `AsSlice` is
+  ever reintroduced.
 - **`Elems` and `Elems2` are removed**, not renamed or kept as aliases.
   `HoldsValues[T]` is `Elems[T]` with `All` renamed and the length dropped;
   `HoldsAll[K, V]` is `Elems2[K, V]` likewise. ADR `0006` says their purpose *is*
@@ -1234,7 +1232,6 @@ type RangeAll[K, V any] interface { HoldsAll[K, V]; Backward() HoldsAll[K, V] }
 // The primitive.
 type Collector[T any] interface {
 	SizeHint() (int, bool)
-	AsSlice() []T
 	AsSeq() iter.Seq[T]
 	sealedCollector()
 }
@@ -1265,10 +1262,9 @@ func (d *SortedDict[K, V]) Range(lo, hi K) RangeAll[K, V]
 |---|---|
 | `HoldsAll` embeds `HoldsKeys` and `HoldsValues` | so pair sources must offer cheap half-walks, and `Backward` needs no interface of its own |
 | a set is a `HoldsKeys` | its element is its key; `ValuesOf(set)` does not compile |
-| `AsSlice` is non-nil only for caller-owned slices | never a container's backing array |
+| there is **no** `AsSlice` | premature: 1.9x to a retaining consumer, nothing to others, against an aliasing hazard and an ownership vocabulary. Sealed, so it can be added later without breaking anyone |
 | `KeysOf` requires a native `Keys()` | no silent fallback to deriving, which would cost 14.9x at wide values |
-| `Collector2` has no `AsSlice` | pairs have no contiguous form |
-| no consumer-side helper | `AsSeq` always works; the branch is hand-written where it is worth ~2x and skipped where it is worth ~15% |
+| no consumer-side helper | there is one way to read a collector, so there is nothing to hide |
 | `SizeHint() (int, bool)` on `Collector`; nothing about size on the sources | "empty" and "unknown" stop being the same answer, and the sources stay clean |
 | the size is an optional `CanLen`, found by assertion | absence is expressed by absence, and `Len()` is the spelling containers already have |
 | a sub-range holds **key** bounds and declines a hint | 3.4 ns to construct against 48.5 ns, and correct when the container changes |

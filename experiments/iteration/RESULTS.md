@@ -144,6 +144,10 @@ the native walk.
 
 ## 6. How much a consumer's fast path is worth, by target
 
+> **Not adopted.** ADR `0017`'s proposal A dropped `AsSlice` from `Collector`, so
+> there is no branch for a consumer to take. These numbers bound what that gave
+> up, and are the evidence to re-read if it is ever reintroduced.
+
 Proposal A gives a `Collector` both an `AsSlice` and an `AsSeq`, so every
 consumer could branch on which is available. Building a 1024-entry map:
 
