@@ -1026,6 +1026,44 @@ func (d *SortedDict[K, V]) Backward() HoldsAll[K, V]
 func (d *SortedDict[K, V]) Range(lo, hi K) RangeAll[K, V]
 ```
 
+### What happens to the existing mutators
+
+The consumer list above shows the bulk methods and is silent on the rest, which
+leaves the obvious question: does a `Collector` subsume `Append`, or sit beside
+it? Measured, and the answer differs by arity.
+
+| | | allocs |
+|---|---|---|
+| `v.Append(1)` | **1.229 ns** | 0 |
+| `v.AppendAll(Items(1))` | **60.60 ns** | 144 B |
+| `v.AppendMany(src...)` — 1024 ints | **2.860 µs** | — |
+| `v.AppendAll(Items(src...))` | 4.196 µs | — |
+
+**Single-element mutators survive.** A `Collector` for one element is **49x** the
+direct call and allocates 144 bytes to carry it. `Append(e T)`, `HashSet.Add`,
+`HashDict.Set` and the rest stay exactly as they are; nothing about this proposal
+touches them.
+
+**The `*Seq` twins are subsumed.** `AppendAllSeq(seq)` becomes
+`AppendAll(ItemsFrom(seq))`, and likewise `AddAllSeq` and `SetAllSeq`. That is
+direction 2B, and it halves that half of the surface.
+
+**`AppendAll` changes its argument** from `Elems[T]` to `Collector[T]`, which is
+the whole point.
+
+**A variadic bulk form is still worth having, and less than ADR `0015` thought.**
+Its follow-up measured `AppendMany(es ...T)` at 2.1x the alternatives for
+appending a plain slice. Against a `Collector` it is **1.47x**, because a
+collector carries a size hint where the bare iterator it was compared against did
+not — so most of that gap was the missing presize, and the residual is memmove
+against per-element iteration. Whether 1.47x justifies a fourth method on
+`Vector` is a judgement this ADR does not make; it belongs to `0015`'s
+mutator-consistency follow-up, now better informed.
+
+Note this is the cost that `AsSlice` would have recovered. Removing it as
+premature and keeping `AppendMany` are two answers to the same question, and
+only one of them needs to be taken.
+
 **Caller code:**
 
 ```go
