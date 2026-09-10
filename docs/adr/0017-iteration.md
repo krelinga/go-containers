@@ -957,17 +957,35 @@ Verified: a container reports `(3, true)`, a key-bounded sub-range with no `Len`
 method reports `(0, false)`, a reversed container reports `(3, true)`, and all
 three collect correctly.
 
-The embedding is not just tidiness. It means **anything that can produce pairs
-must offer a cheap key-only and value-only walk**, which is what stops
-`KeysOf(dict)` falling back to deriving and paying 14.9x at wide values. A source
-that genuinely has only pairs — a zip of two iterators, say — goes through
-`AllFrom(seq)` and never claims to be a `HoldsAll`.
+The embedding is not just tidiness. It means anything that can produce pairs
+must *offer* a key-only and value-only walk, which is what stops `KeysOf(dict)`
+falling back to deriving and paying 14.9x at wide values. A source that genuinely
+has only pairs — a zip of two iterators, say — goes through `AllFrom(seq)` and
+never claims to be a `HoldsAll`.
+
+**The interface requires the method, not that it be cheap**, and that distinction
+is worth stating because the 14.9x rests on it. This satisfies `HoldsAll` and
+pays the full cost:
+
+```go
+func (d *lazyDict) Keys() iter.Seq[string] {
+	return func(y func(string) bool) {
+		for k := range d.All() { if !y(k) { return } }   // copies every value
+	}
+}
+```
+
+Nothing catches that. It is a convention — a `Keys()` walks keys without
+materialising values — and unlike `Len()`'s cheapness, which Go establishes
+everywhere, this one is local to this package and has no precedent to lean on.
+It wants stating on `HoldsKeys` and `HoldsValues`, and it is the thing to check
+when a container is added.
 
 **A set is a `HoldsKeys`, not a `HoldsValues`**, per problem 4's taxonomy: a
 set's element is its key, and a set has no value. So `KeysOf(mySet)` is the
 spelling and `ValuesOf(mySet)` does not compile.
 
-**Constructors.** Six, covering every source:
+**Constructors.** Eight, covering every source:
 
 ```go
 func KeysOf[T any](h HoldsKeys[T]) Collector[T]
@@ -976,12 +994,21 @@ func AllOf[K, V any](h HoldsAll[K, V]) Collector2[K, V]
 func ItemsFrom[T any](seq iter.Seq[T]) Collector[T]
 func AllFrom[K, V any](seq iter.Seq2[K, V]) Collector2[K, V]
 func Items[T any](vs ...T) Collector[T]
+
+// For a caller who has an iterator and knows how long it is.
+func ItemsFromSized[T any](n int, seq iter.Seq[T]) Collector[T]
+func AllFromSized[K, V any](n int, seq iter.Seq2[K, V]) Collector2[K, V]
 ```
 
 What each reports for size: `KeysOf`, `ValuesOf` and `AllOf` forward whatever the
 source's `CanLen` says, or `(0, false)` when it has none. `Items` knows its own
-length, so `(len(vs), true)`. `ItemsFrom` and `AllFrom` take a bare iterator and
-report `(0, false)`.
+length, so `(len(vs), true)`. `ItemsFrom` and `AllFrom` report `(0, false)`, and
+the `Sized` pair report `(n, true)`.
+
+The `Sized` pair exists because `Collector` is sealed: a caller reading *n*
+records, or holding a length from anywhere else, otherwise has no way to say so
+and no way to implement a collector that could. A wrong `n` costs an allocation
+and never a wrong result, per ADR `0006`.
 
 **Consumers.** One per container, not one per source shape:
 
@@ -1167,9 +1194,27 @@ Three consequences worth stating:
   The cost is that a sub-range of a `Vector` has no spelling: `At(i)` in a loop
   works and gives up bounds-check elimination. Recorded as a follow-up rather
   than solved.
-- **A sub-range cannot be sub-ranged.** `RangeAll` has no `Range` of its own, so
-  `sd.Range(a, b).Range(c, d)` is a compile error. Deliberate, and the same shape
-  as `Backward()` returning a source with no `Backward()`.
+- **A sub-range cannot be sub-ranged**, and generic code over a `RangeAll` cannot
+  narrow one either. `RangeAll` has no `Range` of its own, so
+  `sd.Range(a, b).Range(c, d)` is a compile error.
+
+  An earlier draft justified that as "the same shape as `Backward()` returning a
+  source with no `Backward()`". It is not the same shape: reversing a reverse is
+  *identity*, so forbidding it costs nothing, while narrowing a narrow is
+  meaningful — `Range("a","z").Range("m","p")` is just `Range("m","p")`.
+
+  Nor is it a language limit. A recursive declaration compiles:
+
+  ```go
+  type RangeAll[K, V any] interface {
+      HoldsAll[K, V]
+      Backward() HoldsAll[K, V]
+      Range(lo, hi K) RangeAll[K, V]   // legal; K need not be constrained here
+  }
+  ```
+
+  It is left out for now to keep the interface minimal, and recorded as something
+  to revisit rather than as something settled.
 - **Boxing costs differ.** A container into a `RangeAll` is **0 allocations**,
   being a pointer; a sub-range is **1**, being a pointer plus two indices and so
   not pointer-shaped. Today's `Range` returns a closure, which allocates too, so
@@ -1183,7 +1228,7 @@ This also answers ADR `0013`'s deferred "should `Range` return a view?". It
 returns a *source*, which is enough: a source offers iteration and nothing else,
 so there is no mutation to deny and no seal to need.
 
-**Surface.** Six constructors, one `Collect` and one bulk method per container,
+**Surface.** Eight constructors, one `Collect` and one bulk method per container,
 plus `Backward` on the ordered ones and `Range` on the sorted ones — roughly
 thirty declarations for the whole proposal, of which about twenty are what
 direction 5A's eighteen functions were trying to do. 5A covered a third of the
@@ -1197,11 +1242,26 @@ adds reverse and sub-ranges on top.
   makes proposal A **depend on direction 1A** rather than merely preferring it,
   and the dependency is deliberate: the fallback would silently cost 14.9x at
   wide values.
-- **Reusability follows `iter.Seq`, and is not specified.** A collector over a
-  container can be walked repeatedly; one over a single-use iterator cannot, and
-  nothing in the interface distinguishes them. This inherits ADR `0006`'s
-  existing non-guarantee and makes it more visible, so it wants documenting on
-  `Collector` itself.
+- **A collector is single-pass unless its source says otherwise, and this is
+  documented on `Collector`.** One over a container can be walked repeatedly; one
+  over `ItemsFrom(seq)` cannot, and nothing in the interface distinguishes them —
+  a second `AsSeq()` pass over a spent iterator yields **nothing, silently**.
+  That sits badly with a package that has otherwise paid for loud failure, and
+  there is no way to catch it in the type system, so it is stated instead: *a
+  consumer reads a collector once.*
+- **A nil `Collector` panics when used, and nothing checks for it.** `var c
+  Collector[int]` is a nil interface, so `CollectVector(c)` panics on first use.
+  Same rule as ADR `0013` decision 8 for views, restated here so it is not
+  rediscovered.
+- **Bulk methods dereference their receiver eagerly, and constructors dereference
+  the collector eagerly.** ADR `0002`'s rule, which this proposal is unusually
+  exposed to: `AppendAll`, `AddAll` and `SetAll` all take an argument that can
+  legitimately be empty, and the natural implementation — range the collector,
+  insert — never touches the receiver when it is. Verified: a nil `*Vector` with
+  an empty collector does **not** panic that way, and does once the receiver is
+  read on a path that always runs. The rule has been broken three times in this
+  package; a new method family taking a possibly-empty argument is exactly where
+  it breaks again.
 - **Sealing costs callers nothing.** A caller's own type needs one method —
   `Values()` — to satisfy `HoldsValues[T]` and work with `ValuesOf`; a `Len()`
   alongside it is picked up as a size hint. Sealing only prevents implementing
@@ -1255,13 +1315,15 @@ type Collector2[K, V any] interface {
 	sealedCollector()
 }
 
-// Six constructors.
+// Eight constructors.
 func KeysOf[T any](h HoldsKeys[T]) Collector[T]
 func ValuesOf[T any](h HoldsValues[T]) Collector[T]
 func AllOf[K, V any](h HoldsAll[K, V]) Collector2[K, V]
 func ItemsFrom[T any](seq iter.Seq[T]) Collector[T]
 func AllFrom[K, V any](seq iter.Seq2[K, V]) Collector2[K, V]
 func Items[T any](vs ...T) Collector[T]
+func ItemsFromSized[T any](n int, seq iter.Seq[T]) Collector[T]
+func AllFromSized[K, V any](n int, seq iter.Seq2[K, V]) Collector2[K, V]
 
 // One Collect and one bulk method per container, plus Backward where ordered.
 func CollectVector[T any](c Collector[T]) *Vector[T]
@@ -1279,6 +1341,10 @@ func (d *SortedDict[K, V]) Range(lo, hi K) RangeAll[K, V]
 | there is **no** `AsSlice` | premature: 1.9x to a retaining consumer, nothing to others, against an aliasing hazard and an ownership vocabulary. Sealed, so it can be added later without breaking anyone |
 | `KeysOf` requires a native `Keys()` | no silent fallback to deriving, which would cost 14.9x at wide values |
 | no consumer-side helper | there is one way to read a collector, so there is nothing to hide |
+| bulk methods deref the receiver eagerly; constructors deref the collector eagerly | ADR `0002`'s rule, and a possibly-empty argument is exactly where it breaks |
+| a collector is single-pass unless its source says otherwise | a second `AsSeq()` over a spent iterator yields nothing, silently; stated because the type system cannot catch it |
+| a nil `Collector` panics on use, and nothing checks | as ADR `0013` decision 8 for views |
+| `HoldsAll` requires the half-walks but cannot require them to be *cheap* | a conforming `Keys()` may derive from `All()`; the 14.9x rests on a convention, so it is stated on the interfaces |
 | `SizeHint() (int, bool)` on `Collector`; nothing about size on the sources | "empty" and "unknown" stop being the same answer, and the sources stay clean |
 | the size is an optional `CanLen`, found by assertion | absence is expressed by absence, and `Len()` is the spelling containers already have |
 | a sub-range holds **key** bounds and declines a hint | 3.4 ns to construct against 48.5 ns, and correct when the container changes |
