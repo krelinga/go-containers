@@ -3,13 +3,14 @@ package refcontainers
 import "testing"
 
 var (
-	sinkBool  bool
-	sinkInt   int
-	sinkStrs  []string
-	sinkStr   string
-	sinkBase  structSetView[string]
-	sinkIface ifaceSetView[string]
-	sinkWrap  wrapSetView[string]
+	sinkBool   bool
+	sinkInt    int
+	sinkStrs   []string
+	sinkStr    string
+	sinkOBBase obSetView[string]
+	sinkBase   structSetView[string]
+	sinkIface  ifaceSetView[string]
+	sinkWrap   wrapSetView[string]
 )
 
 const n = 64
@@ -571,6 +572,69 @@ func BenchmarkNilCheckedIterator(b *testing.B) {
 				c++
 			}
 			sinkInt = c
+		}
+	})
+}
+
+// 9. Option (b) with the hierarchy recovered by embedding rather than a
+// conversion method: is a promoted call, or a field-selector conversion, free?
+func BenchmarkOptionBEmbedding(b *testing.B) {
+	ps := newPtrSet(fixture(n)...)
+	probe := fixture(n)[n/2]
+	sv := viewOBSorted(ps)
+	base := sv.SetView
+	iv := viewIfaceSorted(ps)
+
+	b.Run("Has/direct-on-base", func(b *testing.B) {
+		for b.Loop() {
+			sinkBool = base.Has(probe)
+		}
+	})
+	b.Run("Has/promoted-through-ordered", func(b *testing.B) {
+		for b.Loop() {
+			sinkBool = sv.Has(probe)
+		}
+	})
+	b.Run("Has/through-iface-embedding", func(b *testing.B) {
+		for b.Loop() {
+			sinkBool = iv.Has(probe)
+		}
+	})
+	b.Run("substitute/iface-embedding", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkIface = iv
+		}
+	})
+	b.Run("substitute/struct-field-selector", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkOBBase = sv.SetView
+		}
+	})
+
+	// The zero-value read path, which every method now carries.
+	var zero obSet[string]
+	full := newOBSet(fixture(n)...)
+	b.Run("zero/Len", func(b *testing.B) {
+		for b.Loop() {
+			sinkInt = zero.Len()
+		}
+	})
+	b.Run("full/Len", func(b *testing.B) {
+		for b.Loop() {
+			sinkInt = full.Len()
+		}
+	})
+	b.Run("full/Has", func(b *testing.B) {
+		for b.Loop() {
+			sinkBool = full.Has(probe)
+		}
+	})
+	b.Run("full/KeySlice", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkStrs = full.KeySlice()
 		}
 	})
 }

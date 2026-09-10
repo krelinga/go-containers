@@ -154,6 +154,41 @@ Ranging over the inner sequence and re-yielding builds a second closure; passing
 `yield` straight to it does not. **The full rule: the check goes inside the
 returned closure, and the closure must not re-yield.**
 
+## 6. A complete option (b): embedding, and builtin-matching zero values
+
+The hierarchy cost softens considerably when ordered views **embed** the base
+view rather than carrying a conversion method:
+
+| | |
+|---|---|
+| `Has` directly on the base view | 5.551 ns |
+| `Has` promoted through the ordered view | 5.602 ns |
+| `Has` through today's interface embedding | 5.505 ns |
+| substitute ordered → base, interface embedding | 0.6395 ns |
+| substitute ordered → base, **struct field selector** | **0.2812 ns** |
+
+Promotion is free, and the field selector is **2.3x cheaper than the interface
+embedding it replaces**. `TestEmbeddingRecoversSubstitution` confirms the base
+methods are callable directly on the ordered view, that `sv.SetView` converts,
+and that the result composes into a `[]SetView`.
+
+The nil-checked reads cost nothing either: `Len` is 0.3746 ns on a zero value
+against 0.4138 ns on a populated one, and `Has` is 4.954 ns.
+
+**Two semantic results, verified rather than argued.**
+
+`TestZeroValueMatchesNilMap` asserts a zero reference container against a nil
+`map[string]struct{}` operation by operation — `Len`, lookup, iteration,
+materialisation, and write. They agree on all five, including that both panic on
+a write. **A zero container is indistinguishable from a nil map.**
+
+`TestLazyInitDiverges` prices the alternative that would keep ADR `0002`'s
+usable zero value: mixed receivers, so a write lazily constructs the state. It
+works — and a copy taken before the first write does not share, giving
+`original=1, copy=0`. **That is the exact divergence `noCopy` exists to catch,
+reintroduced with the guard removed**, which is why pure value receivers and a
+read-only zero value are forced rather than chosen.
+
 ## Durable / perishable
 
 **Durable.** A reference struct is free relative to a pointer, on any method

@@ -1,8 +1,11 @@
 # 18. Containers as reference types, reconsidered
 
-- **Status:** **Rejected — on a narrower basis than ADR `0014` gave.** The status
-  quo stands. But `0014`'s *decisive* argument is dead, and what replaces it is
-  weaker, so this should be read as a closer call than the one it supersedes.
+- **Status:** **Rejected — on a narrower basis than ADR `0014` gave, and closer
+  than `0014` was.** The status quo stands. `0014`'s *decisive* argument is dead:
+  option (b) is now free on every measured path and coherent as a design, so it
+  is rejected on the balance of its API costs rather than on cost or feasibility.
+  **Option (b) is built out in full below**, including how it would match builtin
+  map semantics, because it is the version a future attempt should start from.
 - **Date:** 2026-09-10
 - **Supersedes:** ADR **`0014`**, which is now historical. Its measurements
   remain valid; its conclusion is reached here by a different route, and two of
@@ -178,11 +181,12 @@ cost**, which is precisely what has changed since `0014`: it used to carry a
 
 **What it costs in API shape, which is where it is actually decided.**
 
-- **ADR `0013` decision 2 dies.** An ordered view can no longer be handed to a
-  base-typed boundary implicitly — struct embedding is not subtyping. Every
-  ordered-to-base call site grows a `.Set()` or `.Dict()`, and a
-  `SortedDictView` cannot enter a `[]DictView` at all without one. Free at
-  runtime; a constant tax to read and write.
+- **ADR `0013` decision 2 becomes explicit rather than implicit.** An ordered
+  view can no longer be handed to a base-typed boundary without saying so. This
+  is the cost that softens most under a complete design — struct embedding
+  promotes the base methods and makes the conversion a *field selector* rather
+  than a method call, and it still composes into a `[]SetView`. See the section
+  below. What remains is that the selector must be written.
 - **Both sides need nil checks, or their zero values disagree.** This is the
   cost most easily missed, and it was found by testing rather than reasoning: a
   zero reference container reads as empty by design, but a zero `struct{iface}`
@@ -215,6 +219,170 @@ sequence and re-yields builds a **second** closure — 481.9 ns and 5 allocation
 against 404.8 ns and 3 for handing `yield` straight through. The full rule is
 now recorded in `experiments/refcontainers/`: **the check goes inside the
 returned closure, and the closure must not re-yield.**
+
+### What a complete option (b) would look like
+
+The costs above are individually small and collectively a design, so this
+section builds the whole thing rather than listing objections. **Consistency is
+the point**, and the target is stated precisely: *a container's zero value
+behaves exactly as the builtin it is standing in for.*
+
+#### The single rule: reads are total, writes panic
+
+That is nil-map behaviour, and it is one sentence rather than a table of special
+cases:
+
+```go
+var s HashSet[int]
+s.Len()              // 0
+s.Has(1)             // false
+for range s.Keys() {}  // no iterations
+s.KeySlice()         // nil
+s.IsZero()           // true
+s.Add(1)             // panics
+```
+
+Asserted side by side against a nil `map[string]struct{}` rather than by
+inspection — `Len`, lookup, iteration, materialisation and write all agree
+(`experiments/refcontainers`, `TestZeroValueMatchesNilMap`). **A zero container
+is indistinguishable from a nil map on every operation.**
+
+**`Vector` follows the same rule, and the slice analogy does not break it.**
+Appending to a nil slice works, so a first reading says `Vector.Append` on a zero
+value should too. It should not, and the reason is that `append` is not a
+mutation — it *returns* a new slice, and the caller reassigns. The operation
+`v.Append(e)` mutates in place, so its builtin counterpart is `m[k] = v`, which
+panics. `v.At(0)` panics as `s[0]` on a nil slice does, because index 0 is out of
+range for anything empty. One rule covers both backings.
+
+#### Why the zero value cannot also be writable
+
+The obvious mitigation is mixed receivers: value receivers for reads, pointer
+receivers for writes, so a write lazily constructs the state and ADR `0002`'s
+usable zero value survives intact.
+
+**It reintroduces exactly the bug reference semantics exists to remove.**
+Demonstrated rather than argued (`TestLazyInitDiverges`):
+
+```go
+var b lazySet[string]
+c := b        // copy of a zero value
+b.Add("one")  // lazily constructs b's state; c still has none
+// b.Len() == 1, c.Len() == 0
+```
+
+A copy taken before the first write does not share. That is the divergence
+`noCopy` exists to catch, and it would be back with the guard removed. **So pure
+value receivers, and a read-only zero value, is not a preference — it is forced.**
+
+#### Recovering the view hierarchy with embedding, not a conversion method
+
+The version of option (b) priced earlier gave ordered views a `.Set()` method.
+Struct **embedding** is better on every axis:
+
+```go
+type SortedSetView[T any] struct {
+	SetView SetView[T]
+}
+```
+
+- **Base methods are promoted**, so `sv.Has(x)` and `sv.Len()` work directly with
+  nothing written — measured at 5.602 ns against 5.551 ns calling the base
+  directly, and 5.505 ns through today's interface embedding. Identical.
+- **The conversion is a field selector**, `sv.SetView`, not a method call. It
+  reads as what it is, and at 0.2812 ns it is **2.3x cheaper than the interface
+  embedding it replaces** (0.6395 ns).
+- **It composes.** `[]SetView[T]{sv.SetView, other}` compiles, which was the
+  concrete thing ADR `0013` decision 2 bought and the thing a `.Set()` method
+  made awkward.
+
+Verified in `TestEmbeddingRecoversSubstitution`. What remains is that the
+selector must be *written*: substitution is explicit rather than implicit. That
+is the whole of the hierarchy cost, and it is now a field access rather than a
+method call.
+
+#### `IsZero` is provided and rarely needed
+
+Because reads are total, **the question a caller actually has is `Len() == 0`**,
+and that works uniformly on every container and every view without knowing
+whether either was constructed. `IsZero()` answers a narrower question — *was
+this ever constructed* — which is exactly as rare as `m == nil` is for maps, and
+exists for the same reason: parity with the builtin, not daily use.
+
+That reframes the "two spellings" argument that ADR `0014` built its rejection
+on. Under a complete option (b) there is one *emptiness* spelling (`Len() == 0`),
+one *never-constructed* spelling (`IsZero()`), and both work everywhere. The
+status quo has `== nil` for never-constructed and `Len() == 0` for empty — the
+same two questions, differently spelled. **Option (b) does not add a vocabulary;
+it swaps an operator for a method on the rarer of the two.**
+
+#### What replaces `noCopy`
+
+Nothing, for the divergence class: it stops existing. The *opposite* hazard
+appears — sharing where a caller expected a copy — and no tool checks it. The
+mitigation is the one the library already has: every container carries `Clone()`,
+and the doc comment on each type says copies share. This is the same contract
+`Map` has carried since ADR `0009` without incident, extended to the rest.
+
+#### The consistency table this buys
+
+| | status quo | complete option (b) |
+|---|---|---|
+| container handle | `*HashSet[T]` (pointer) | `HashSet[T]` (one-word value) |
+| view handle | `SetView[T]` (interface) | `SetView[T]` (one-word value) |
+| representation at the boundary | **changes** | same |
+| copying a container | forbidden, `go vet` enforced | defined; copies share |
+| copylocks caveat | live, and outside `go test` | **gone** |
+| zero container, reads | **panics** | 0 / false / empty, as a nil map |
+| zero container, writes | works (addressable) | **panics**, as a nil map |
+| zero view, reads | panics | 0 / false / empty |
+| "is it empty" | `Len() == 0` | `Len() == 0` |
+| "was it constructed" | `== nil` | `IsZero()` |
+| ordered → base view | implicit (embedding) | `sv.SetView` (field selector) |
+| `HashDict` vs `Map` | two types, ADR `0007` asymmetry | **one type** |
+| set algebra on a contract | impossible | still impossible |
+
+#### What it would take
+
+Ordered by how much judgement each needs, not by size:
+
+1. **Reverse ADR `0002`'s usable-zero-value rule and narrow its
+   eager-dereference rule** to writes only. Both were written for pointer
+   receivers, where a nil receiver is unambiguously a bug; under reference
+   semantics the zero value becomes a meaningful state.
+2. **Accept the loss of error detection on unconstructed sources.**
+   `NewVector(src.KeySlice()...)` on a zero `src` yields an empty container
+   instead of panicking. This is `maps.Collect(nilMap)`'s behaviour and it is the
+   price of the rule in §1; ADR `0017` made the bulk path common enough that it
+   should be stated rather than discovered.
+3. **Delete `HashDict`, promote `Map`.** Their method sets are already identical
+   but for the constructor. Under option (b) the asymmetry that justified two
+   types is gone, so this stops being a separate question and becomes a
+   consequence.
+4. **Rewrite every container as `struct{ st *state }` with value receivers**, and
+   every view as `struct{ impl sealedImpl }`, with the nil check on every read
+   — inside the returned closure, handing `yield` through, per the refined
+   placement rule.
+5. **Re-embed the ordered views** and add the field selector at every
+   ordered-to-base call site.
+6. **Delete `noCopy`, `container_layout_test.go`, and the copylocks note in
+   `CLAUDE.md`.** Replace with a documented copies-share contract per type.
+7. **Rewrite `contracts.go`'s assertions** from `(*HashSet[int])(nil)` to
+   `HashSet[int]{}`.
+
+#### The honest summary
+
+**Option (b) is free at runtime, coherent as a design, and achievable.** What it
+costs is: one accepted ADR reversed (`0002`'s usable zero value), one accepted
+decision softened from implicit to explicit (`0013`'s substitution), a class of
+error detection traded for builtin-matching semantics, and a whole-library
+migration.
+
+What it buys is the thing this ADR keeps circling: **the library stops having two
+kinds of handle.** Whether that is worth the four costs above is a judgement
+about how much the container/view split actually hurts in practice — and the
+honest answer is that no call site in this repository currently demonstrates that
+it does. **That, not cost, is what option (b) is still waiting on.**
 
 ## Option (d): the entire public API as interfaces
 
@@ -323,16 +491,29 @@ without changing how every container is represented.
 
 **The status quo already has one nil spelling.** `*HashSet[T]` is a pointer and
 `SetView[T]` is an interface; `== nil` works on both, and neither needs a method.
-Option (a) *adds* a second vocabulary. Option (b) keeps one vocabulary but makes
-it a method call — measured identical to `== nil`, so a lateral move rather than
-an improvement — and spends ADR `0013` decision 2 to do it — an ordered view can
-no longer be handed to a base-typed boundary implicitly, and a `SortedDictView`
-cannot enter a `[]DictView` without an explicit conversion at every site.
+Option (a) *adds* a second vocabulary, and is dominated by (b) — there is no
+reason to take reference containers without also taking the view side, once the
+view side is free.
 
-**That conversion is free at runtime and not free to read.** The measurement says
-0.2825 ns. The cost is that every ordered-to-base call site grows a `.Dict()`,
-which is the kind of tax that is invisible in a benchmark and constant in a
-codebase.
+**Option (b) is the live alternative, and it is closer than this status
+suggests.** Built out in full above, it is free on every measured path, it
+matches nil-map semantics exactly on the zero value, and the hierarchy cost
+reduces to writing `sv.SetView` at ordered-to-base sites — a field selector that
+is itself 2.3x cheaper than the interface embedding it replaces. It is not
+rejected on cost or on coherence.
+
+**It is rejected on the balance of four API costs against one benefit.** Option
+(b) would reverse ADR `0002`'s usable zero value, make ADR `0013`'s substitution
+explicit, trade a class of error detection for builtin-matching semantics, and
+migrate the whole library. Against that it buys one thing: the library stops
+having two kinds of handle.
+
+**Nothing in this repository currently demonstrates that the two kinds of handle
+hurt.** Every call site in `callsites_test.go` crosses the container/view
+boundary without difficulty, because the crossing is a constructor call that was
+going to be written anyway. That is the missing evidence, and it is the same
+standard this library applies to every container it builds: **write the call site
+that hurts, then change the design.**
 
 **And ADR `0017` raised the price of total reads.** Under decision 3 of `0014`,
 reads on a zero container succeed and return empty. That is exactly
@@ -392,13 +573,27 @@ accepted:
 
 ## If this is revisited again
 
-The blocker is unchanged in kind and cheaper in degree: **how does a caller ask
-"is this handle empty" with one spelling across containers and views, without
-giving up ADR `0013`'s substitutability?** Two of the three historical answers to
-that are now cheaper than they were, which is why this ADR exists — but none of
-them is free, and the status quo answers the question with no method at all.
+**The blocker has moved from cost to evidence.** ADR `0014` could reject this on
+measurement; this one cannot. Option (b) as built out above is free, coherent,
+and matches the builtin semantics it imitates. What it lacks is a call site that
+demonstrates the problem it solves.
 
-What would change the answer: a call site where the container/view representation
-split actually hurts, or an ADR that removes `HashDict` and finds ADR `0007`'s
-asymmetry intolerable in practice rather than in principle. Neither exists yet.
-Nothing needs re-running; `experiments/refcontainers/` holds the current numbers.
+So the trigger is specific: **a realistic call site where the container/view
+representation split costs something a reader can see** — a function that must
+take both and cannot, a conversion written repeatedly, a bug caused by the
+boundary. Write that first, in `callsites_test.go`, exactly as this library
+requires before building any container. If it cannot be written, option (b) is
+solving a problem this library does not have.
+
+Two smaller triggers, either of which would move the balance:
+
+- **An ADR that removes `HashDict`** and finds ADR `0007`'s asymmetry intolerable
+  in practice rather than in principle. That work is independent and is recorded
+  above as separately actionable.
+- **A second copy-divergence bug** getting past `go test` because copylocks is
+  not in its default vet subset. One such class of bug is what `noCopy` exists
+  for; a second occurrence would be evidence that policing it is worse than
+  dissolving it.
+
+Nothing needs re-running. `experiments/refcontainers/` holds the current numbers,
+and `optionb.go` holds a working sketch of the design.
