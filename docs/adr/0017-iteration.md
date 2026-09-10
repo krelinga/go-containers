@@ -1033,6 +1033,9 @@ func (v *Vector[T]) AppendAll(cs ...Collector[T])
 func (s *HashSet[T]) AddAll(cs ...Collector[T])
 func (d *HashDict[K, V]) SetAll(cs ...Collector2[K, V])
 
+// Map stops being empty here: it is a collector target as well as a source.
+func (m Map[K, V]) SetAll(cs ...Collector2[K, V])
+
 // Removal is by KEY, so it takes Collector, never Collector2.
 func (s *HashSet[T]) Delete(k T)
 func (s *HashSet[T]) DeleteAll(cs ...Collector[T])
@@ -1159,9 +1162,28 @@ Four rules, and the third is the one that matters:
 `Vector` gets neither. It has no removal today, which is the oversight ADR `0015`
 records rather than something this proposal should settle.
 
+**`Map` gains `SetAll`.** ADR `0009` keeps it deliberately thin — an adapter, not
+a default — but "thin" was priced when a bulk insert meant two methods and an
+`Elems2`. One method taking collectors is cheap enough that leaving `Map` as the
+only dict that cannot be filled in bulk is harder to justify than adding it.
+
 **Bulk methods are variadic in collectors**, matching `New`: `AddAll`, `SetAll`,
 `AppendAll` and `DeleteAll` all take `...Collector`. A single-collector form
 would have been the only place in the proposal that was not.
+
+**`Map`'s other two cells are left open**, and this proposal should not decide
+them by omission the way the matrix in problem 2 was decided by omission:
+
+- **`DeleteAll`** is the live question. The argument just made for `SetAll`
+  transfers almost intact — `Map` would be the only dict that can be filled in
+  bulk but not emptied in bulk — and `Map` already spells the single-key form
+  `Delete(k K)`, so it is the container the sets' rename aligns *toward*, not
+  away from.
+- **`NewMap`** is the weaker case, and probably a genuine exception rather than
+  an oversight. `Map` exists so that builtin syntax works on it: `Map[string]int{
+  "a": 1}` and `make(Map[string]int, n)` already construct one, and a `NewMap`
+  would compete with a composite literal rather than enable anything. ADR `0009`'s
+  thinness is doing real work here in a way it was not for `SetAll`.
 
 ### What happens to the existing mutators
 
@@ -1178,9 +1200,20 @@ and is covered in the section above.)
 | `v.AppendAll(Items(src...))` | 4.196 µs | — |
 
 **Single-element mutators survive.** A `Collector` for one element is **49x** the
-direct call and allocates 144 bytes to carry it. `Append(e T)`, `HashSet.Add`,
-`HashDict.Set` and the rest stay exactly as they are; nothing about this proposal
-touches them.
+direct call and allocates 144 bytes to carry it, so `Append(e T)`, `Set(k, v)`
+and their kin stay.
+
+**But the two variadic ones stop being variadic.** `HashSet.Add(vs ...T)` and
+`SortedSet.Add(vs ...T)` become `Add(v T)`, with `AddAll(cs ...Collector[T])`
+covering the bulk case. That is the whole footprint of the change: they are the
+only variadic mutators in the package, and the same two are the only `Remove`s,
+so both this and the `Delete` rename land on the same pair.
+
+The sets' variadic-ness was never a considered position. `Vector.Append` was made
+single deliberately, on measurement, by ADR `0015`; `Set(k, v)` on the dicts
+could never be variadic, because key/value pairs cannot be spread. So the sets
+are the outliers rather than the proposal, and after this **no method in the
+package is variadic in elements** — only in collectors.
 
 **The `*Seq` twins are subsumed.** `AppendAllSeq(seq)` becomes
 `AppendAll(ItemsFrom(seq))`, and likewise `AddAllSeq` and `SetAllSeq`. That is
@@ -1468,10 +1501,10 @@ adds reverse and sub-ranges on top.
 
 ### Proposal A, as it stands
 
-**One sentence.** Every bulk constructor and bulk mutator takes a `Collector`,
-which abstracts away where a sequence of entries comes from; containers advertise
-what shapes they can produce; and a container that reads backwards returns a
-reversed source rather than an iterator.
+**One sentence.** Every bulk operation — construction, insertion and removal —
+takes collectors, which abstract away where a sequence of entries comes from;
+containers advertise what shapes they can produce; and a container that reads
+backwards returns a reversed source rather than an iterator.
 
 **The surface**, complete:
 
@@ -1508,12 +1541,22 @@ func Items[T any](vs ...T) Collector[T]
 func ItemsFromSized[T any](n int, seq iter.Seq[T]) Collector[T]
 func AllFromSized[K, V any](n int, seq iter.Seq2[K, V]) Collector2[K, V]
 
-// One constructor and one bulk method per container, plus Backward where ordered.
-func NewVector[T any](cs ...Collector[T]) *Vector[T]
-func (v *Vector[T]) AppendAll(cs ...Collector[T])
-func (s *HashSet[T]) Delete(k T)
+// Per container: one constructor, one bulk insert, one bulk delete. Shown for a
+// set and a dict; every container follows the same pattern.
+func NewHashSet[T comparable](cs ...Collector[T]) *HashSet[T]
+func (s *HashSet[T]) Add(v T)                       // no longer variadic
+func (s *HashSet[T]) AddAll(cs ...Collector[T])
+func (s *HashSet[T]) Delete(k T)                    // was Remove(vs ...T)
 func (s *HashSet[T]) DeleteAll(cs ...Collector[T])
-func (v *Vector[T]) Backward() HoldsAll[int, T]
+
+func NewHashDict[K comparable, V any](cs ...Collector2[K, V]) *HashDict[K, V]
+func (d *HashDict[K, V]) Set(k K, v V)
+func (d *HashDict[K, V]) SetAll(cs ...Collector2[K, V])   // Map gains this too
+func (d *HashDict[K, V]) Delete(k K)
+func (d *HashDict[K, V]) DeleteAll(cs ...Collector[K])    // by KEY, not pairs
+
+// Ordered containers add two; Vector has no removal.
+func (d *SortedDict[K, V]) Backward() HoldsAll[K, V]
 func (d *SortedDict[K, V]) Range(lo, hi K) RangeAll[K, V]
 ```
 
@@ -1546,6 +1589,8 @@ table is an index, not a second statement of the rules.
 | `Remove` becomes `Delete` on sets; `DeleteAll(cs ...Collector[K])` everywhere | a set's element is its key, so removal takes keys and the signature is identical across sets and dicts |
 | `DeleteAll` drains its collectors before deleting | `d.DeleteAll(KeysOf(d))` otherwise corrupts a sorted container silently |
 | every bulk method is variadic in collectors | uniform with `New`; nothing in the proposal takes exactly one |
+| `HashSet.Add` and `SortedSet.Add` stop being variadic | the only variadic mutators in the package, and the only ones that never had a measured reason |
+| `Map` gains `SetAll` | one method taking collectors is cheap enough that being the only unfillable dict is not worth defending |
 | **`Elems` and `Elems2` are removed**, not renamed or aliased | the `Holds*` family replaces them, `CanLen` takes over the length job, and the library has no external users to break |
 
 **Verified, not assumed.** Inference resolves `KeysOf(d)` and `ValuesOf(d)` on a
@@ -1562,9 +1607,15 @@ directions — a nil receiver with an empty collector panics under the guarded
 implementation and **not** under the natural one.
 
 **Which problems it closes.** Problem 1, by requiring native per-shape methods.
-Problem 2, by collapsing `X`/`XSeq` into one argument type. Problem 3, for whole
-containers. Problem 5, entirely — `NewVector(KeysOf(d))` is the case that had
-no spelling.
+Problem 3, for whole containers and for sub-ranges. Problem 5, entirely —
+`NewVector(KeysOf(d))` is the case that had no spelling.
+
+Problem 2 most thoroughly of all, and by more than the `X`/`XSeq` collapse it
+was originally scoped at: `New` and `Collect` fold into one variadic
+constructor, `HashSet` gains the bulk methods it never had, `Map` gains
+`SetAll`, the two variadic mutators stop being variadic, and bulk *removal* —
+which the problem statement did not think to ask for — exists for the first
+time.
 
 **Nothing blocks this proposal.** The last blocking item — reverse over a
 sub-range — is closed by `Range` returning a `RangeAll` rather than an
@@ -1588,7 +1639,36 @@ above:
 adopted, ordered containers keep values-only conversion as a recorded exception,
 positions are never converted, and "key" keeps two documented scopes.
 
-**The cost to callers**, stated plainly: every existing set and vector iteration
-changes. `s.All()` becomes `s.Keys()` and `v.All()` becomes `v.Values()`. That is
-the price of the whole proposal, and it is paid at every call site in every
-program using this library.
+**The cost to callers**, stated plainly. This is the largest change proposed in
+this repository, and it lands on every file that uses the package.
+
+*Iteration* — every set and vector call site:
+
+```go
+s.All()  ->  s.Keys()          // a set's element is its key
+v.All()  ->  v.Values()
+v.AllIndexed()  ->  v.All()    // All now means pairs, as it does in the stdlib
+```
+
+*Construction* — every `Collect` call site, and every variadic one:
+
+```go
+CollectVector(src)      ->  NewVector(ValuesOf(src))
+CollectVectorSeq(seq)   ->  NewVector(ItemsFrom(seq))
+NewHashSet(1, 2, 3)     ->  NewHashSet(Items(1, 2, 3))
+```
+
+*Mutation* — the sets, and every `*Seq` twin:
+
+```go
+s.Add(1, 2, 3)          ->  s.AddAll(Items(1, 2, 3))
+s.Remove(x)             ->  s.Delete(x)
+d.SetAllSeq(seq)        ->  d.SetAll(ItemsFrom(seq))
+```
+
+Nothing here is subtle and none of it is a silent behaviour change — every line
+above fails to compile until it is updated, which is the one mercy. But it is a
+whole-package break, and it is worth being honest that the proposal's benefits
+are mostly *coherence* rather than capability: problem 5's cross-container
+construction and problem 3's reverse iteration are genuinely new, and the rest is
+the same operations spelled consistently.
