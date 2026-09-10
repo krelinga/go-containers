@@ -869,10 +869,10 @@ the two disagree, the proposal is the later word.
 
 ### Proposal A: a `Collector` primitive
 
-Every bulk constructor and bulk mutator takes a `Collector`. A `Collector`
-abstracts away *where a sequence of entries comes from* — a container's keys, its
-values, its pairs, a bare iterator, or a literal list — so the consumer never
-learns which.
+Every bulk operation — construction, insertion and removal — takes any number of
+`Collector`s. A `Collector` abstracts away *where a sequence of entries comes
+from* — a container's keys, its values, its pairs, a bare iterator, or a literal
+list — so the consumer never learns which.
 
 ```go
 type Collector[T any] interface {
@@ -1021,8 +1021,8 @@ records, or holding a length from anywhere else, otherwise has no way to say so
 and no way to implement a collector that could. A wrong `n` costs an allocation
 and never a wrong result, per ADR `0006`.
 
-**Consumers.** One constructor and one bulk mutator per container, not one per
-source shape:
+**Consumers.** Per container: one constructor, one bulk insert and one bulk
+delete — not one of each per source shape:
 
 ```go
 func NewVector[T any](cs ...Collector[T]) *Vector[T]
@@ -1034,7 +1034,9 @@ func (s *HashSet[T]) AddAll(cs ...Collector[T])
 func (d *HashDict[K, V]) SetAll(cs ...Collector2[K, V])
 
 // Map stops being empty here: it is a collector target as well as a source.
+// It gets the bulk methods but no constructor; see below.
 func (m Map[K, V]) SetAll(cs ...Collector2[K, V])
+func (m Map[K, V]) DeleteAll(cs ...Collector[K])
 
 // Removal is by KEY, so it takes Collector, never Collector2.
 func (s *HashSet[T]) Delete(k T)
@@ -1123,6 +1125,7 @@ func (s *HashSet[T]) Delete(k T)
 func (s *HashSet[T]) DeleteAll(cs ...Collector[T])
 func (d *HashDict[K, V]) Delete(k K)
 func (d *HashDict[K, V]) DeleteAll(cs ...Collector[K])
+func (m Map[K, V]) DeleteAll(cs ...Collector[K])   // Delete(k K) it already has
 ```
 
 **`HashSet.Remove` and `SortedSet.Remove` become `Delete`.** That is problem 4's
@@ -1162,7 +1165,14 @@ Four rules, and the third is the one that matters:
   slice. **The abstraction is what makes this easy to write**, so the abstraction
   pays for it.
 - **Zero collectors still touches the receiver**, per the eager-dereference rule
-  above: `d.DeleteAll()` on a nil receiver panics.
+  above: `d.DeleteAll()` on a nil receiver panics. **`Map` is the exception**, and
+  it is the pre-existing one: it is a defined map type with value receivers, so
+  there is nothing to dereference. On a nil `Map`, `DeleteAll` is a no-op and
+  `SetAll` panics only once it actually writes — which is precisely what
+  `delete(m, k)` and `m[k] = v` do on a nil builtin map. `Map.Set` and
+  `Map.Delete` already behave this way; the bulk forms inherit it rather than
+  introducing it, and ADR `0009`'s reason for `Map` existing is that builtin
+  semantics show through.
 
 `Vector` gets neither. It has no removal today, which is the oversight ADR `0015`
 records rather than something this proposal should settle.
