@@ -219,4 +219,30 @@ Durable:
    is true only in the under-estimating direction; over-estimating trades a
    transient allocation for retained memory, which is the worse currency.
 
+10. **A value is cheaper than a box, and proposal B spends the difference on its
+    own reverse half.** Constructing a source and nothing else: on an *unordered*
+    container B's `d.Keys()` costs 10.87 ns / 16 B / 1 alloc against A's
+    `KeysOf(d)` at 26.22 ns / 40 B / 2 allocs — 2.4x, and exactly the
+    value-versus-interface gap B predicted. On an *ordered* container the two
+    converge in time (29.22 ns vs 29.71 ns) and B uses **more** memory: 96 B
+    against 72 B.
+
+    The reason is structural, not incidental. B carries reversibility as a
+    *field*, so an ordered container builds the reverse closure on every call
+    whether or not anything reads it; A carries it as a *type*, and builds the
+    reverse half only when asked. Measured against an escaping sink so the unused
+    half cannot be elided: 43.58 ns / 144 B with the reverse half, 28.86 ns /
+    96 B without, against A's boxed equivalent at 41.91 ns / 120 B. **Carrying
+    the reverse half costs more than the box it avoids.**
+
+    End to end, B saves two allocations per bulk call at every size (4 against 6)
+    and wins 1.3x-1.75x where the source is cheap — a literal list is 57.28 ns
+    against 100.1 ns. That win **disappears as the source grows**: building from
+    1024 keys of an unordered container is 7.977 µs for B against 7.969 µs for A,
+    a dead heat, because the map walk dominates everything else.
+
+    Durable: the direction of each comparison, the two-allocation gap, and that
+    eager reverse construction cancels the boxing win. Perishable: the ratios,
+    which depend on how expensive the underlying walk is.
+
 Perishable: every absolute number above.

@@ -1969,6 +1969,7 @@ They are not variants; they disagree about what an abstraction is for.
 | reversibility | in the type system | a nil-able field | a named method |
 | a caller's own type as a source | via `Holds*` | via a literal | it is a loop |
 | cost of forgetting | cannot | cannot | **2.7x-3.7x, silent** |
+| measured cost per bulk call | baseline | -2 allocs, -40 ns, nil at scale | not built |
 
 **A** buys the size hint with a wrapper at every call site. **B** buys it with the
 range syntax, and collapses eight types into two by demoting capability from
@@ -1980,6 +1981,82 @@ The question this ADR now has to answer is narrow and stated: **is
 `NewVector(d.Keys())` costs one struct and the range syntax, and
 `v.Grow(d.Len())` plus a loop costs nothing at all?**
 
-B is the one that has not been measured, and its whole case rests on a value
-being cheaper than a boxed interface. That measurement is the next thing this ADR
-owes.
+B has now been measured — see the section below. Its case rested on a value being
+cheaper than a boxed interface; that is true, and it turns out to buy about 40 ns
+and two allocations per bulk call, which evaporates at scale and is partly
+refunded by B's own eager reverse half.
+
+### Proposal B, measured against proposal A
+
+B's whole case was that a value is cheaper than a box, and it was the one thing
+about B that had not been measured. It is now — `experiments/iteration`,
+`abcost.go`, finding 10. **The claim is true, and B spends the winnings on its
+own design.**
+
+Constructing a source and nothing else — A's `KeysOf(d)` against B's `d.Keys()`:
+
+| | time | bytes | allocs |
+|---|---|---|---|
+| unordered, A | 26.22 ns | 40 B | 2 |
+| unordered, B | **10.87 ns** | **16 B** | **1** |
+| ordered, A | 29.71 ns | **72 B** | 2 |
+| ordered, B | 29.22 ns | 96 B | 2 |
+
+**On an unordered container B wins outright**, 2.4x and half the allocations,
+which is precisely the value-versus-interface gap it predicted.
+
+**On an ordered container the win is gone and B uses more memory than A.** That
+is B's design showing through, not noise. Reversibility in B is a **field**, so
+an ordered container builds the reverse closure **eagerly on every call, whether
+or not anything ever reads it**. In A reversibility is a **type**, so `Backward`
+and `Range` build the reverse half only when asked for it.
+
+Priced directly, against an escaping sink so the unused half cannot be elided:
+
+| | time | bytes | allocs |
+|---|---|---|---|
+| B, reverse half populated | 43.58 ns | 144 B | 3 |
+| B, forward only | **28.86 ns** | **96 B** | 2 |
+| A, boxed equivalent | 41.91 ns | 120 B | 3 |
+
+**Carrying the reverse half costs more than the box it avoids.** Forward-only, B
+beats A comfortably; reversible, B is slightly slower than A and uses 20% more
+memory.
+
+End to end, the picture is smaller than either number suggests:
+
+| build a vector from one container's keys | A | B | |
+|---|---|---|---|
+| 8 keys, unordered | 132.3 ns, 6 allocs | 103.0 ns, 4 allocs | 1.28x |
+| 8 keys, ordered | 116.3 ns, 6 allocs | 74.52 ns, 4 allocs | **1.56x** |
+| 1024 keys, unordered | 7.969 µs, 6 allocs | 7.977 µs, 4 allocs | **dead heat** |
+| 1024 keys, ordered | 3.278 µs, 6 allocs | 2.990 µs, 4 allocs | 1.10x |
+| three sources unioned | 1.711 µs, 14 allocs | 1.557 µs, 8 allocs | 1.10x |
+| a literal list | 100.1 ns, 7 allocs | 57.28 ns, 4 allocs | **1.75x** |
+
+**B saves two allocations per bulk call at every size**, and wins 1.3x-1.75x
+where the source is cheap. The win **evaporates as the source grows** — at 1024
+keys of an unordered container the two are indistinguishable, because the map
+walk dominates everything the abstraction does.
+
+**What this decides.** B's advantage is a constant, and bulk construction is the
+operation where constants matter least — it is called once per collection built,
+against a walk that is linear in the collection. Two allocations and ~40 ns are
+real, and they are not obviously worth:
+
+- `for k := range d.Keys()` no longer compiling,
+- reversibility moving from a compile-time promise to a runtime `if s.Back == nil`,
+- and a public struct whose field layout is the API.
+
+**So B is measured and does not clear the bar it set for itself.** The honest
+summary is that A and B cost about the same, and A buys a type system with the
+difference. B remains on the record because its *collapse* — eight named types
+into two — is a real simplification that a future reader may weigh differently,
+and because it produced the finding that eager reversibility is a design cost, which
+is a fact about the problem rather than about B.
+
+**One thing B teaches A.** B's reverse half is expensive because it is built
+eagerly. A should check it is not doing the same: `Range(lo, hi)` returning a
+`RangeAll` must not construct the backward iterator until `Backward()` is called
+on it. Nothing in A's write-up says either way, and the cheap version is the one
+where `RangeAll` holds the bounds and builds a direction on demand.
