@@ -115,9 +115,9 @@ func (v *Vector[T]) Values() iter.Seq[T] {
 
 // All iterates index and element together. A vector is keyed by position
 // (ADR 0017), so All yields pairs and Values yields the elements alone.
-//
-// It cannot be called All: Elems[T] already claims that name for the
-// value-only sequence, and a type cannot have both.
+// This is the shape ADR 0017's problem 1 was about: a type has one All, so the
+// pair-shaped read gets it and the element-shaped read is Values, matching the
+// stdlib's meaning of both names.
 func (v *Vector[T]) All() iter.Seq2[int, T] {
 	es := v.es
 	return func(yield func(int, T) bool) {

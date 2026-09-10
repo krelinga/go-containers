@@ -37,8 +37,8 @@ import (
 // unordered one is wanted. A Map's view and a HashDict's view are the same type.
 //
 // IndexedView stands alone. A sequence is neither: its reads are positional, so
-// it cannot be a SetView, and giving it a DictView keyed by int would make All
-// yield pairs, which collides with Elems[T].
+// it cannot be a SetView, and a DictView keyed by int would imply key lookup
+// and conversion, which a position does not have.
 //
 // The concrete types behind these interfaces are unexported and may change.
 //
