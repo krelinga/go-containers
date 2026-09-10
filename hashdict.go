@@ -37,40 +37,24 @@ type HashDict[K comparable, V any] struct {
 	m map[K]V
 }
 
-// NewHashDict returns an empty HashDict. It is a convenience; the zero value is
-// equally usable.
-func NewHashDict[K comparable, V any]() *HashDict[K, V] {
-	return &HashDict[K, V]{}
-}
-
-// CollectHashDict returns a HashDict holding every entry in src.
+// NewHashDict returns a HashDict holding kvs. The zero value is equally usable.
 //
-// src.Len() presizes the underlying map, which is worth considerably more here
+// Spread a slice to build from another container:
+//
+//	NewHashDict(other.AllSlice()...)
+//
+// len(kvs) presizes the underlying map, which is worth considerably more here
 // than the equivalent hint is for the sorted containers: experiments/hashdict
 // measured presizing at 2.4x to 4.1x in time and about half the allocation
 // volume. A sorted container's O(n log n) sort hides that saving; a hash dict
 // has no sort, so it is the whole difference.
 //
-// Len is a hint. A src whose Len disagrees with its All produces a worse
-// allocation, never a wrong result.
-func CollectHashDict[K comparable, V any](src Elems2[K, V]) *HashDict[K, V] {
-	n := src.Len()
-	seq := src.All()
-	d := &HashDict[K, V]{m: make(map[K]V, max(0, n))}
-	for k, v := range seq {
-		d.m[k] = v
+// kvs is copied and not retained.
+func NewHashDict[K comparable, V any](kvs ...KeyValue[K, V]) *HashDict[K, V] {
+	d := &HashDict[K, V]{m: make(map[K]V, len(kvs))}
+	for _, kv := range kvs {
+		d.m[kv.Key] = kv.Value
 	}
-	return d
-}
-
-// CollectHashDictSeq returns a HashDict holding every entry in seq.
-//
-// Prefer CollectHashDict when the source knows its length — see its
-// documentation for how much the hint is worth. Use this for bare iterators,
-// which cannot report one.
-func CollectHashDictSeq[K comparable, V any](seq iter.Seq2[K, V]) *HashDict[K, V] {
-	d := &HashDict[K, V]{}
-	d.setAll(seq, 0)
 	return d
 }
 
@@ -98,13 +82,60 @@ func (d *HashDict[K, V]) Delete(k K) { delete(d.m, k) }
 // Len returns the number of entries.
 func (d *HashDict[K, V]) Len() int { return len(d.m) }
 
+// Keys returns an iterator over the keys, in the unspecified order a map range
+// produces.
+func (d *HashDict[K, V]) Keys() iter.Seq[K] {
+	m := d.m // read eagerly, so a nil receiver panics here like every other method
+	return maps.Keys(m)
+}
+
+// Values returns an iterator over the values, in the unspecified order a map
+// range produces.
+func (d *HashDict[K, V]) Values() iter.Seq[V] {
+	m := d.m
+	return maps.Values(m)
+}
+
 // All returns an iterator over the entries, in the unspecified order a map
 // range produces.
 //
 // Modifying the dict during iteration is not supported; see MutableDict.
 func (d *HashDict[K, V]) All() iter.Seq2[K, V] {
-	m := d.m // read eagerly, so a nil receiver panics here like every other method
+	m := d.m
 	return maps.All(m)
+}
+
+// KeySlice returns the keys as a new slice, in no particular order.
+//
+// The result is a full, independent copy (ADR 0017): nothing the dict does
+// afterwards is visible through it, and nothing done to it is visible in the
+// dict. That is what makes d.DeleteAll(d.KeySlice()...) safe.
+func (d *HashDict[K, V]) KeySlice() []K {
+	out := make([]K, 0, len(d.m))
+	for k := range d.m {
+		out = append(out, k)
+	}
+	return out
+}
+
+// ValueSlice returns the values as a new slice, in no particular order.
+// Duplicate values are preserved; the result has one entry per key.
+func (d *HashDict[K, V]) ValueSlice() []V {
+	out := make([]V, 0, len(d.m))
+	for _, v := range d.m {
+		out = append(out, v)
+	}
+	return out
+}
+
+// AllSlice returns the entries as a new slice of pairs, in no particular order.
+// It is the bulk-transfer shape: NewHashDict(d.AllSlice()...).
+func (d *HashDict[K, V]) AllSlice() []KeyValue[K, V] {
+	out := make([]KeyValue[K, V], 0, len(d.m))
+	for k, v := range d.m {
+		out = append(out, KeyValue[K, V]{k, v})
+	}
+	return out
 }
 
 // Clone returns an independent copy. Mutating the result does not affect d.
@@ -115,36 +146,41 @@ func (d *HashDict[K, V]) Clone() *HashDict[K, V] {
 	return &HashDict[K, V]{m: maps.Clone(d.m)}
 }
 
-// SetAll adds every entry in src, replacing existing values for keys already
-// present. Where src yields the same key more than once, the last wins.
+// SetAll writes every entry of kvs, replacing existing values for keys already
+// present. Where kvs repeats a key, the last occurrence wins (ADR 0004).
+//
+// Spread a slice to bulk-write:
+//
+//	d.SetAll(other.AllSlice()...)
 //
 // Unlike SortedDict.SetAll, this has no algorithmic advantage over calling Set
 // in a loop. It inserts one entry at a time, because Go exposes no growth hint
-// for a map that already exists; src.Len() presizes only when the receiver is
+// for a map that already exists; len(kvs) presizes only when the receiver is
 // still at its zero value. Rebuilding the map to presize it was measured in
 // experiments/hashdict and rejected — it only pays when the additions outnumber
-// the existing entries several times over. SetAll exists so that every
-// MutableDict implementation offers the same operations, not to be faster.
+// the existing entries several times over.
 //
-// src is fully consumed as it is applied.
-func (d *HashDict[K, V]) SetAll(src Elems2[K, V]) {
-	n := src.Len() // eager, so a nil src panics
-	seq := src.All()
-	d.setAll(seq, n)
-}
-
-// SetAllSeq is SetAll for a bare iterator, which cannot report its length.
-func (d *HashDict[K, V]) SetAllSeq(seq iter.Seq2[K, V]) {
-	d.setAll(seq, 0)
-}
-
-func (d *HashDict[K, V]) setAll(seq iter.Seq2[K, V], sizeHint int) {
-	// Touches the receiver before consuming seq, so a nil receiver panics even
-	// when seq is empty.
+// kvs is copied and not retained.
+func (d *HashDict[K, V]) SetAll(kvs ...KeyValue[K, V]) {
+	// Touches the receiver before consuming kvs, so a nil receiver panics even
+	// when kvs is empty.
 	if d.m == nil {
-		d.m = make(map[K]V, max(0, sizeHint))
+		d.m = make(map[K]V, len(kvs))
 	}
-	for k, v := range seq {
-		d.m[k] = v
+	for _, kv := range kvs {
+		d.m[kv.Key] = kv.Value
+	}
+}
+
+// DeleteAll removes the entries under every key in ks. Keys not present are
+// ignored. Removal takes keys, never pairs, because a set's element is its key
+// and this makes the signature identical across sets and dicts (ADR 0017).
+func (d *HashDict[K, V]) DeleteAll(ks ...K) {
+	if d.m == nil {
+		// Forces the nil-receiver panic when ks is empty.
+		return
+	}
+	for _, k := range ks {
+		delete(d.m, k)
 	}
 }

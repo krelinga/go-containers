@@ -2,7 +2,6 @@ package containers_test
 
 import (
 	"fmt"
-	"iter"
 	"maps"
 	"slices"
 	"testing"
@@ -10,150 +9,131 @@ import (
 	"github.com/krelinga/go-containers"
 )
 
-// Every container satisfies the contract unchanged, and the pointer does while
-// the value does not -- ADR 0002's uniform pointer receivers.
-func TestElemsSatisfaction(t *testing.T) {
+// Every container satisfies its contract, and the pointer does while the value
+// does not -- ADR 0002's uniform pointer receivers.
+func TestContractSatisfaction(t *testing.T) {
 	var (
-		_ containers.Elems[int]          = containers.NewHashSet[int]()
-		_ containers.Elems[int]          = containers.NewSortedSet[int]()
-		_ containers.Elems2[int, string] = containers.NewSortedDict[int, string]()
+		_ containers.MutableSet[int]          = containers.NewHashSet[int]()
+		_ containers.MutableSet[int]          = containers.NewSortedSet[int]()
+		_ containers.MutableDict[int, string] = containers.NewSortedDict[int, string]()
+		_ containers.MutableDict[int, string] = containers.NewHashDict[int, string]()
+		_ containers.MutableDict[int, string] = containers.Map[int, string]{}
 	)
 	var s containers.HashSet[int]
-	var _ containers.Elems[int] = &s
-
-	// MutableSet is now Elems plus the mutating operations, same method set.
-	var _ containers.MutableSet[int] = containers.NewHashSet[int]()
-	var _ containers.MutableSet[int] = containers.NewSortedSet[int]()
+	var _ containers.MutableSet[int] = &s
 }
 
-// lyingElems reports a length that does not match what it yields. ADR 0006
-// decision 3: Len is a capacity hint, never a correctness input.
-type lyingElems struct {
-	vals []int
-	n    int
-}
+// The *Slice contract, which is the whole of ADR 0017 proposal D: a result is a
+// full, independent copy. Nothing the container does afterwards is visible
+// through it, and nothing done to it is visible in the container.
+func TestSliceResultsAreIndependentCopies(t *testing.T) {
+	hs := containers.NewHashSet(1, 2, 3)
+	ks := hs.KeySlice()
+	hs.Add(4)
+	if len(ks) != 3 {
+		t.Errorf("HashSet.KeySlice saw a later Add: len=%d, want 3", len(ks))
+	}
+	slices.Sort(ks)
+	ks[0] = 99
+	if !hs.Has(1) || hs.Has(99) {
+		t.Error("writing to HashSet.KeySlice changed the set")
+	}
 
-func (l lyingElems) Len() int           { return l.n }
-func (l lyingElems) All() iter.Seq[int] { return slices.Values(l.vals) }
+	v := containers.NewVector(1, 2, 3)
+	vs := v.ValueSlice()
+	v.Append(4)
+	vs[0] = 99
+	if v.Len() != 4 || v.At(0) != 1 {
+		t.Errorf("Vector.ValueSlice aliased the vector: len=%d at0=%d", v.Len(), v.At(0))
+	}
 
-type lyingElems2 struct {
-	vals map[int]string
-	n    int
-}
-
-func (l lyingElems2) Len() int                    { return l.n }
-func (l lyingElems2) All() iter.Seq2[int, string] { return maps.All(l.vals) }
-
-func TestElemsLenIsOnlyAHint(t *testing.T) {
-	vals := []int{5, 1, 9, 1, 3}
-	want := []int{1, 3, 5, 9}
-
-	for _, n := range []int{0, 1, 2, 5, 1000, -7} {
-		src := lyingElems{vals: vals, n: n}
-
-		if got := ssVals(containers.CollectSortedSet(src)); !slices.Equal(got, want) {
-			t.Errorf("CollectSortedSet with Len()=%d = %v, want %v", n, got, want)
-		}
-
-		var s containers.SortedSet[int]
-		s.AddAll(src)
-		if got := ssVals(&s); !slices.Equal(got, want) {
-			t.Errorf("AddAll with Len()=%d = %v, want %v", n, got, want)
-		}
-
-		src2 := lyingElems2{vals: map[int]string{5: "e", 1: "a", 9: "i"}, n: n}
-		m := containers.CollectSortedDict(src2)
-		if got, wantK := orderedKeys(m), []int{1, 5, 9}; !slices.Equal(got, wantK) {
-			t.Errorf("CollectSortedDict with Len()=%d = %v, want %v", n, got, wantK)
-		}
-		var m2 containers.SortedDict[int, string]
-		m2.SetAll(src2)
-		if got, wantK := orderedKeys(&m2), []int{1, 5, 9}; !slices.Equal(got, wantK) {
-			t.Errorf("SetAll with Len()=%d = %v, want %v", n, got, wantK)
-		}
+	sd := containers.NewSortedDict(containers.KeyValue[int, string]{1, "a"})
+	kvs := sd.AllSlice()
+	kvs[0].Value = "mutated"
+	if got, _ := sd.Get(1); got != "a" {
+		t.Errorf("writing to SortedDict.AllSlice changed the dict: %q", got)
 	}
 }
 
-// The sized and bare forms must produce identical results.
-func TestSizedAndSeqFormsAgree(t *testing.T) {
-	src := containers.NewHashSet(5, 1, 9, 3)
-
-	sized := containers.CollectSortedSet(src)
-	viaSeq := containers.CollectSortedSetSeq(src.All())
-	if !slices.Equal(ssVals(sized), ssVals(viaSeq)) {
-		t.Errorf("CollectSortedSet %v vs Seq %v", ssVals(sized), ssVals(viaSeq))
+// The payoff of that contract: the obvious spelling of "empty this container"
+// is correct rather than merely lucky. Under a streaming API this silently
+// corrupts a sorted container, which is why ADR 0017 preferred the copy.
+func TestSelfReferentialBulkOperations(t *testing.T) {
+	ss := containers.NewSortedSet(1, 2, 3)
+	ss.DeleteAll(ss.KeySlice()...)
+	if ss.Len() != 0 {
+		t.Errorf("ss.DeleteAll(ss.KeySlice()...) left %d elements, want 0", ss.Len())
 	}
 
-	var a, b containers.SortedSet[int]
-	a.AddAll(src)
-	b.AddAllSeq(src.All())
-	if !slices.Equal(ssVals(&a), ssVals(&b)) {
-		t.Errorf("AddAll %v vs AddAllSeq %v", ssVals(&a), ssVals(&b))
+	sd := containers.NewSortedDict[int, string]()
+	sd.SetAll(pairsOf(maps.All(map[int]string{1: "a", 2: "b", 3: "c"}))...)
+	sd.DeleteAll(sd.KeySlice()...)
+	if sd.Len() != 0 {
+		t.Errorf("sd.DeleteAll(sd.KeySlice()...) left %d entries, want 0", sd.Len())
 	}
 
-	msrc := containers.NewSortedDict[int, string]()
-	msrc.SetAllSeq(maps.All(map[int]string{2: "b", 1: "a"}))
-	if !slices.Equal(orderedKeys(containers.CollectSortedDict(msrc)),
-		orderedKeys(containers.CollectSortedDictSeq(msrc.All()))) {
-		t.Error("CollectSortedDict and CollectSortedDictSeq disagree")
-	}
-}
-
-// The point of the change: the sized form allocates fewer times.
-func TestSizedFormAllocatesLess(t *testing.T) {
-	src := containers.NewHashSet[int]()
-	for i := range 4096 {
-		src.Add(i)
-	}
-	sized := testing.AllocsPerRun(20, func() {
-		_ = containers.CollectSortedSet(src)
-	})
-	unsized := testing.AllocsPerRun(20, func() {
-		_ = containers.CollectSortedSetSeq(src.All())
-	})
-	t.Logf("allocations: sized=%.0f unsized=%.0f", sized, unsized)
-	if sized >= unsized {
-		t.Errorf("sized form allocated %.0f times, unsized %.0f; expected fewer", sized, unsized)
+	// Adding a container to itself is a no-op rather than a hazard.
+	ss2 := containers.NewSortedSet(3, 1, 2)
+	ss2.AddAll(ss2.KeySlice()...)
+	if got, want := ssVals(ss2), []int{1, 2, 3}; !slices.Equal(got, want) {
+		t.Errorf("ss2.AddAll(ss2.KeySlice()...) = %v, want %v", got, want)
 	}
 }
 
-// ADR 0002's nil-argument rule extends to interface arguments.
-func TestElemsNilArgumentPanics(t *testing.T) {
-	var s containers.SortedSet[int]
-	var m containers.SortedDict[int, string]
+// Bulk operations copy their input and do not retain it (ADR 0017). The
+// constructors deliberately do not take ownership, so that every New* means one
+// thing; an adopting constructor would arrive later under its own name.
+func TestBulkOperationsDoNotRetainTheirInput(t *testing.T) {
+	src := []int{1, 2, 3}
 
-	mustPanic(t, "AddAll(nil interface)", func() { s.AddAll(nil) })
-	mustPanic(t, "SetAll(nil interface)", func() { m.SetAll(nil) })
-	mustPanic(t, "CollectSortedSet(nil)", func() { _ = containers.CollectSortedSet[int](nil) })
-	mustPanic(t, "CollectSortedDict(nil)", func() { _ = containers.CollectSortedDict[int, string](nil) })
-
-	// A non-nil interface holding a nil pointer panics inside the container.
-	var nilSet *containers.HashSet[int]
-	mustPanic(t, "AddAll(typed nil)", func() { s.AddAll(nilSet) })
-}
-
-// ADR 0006 consequence: passing a container to itself is well defined.
-func TestElemsSelfReference(t *testing.T) {
-	s := containers.NewSortedSet(3, 1, 2)
-	s.AddAll(s)
-	if got, want := ssVals(s), []int{1, 2, 3}; !slices.Equal(got, want) {
-		t.Errorf("s.AddAll(s) = %v, want %v", got, want)
+	v := containers.NewVector(src...)
+	src[0] = 99
+	if v.At(0) != 1 {
+		t.Errorf("NewVector retained its argument: At(0)=%d, want 1", v.At(0))
 	}
 
-	m := containers.NewSortedDict[int, string]()
-	m.SetAllSeq(maps.All(map[int]string{1: "a", 2: "b"}))
-	m.SetAll(m)
-	if got, want := orderedKeys(m), []int{1, 2}; !slices.Equal(got, want) {
-		t.Errorf("m.SetAll(m) = %v, want %v", got, want)
+	src2 := []int{4, 5, 6}
+	v.AppendAll(src2...)
+	src2[0] = 99
+	if v.At(3) != 4 {
+		t.Errorf("AppendAll retained its argument: At(3)=%d, want 4", v.At(3))
+	}
+
+	// A sorted container must not reorder the caller's slice while sorting.
+	unsorted := []int{3, 1, 2}
+	_ = containers.NewSortedSet(unsorted...)
+	if !slices.Equal(unsorted, []int{3, 1, 2}) {
+		t.Errorf("NewSortedSet reordered the caller's slice: %v", unsorted)
 	}
 }
 
-// A Set converts to a SortedSet without the caller mentioning iterators, and
-// the length comes along for free.
-func ExampleCollectSortedSet() {
+// ADR 0002's eager-dereference rule. A bulk call with no arguments must still
+// touch the receiver: the rule has been violated three times in this
+// repository, every time via a loop that could run zero times.
+func TestEmptyBulkCallsStillDereference(t *testing.T) {
+	var ps *containers.SortedSet[int]
+	var pv *containers.Vector[int]
+	var pd *containers.SortedDict[int, string]
+	var ph *containers.HashSet[int]
+	var phd *containers.HashDict[int, string]
+
+	mustPanic(t, "SortedSet.AddAll()", func() { ps.AddAll() })
+	mustPanic(t, "SortedSet.DeleteAll()", func() { ps.DeleteAll() })
+	mustPanic(t, "Vector.AppendAll()", func() { pv.AppendAll() })
+	mustPanic(t, "SortedDict.SetAll()", func() { pd.SetAll() })
+	mustPanic(t, "SortedDict.DeleteAll()", func() { pd.DeleteAll() })
+	mustPanic(t, "HashSet.AddAll()", func() { ph.AddAll() })
+	mustPanic(t, "HashSet.DeleteAll()", func() { ph.DeleteAll() })
+	mustPanic(t, "HashDict.SetAll()", func() { phd.SetAll() })
+	mustPanic(t, "HashDict.DeleteAll()", func() { phd.DeleteAll() })
+}
+
+// A set converts to a sorted set by spreading its materialised keys -- problem
+// 5 of ADR 0017, which had no spelling before.
+func ExampleNewSortedSet() {
 	seen := containers.NewHashSet(40, 3, 12, 7)
-	sorted := containers.CollectSortedSet(seen)
-	fmt.Println(slices.Collect(sorted.All()))
+	sorted := containers.NewSortedSet(seen.KeySlice()...)
+	fmt.Println(sorted.KeySlice())
 	// Output: [3 7 12 40]
 }
 
@@ -207,7 +187,7 @@ func TestReadOnlyBoundaryTakesViews(t *testing.T) {
 
 	m := containers.Map[string, int]{"a": 1, "b": 2}
 	sd := containers.NewSortedDict[string, int]()
-	sd.SetAllSeq(maps.All(map[string]int{"a": 1, "b": 2}))
+	sd.SetAll(pairsOf(maps.All(map[string]int{"a": 1, "b": 2}))...)
 	hd := containers.NewHashDict[string, int]()
 	hd.Set("a", 1)
 	hd.Set("b", 2)
@@ -248,9 +228,10 @@ func TestIdentityViewsDoNotAllocate(t *testing.T) {
 	_, _ = sinkSet, sinkDict
 }
 
-// MutableSet gained Remove in ADR 0008, mirroring MutableDict's Delete.
-func TestMutableSetRemove(t *testing.T) {
-	drop := func(s containers.MutableSet[int], vs ...int) { s.Remove(vs...) }
+// MutableSet carries Delete, mirroring MutableDict's (ADR 0017 renamed the
+// sets' Remove to match, since a set's element is its key).
+func TestMutableSetDelete(t *testing.T) {
+	drop := func(s containers.MutableSet[int], v int) { s.Delete(v) }
 
 	hs := containers.NewHashSet(1, 2, 3)
 	drop(hs, 2)

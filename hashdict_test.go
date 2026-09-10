@@ -44,16 +44,20 @@ func TestHashDictNilPanicsUniformly(t *testing.T) {
 	mustPanic(t, "Set", func() { p.Set(1, "a") })
 	mustPanic(t, "Delete", func() { p.Delete(1) })
 	mustPanic(t, "Len", func() { _ = p.Len() })
-	mustPanic(t, "All", func() { _ = p.All() })
+	mustPanic(t, "All", func() { _ = p.Keys() })
 	mustPanic(t, "Clone", func() { _ = p.Clone() })
-	mustPanic(t, "SetAll", func() { p.SetAll(src) })
-	mustPanic(t, "SetAllSeq", func() { p.SetAllSeq(empty) })
+	mustPanic(t, "SetAll", func() { p.SetAll(src.AllSlice()...) })
+	mustPanic(t, "SetAllSeq", func() { p.SetAll(pairsOf(empty)...) })
 	// The eager-dereference rule: an empty input must still panic.
-	mustPanic(t, "SetAllSeq empty", func() { p.SetAllSeq(empty) })
-	mustPanic(t, "SetAll nil src", func() {
-		var d containers.HashDict[int, string]
-		d.SetAll(nil)
-	})
+	mustPanic(t, "SetAllSeq empty", func() { p.SetAll(pairsOf(empty)...) })
+	// A usable receiver with no arguments must NOT panic: the eager-dereference
+	// rule is about the receiver, and there is no longer a nil interface
+	// argument to reject (ADR 0017 replaced Elems2 with a slice).
+	var d containers.HashDict[int, string]
+	d.SetAll()
+	if d.Len() != 0 {
+		t.Errorf("SetAll() on a zero dict changed it: Len=%d", d.Len())
+	}
 }
 
 func TestHashDictOperations(t *testing.T) {
@@ -109,11 +113,11 @@ func TestHashDictCloneIsIndependent(t *testing.T) {
 
 func TestHashDictBulk(t *testing.T) {
 	src := containers.NewHashDict[int, string]()
-	src.SetAllSeq(maps.All(map[int]string{1: "a", 2: "b", 3: "c"}))
+	src.SetAll(pairsOf(maps.All(map[int]string{1: "a", 2: "b", 3: "c"}))...)
 
 	// Sized and bare forms agree.
-	sized := containers.CollectHashDict(src)
-	bare := containers.CollectHashDictSeq(src.All())
+	sized := containers.NewHashDict(src.AllSlice()...)
+	bare := containers.NewHashDict(src.AllSlice()...)
 	if !slices.Equal(hdKeys(sized), hdKeys(bare)) {
 		t.Errorf("CollectHashDict %v vs Seq %v", hdKeys(sized), hdKeys(bare))
 	}
@@ -125,7 +129,7 @@ func TestHashDictBulk(t *testing.T) {
 	d := containers.NewHashDict[int, string]()
 	d.Set(1, "old")
 	d.Set(9, "kept")
-	d.SetAll(src)
+	d.SetAll(src.AllSlice()...)
 	if got, want := hdKeys(d), []int{1, 2, 3, 9}; !slices.Equal(got, want) {
 		t.Errorf("after SetAll = %v, want %v", got, want)
 	}
@@ -138,41 +142,23 @@ func TestHashDictBulk(t *testing.T) {
 
 	// SetAll on a zero value presizes rather than failing.
 	var z containers.HashDict[int, string]
-	z.SetAll(src)
+	z.SetAll(src.AllSlice()...)
 	if z.Len() != 3 {
 		t.Errorf("SetAll on zero value Len = %d, want 3", z.Len())
 	}
 
 	// Self-reference is well defined.
-	d.SetAll(d)
+	d.SetAll(d.AllSlice()...)
 	if got, want := hdKeys(d), []int{1, 2, 3, 9}; !slices.Equal(got, want) {
-		t.Errorf("d.SetAll(d) = %v, want %v", got, want)
+		t.Errorf("d.SetAll(d.AllSlice()...) = %v, want %v", got, want)
 	}
 }
 
 // Len is a hint, never a correctness input -- ADR 0006 decision 3.
-func TestHashDictLenIsOnlyAHint(t *testing.T) {
-	vals := map[int]string{1: "a", 5: "e", 9: "i"}
-	want := []int{1, 5, 9}
-	for _, n := range []int{0, 1, 2, 1000, -7} {
-		src := lyingElems2{vals: vals, n: n}
-		if got := hdKeys(containers.CollectHashDict(src)); !slices.Equal(got, want) {
-			t.Errorf("CollectHashDict with Len()=%d = %v, want %v", n, got, want)
-		}
-		var d containers.HashDict[int, string]
-		d.SetAll(src)
-		if got := hdKeys(&d); !slices.Equal(got, want) {
-			t.Errorf("SetAll with Len()=%d = %v, want %v", n, got, want)
-		}
-	}
-}
-
-// HashDict resolves ADR 0007's asymmetry: it satisfies through a pointer, like
-// every other container, so generic call sites read the same way.
 func TestHashDictSatisfiesContractsThroughPointer(t *testing.T) {
 	var d containers.HashDict[int, string]
 	var (
-		_ containers.Elems2[int, string]      = &d
+		_ containers.MutableDict[int, string] = &d
 		_ containers.MutableDict[int, string] = &d
 	)
 	d.Set(1, "a")

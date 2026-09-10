@@ -8,7 +8,7 @@ import (
 )
 
 func sorted[T interface{ ~string | ~int }](s *containers.HashSet[T]) []T {
-	return slices.Sorted(s.All())
+	return slices.Sorted(s.Keys())
 }
 
 func mustPanic(t *testing.T, name string, f func()) {
@@ -28,11 +28,11 @@ func TestZeroValueIsUsable(t *testing.T) {
 	if s.Len() != 0 || s.Has("read") {
 		t.Errorf("fresh zero value not empty: Len=%d Has=%v", s.Len(), s.Has("read"))
 	}
-	if got := slices.Sorted(s.All()); len(got) != 0 {
+	if got := slices.Sorted(s.Keys()); len(got) != 0 {
 		t.Errorf("All on zero value = %v, want empty", got)
 	}
 
-	s.Add("read", "write")
+	s.AddAll("read", "write")
 	if s.Len() != 2 || !s.Has("read") {
 		t.Errorf("after Add: Len=%d Has(read)=%v", s.Len(), s.Has("read"))
 	}
@@ -52,7 +52,7 @@ func TestNilPointerPanicsUniformly(t *testing.T) {
 	other := containers.NewHashSet("a")
 
 	mustPanic(t, "Add", func() { p.Add("x") })
-	mustPanic(t, "Remove", func() { p.Remove("x") })
+	mustPanic(t, "Remove", func() { p.Delete("x") })
 	mustPanic(t, "Has", func() { _ = p.Has("x") })
 	mustPanic(t, "Len", func() { _ = p.Len() })
 	mustPanic(t, "Clone", func() { _ = p.Clone() })
@@ -60,12 +60,12 @@ func TestNilPointerPanicsUniformly(t *testing.T) {
 	mustPanic(t, "Intersect", func() { _ = p.Intersect(other) })
 	mustPanic(t, "Difference", func() { _ = p.Difference(other) })
 	// Eagerly, without iterating the result:
-	mustPanic(t, "All", func() { _ = p.All() })
+	mustPanic(t, "All", func() { _ = p.Keys() })
 
 	// Variadic mutators with no arguments must still panic: a bare range over
 	// an empty vs would never touch the receiver.
-	mustPanic(t, "Add() no args", func() { p.Add() })
-	mustPanic(t, "Remove() no args", func() { p.Remove() })
+	mustPanic(t, "Add() no args", func() { p.AddAll() })
+	mustPanic(t, "Remove() no args", func() { p.DeleteAll() })
 }
 
 // ADR 0002, decision 2: nil arguments panic exactly like nil receivers. Stated
@@ -93,8 +93,8 @@ func TestNilArgumentPanics(t *testing.T) {
 // allocates a new map rather than mutating the bound one.
 func TestAllBindsAtCallTime(t *testing.T) {
 	var s containers.HashSet[string]
-	it := s.All() // binds the nil map
-	s.Add("a")    // allocates a fresh map
+	it := s.Keys() // binds the nil map
+	s.Add("a")     // allocates a fresh map
 	if got := slices.Sorted(it); len(got) != 0 {
 		t.Errorf("iterator saw post-call writes: %v, want empty", got)
 	}
@@ -109,17 +109,17 @@ func TestAddRemoveIdempotent(t *testing.T) {
 	if s.Len() != 1 {
 		t.Errorf("re-Add changed Len to %d, want 1", s.Len())
 	}
-	s.Remove("absent")
+	s.Delete("absent")
 	if s.Len() != 1 {
 		t.Errorf("Remove of absent value changed Len to %d, want 1", s.Len())
 	}
-	s.Remove("a")
+	s.Delete("a")
 	if s.Len() != 0 {
 		t.Errorf("Len after Remove = %d, want 0", s.Len())
 	}
 	// Remove on a zero value is a no-op, not a panic.
 	var z containers.HashSet[string]
-	z.Remove("x")
+	z.Delete("x")
 }
 
 // ADR 0002 consequences: Clone is independent. A shallow struct copy would
@@ -129,7 +129,7 @@ func TestCloneIsIndependent(t *testing.T) {
 	orig := containers.NewHashSet("a", "b")
 	clone := orig.Clone()
 	clone.Add("c")
-	orig.Remove("a")
+	orig.Delete("a")
 
 	if got, want := sorted(orig), []string{"b"}; !slices.Equal(got, want) {
 		t.Errorf("orig = %v, want %v", got, want)
@@ -176,7 +176,7 @@ func TestAlgebra(t *testing.T) {
 	// The result is independent of both operands, not a view onto either.
 	u := a.Union(b)
 	u.Add("extra")
-	u.Remove("read")
+	u.Delete("read")
 	if !a.Has("read") || a.Len() != 3 {
 		t.Errorf("mutating the result changed a: %v", sorted(a))
 	}

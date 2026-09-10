@@ -42,85 +42,62 @@ type SortedSet[T cmp.Ordered] struct {
 // usable.
 func NewSortedSet[T cmp.Ordered](vs ...T) *SortedSet[T] {
 	s := &SortedSet[T]{}
-	s.Add(vs...)
+	s.AddAll(vs...)
 	return s
 }
 
-// CollectSortedSet returns a SortedSet holding every value in src.
+// Add inserts one element. Values already present are ignored.
 //
-// src.Len() is used to size the working slice, so this allocates once where
-// CollectSortedSetSeq must grow as it goes. The saving is allocation volume
-// rather than wall-clock time: the sort that follows dominates. See ADR 0006.
-//
-// It is also cheaper than NewSortedSet followed by AddAll, since with nothing
-// to merge against the merge degenerates to the sort.
-func CollectSortedSet[T cmp.Ordered](src Elems[T]) *SortedSet[T] {
-	return &SortedSet[T]{es: collectSortedValues(src.All(), src.Len())}
+// This is an insert, O(n). AddAll sorts and merges instead, which is much
+// cheaper for more than a couple of elements — so prefer it in a loop.
+func (s *SortedSet[T]) Add(v T) {
+	base := s.es // eager, so a nil receiver panics here
+	if i, found := slices.BinarySearch(base, v); !found {
+		s.es = slices.Insert(base, i, v)
+	}
 }
 
-// CollectSortedSetSeq returns a SortedSet holding every value in seq.
+// AddAll inserts every element of vs, sorting once and merging rather than
+// inserting one at a time: O(k log k + n + k) against O(kn). Spread a slice to
+// bulk-insert:
 //
-// Prefer CollectSortedSet when the source knows its length. Use this for bare
-// iterators — maps.Keys, slices.Values, or another container's Range — which
-// cannot report one.
-func CollectSortedSetSeq[T cmp.Ordered](seq iter.Seq[T]) *SortedSet[T] {
-	return &SortedSet[T]{es: collectSortedValues(seq, 0)}
-}
-
-// Add adds vs to the set. Values already present are ignored.
+//	s.AddAll(other.KeySlice()...)
 //
-// Adding a single value is an insert, O(n). Adding several sorts them once and
-// merges, O(k log k + n + k) — so passing many values in one call is much
-// cheaper than calling Add repeatedly. AddAll does the same for an iterator.
-func (s *SortedSet[T]) Add(vs ...T) {
+// vs is copied before anything is sorted, so the caller's slice is never
+// reordered and is not retained.
+func (s *SortedSet[T]) AddAll(vs ...T) {
 	base := s.es // eager, so a nil receiver panics even when vs is empty
-	switch len(vs) {
-	case 0:
-		return
-	case 1:
-		if i, found := slices.BinarySearch(base, vs[0]); !found {
-			s.es = slices.Insert(base, i, vs[0])
-		}
+	if len(vs) == 0 {
 		return
 	}
 	s.es = mergeSortedValues(base, sortDistinct(slices.Clone(vs)))
 }
 
-// AddAll adds every value in src, sorting once and merging rather than
-// inserting one at a time. See Add for the cost comparison.
-//
-// src.Len() sizes the working slice; it is a hint, and a wrong one costs only a
-// worse allocation. src is fully consumed before the set is modified, so
-// s.AddAll(s) is well defined, if pointless.
-func (s *SortedSet[T]) AddAll(src Elems[T]) {
-	base := s.es                   // eager, so a nil receiver panics even for an empty src
-	seq, n := src.All(), src.Len() // eager, so a nil src panics too
-	s.addAll(base, collectSortedValues(seq, n))
-}
-
-// AddAllSeq is AddAll for a bare iterator, which cannot report its length.
-// Prefer AddAll when the source knows it.
-func (s *SortedSet[T]) AddAllSeq(seq iter.Seq[T]) {
-	base := s.es // eager, so a nil receiver panics even when seq is empty
-	s.addAll(base, collectSortedValues(seq, 0))
-}
-
-func (s *SortedSet[T]) addAll(base, add []T) {
-	if len(add) == 0 {
-		return
-	}
-	s.es = mergeSortedValues(base, add)
-}
-
-// Remove removes vs from the set. Values not present are ignored.
-func (s *SortedSet[T]) Remove(vs ...T) {
+// Delete removes one element. Values not present are ignored.
+func (s *SortedSet[T]) Delete(v T) {
 	if s.es == nil {
-		// Also forces the nil-receiver panic when vs is empty, which a bare
-		// range over vs would skip.
 		return
 	}
-	for _, v := range vs {
-		if i, found := slices.BinarySearch(s.es, v); found {
+	if i, found := slices.BinarySearch(s.es, v); found {
+		s.es = slices.Delete(s.es, i, i+1)
+	}
+}
+
+// DeleteAll removes every element of ks. Spread a slice to bulk-delete:
+//
+//	s.DeleteAll(s.KeySlice()...)
+//
+// That call is safe because KeySlice already returned a copy; deleting from a
+// container while walking it is not supported, and this contract is what makes
+// the obvious spelling correct rather than merely lucky.
+func (s *SortedSet[T]) DeleteAll(ks ...T) {
+	if s.es == nil {
+		// Forces the nil-receiver panic when ks is empty, which a bare range
+		// over ks would skip.
+		return
+	}
+	for _, k := range ks {
+		if i, found := slices.BinarySearch(s.es, k); found {
 			s.es = slices.Delete(s.es, i, i+1)
 		}
 	}
@@ -143,10 +120,17 @@ func (s *SortedSet[T]) Len() int { return len(s.es) }
 //
 // The iterator is bound to the set's contents as of the call to All, not as of
 // iteration. Modifying the set during iteration is not supported.
-func (s *SortedSet[T]) All() iter.Seq[T] {
+func (s *SortedSet[T]) Keys() iter.Seq[T] {
 	es := s.es // eager, so a nil receiver panics here like every other method
 	return seqOverValues(es)
 }
+
+// KeySlice returns the elements of the set as a new slice, in ascending order.
+//
+// The result is a full, independent copy (ADR 0017): nothing the set does
+// afterwards is visible through it, and nothing done to it is visible in the
+// set. That is what makes s.DeleteAll(s.KeySlice()...) safe.
+func (s *SortedSet[T]) KeySlice() []T { return slices.Clone(s.es) }
 
 // Range returns an iterator over the values with lo <= v < hi, in ascending
 // order. If hi <= lo the range is empty.

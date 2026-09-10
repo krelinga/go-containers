@@ -16,16 +16,17 @@ beside it:
 | `map.go` | `Map[K comparable, V any]` | a defined `map[K]V` — an **adapter**, not a default |
 | `vector.go` | `Vector[T any]` | an owned slice, insertion-ordered (ADR `0015`) |
 | — | *(no `Slice` type)* | a plain `[]T` gets a view instead (ADR `0016`) |
+| `keyvalue.go` | `KeyValue[K, V]` | the pair type bulk operations carry (ADR `0017`) |
 | `contracts.go` | the interfaces below | — |
-| `views.go` | `SetView`, `DictView`, `SortedSetView`, `SortedDictView`, `IndexedView` | sealed read-only interfaces (ADRs `0011`, `0012`, `0013`, `0015`, `0016`) |
+| `views.go` | `SetView`, `DictView`, `SortedSetView`, `SortedDictView`, `IndexedView` | sealed read-only interfaces (ADRs `0011`, `0012`, `0013`, `0015`, `0016`, `0017`) |
 | `viewers.go` | `KeyViewer`, `ValueViewer`, the `CanView<Container>` set | the conversions a view applies (ADR `0012`) |
 
-Contracts come in two layers (ADR `0008`, narrowed by `0013`):
+There is **one** contract layer: `MutableSet[T]` and `MutableDict[K, V]` (ADR `0008`, narrowed by
+`0013`, flattened by `0017`). Each declares the reads and the writes directly.
 
-| layer | set side | dict side | adds |
-|---|---|---|---|
-| universal | `Elems[T]` | `Elems2[K, V]` | `Len`, `All` |
-| mutation | `MutableSet[T]` | `MutableDict[K, V]` | `Has`+`Add`+`Remove` / `Get`+`Set`+`Delete` |
+**`Elems` and `Elems2` are gone** (ADR `0017`). Their job was carrying a length for preallocating
+constructors; bulk operations now take slices, which carry their own. Nothing replaced them — do
+not reintroduce a universal read tier.
 
 They take `any` elements and keys, not `comparable` (ADR `0012`). Implementations state their own
 constraints.
@@ -39,7 +40,9 @@ write takes `SetView`/`DictView`; a caller holding a container wraps it with
 `callsites_test.go` holds every stdlib-vs-container comparison. Alongside: `docs/adr/` (design
 decisions) and `experiments/` (measurement harnesses, each its own module). **Check an ADR's
 status before treating it as binding** — most are Accepted, `0010` is Proposed, and `0014` is
-**Rejected**, so its contents describe a road not taken.
+**Rejected**, so its contents describe a road not taken. `0017` is Accepted **as proposal D**; it
+also contains proposals A, B and C in full, which are *not* binding — they are the rejected
+alternatives, kept because what they cost is the reason D was chosen.
 
 Intent, per the module path `github.com/krelinga/go-containers`: a generic (type-parameterized)
 container library. Still early — several ADRs constrain code not yet written more than they
@@ -89,11 +92,13 @@ to a plain `go test` — a shallow-copy `Clone` that silently shares the underly
   shape of a container type — uniform pointer receivers, a usable zero value, a `noCopy` field
   declared *first*, and no nil-receiver or nil-argument special cases. `0004` and `0006` govern
   bulk insertion and the sized read-only contract.
-- **A new container should satisfy its whole contract column** (`contracts.go`). At minimum
-  `Elems`/`Elems2`, since every preallocating constructor takes one and a container that does not
-  satisfy it silently opts out. Add `Has` or `Get` to reach the read-only layer, and the writes to
-  reach the mutation layer. Every existing container satisfied these without changes, because the
-  signatures already matched; keep it that way.
+- **A new container satisfies `MutableSet` or `MutableDict` whole** (`contracts.go`), and the
+  compile-time assertions at the bottom of that file are how you find out. That means the iterator
+  reads, the `*Slice` materialisers, the single-element accessors and the mutators.
+- **A view carries the same `*Slice` methods its container does** (ADR `0017`), so a container can
+  be built from a view — otherwise the read-only boundary would be a dead end. Handing out a slice
+  costs a view nothing, because the result is a copy; a converting view applies its viewer once per
+  element while materialising.
 - **Every container has a view, and a new one is not finished without it** (ADRs `0011`, `0012`
   and `0013`; `views.go`, `viewers.go`). Build one with `View<Container>(c, viewer)`, or
   `View<Container>Identity(c)` to convert nothing. A constructor returns a **sealed interface** —
@@ -116,7 +121,7 @@ to a plain `go test` — a shallow-copy `Clone` that silently shares the underly
   cannot be passed where a view is expected (`missing method sealedView`), and a view cannot be
   asserted back to its container (`impossible type assertion`).
   A view is not a snapshot, is not proof against `reflect`+`unsafe`, and is not automatic: a
-  boundary declared with an unsealed type — `Elems2`, which containers also satisfy — accepts the
+  boundary declared with an unsealed type — `MutableDict`, which containers satisfy — accepts the
   container as happily as ever. The seal binds where the boundary names it.
 - **Ordered views substitute for unordered ones.** `SortedDictView[K, NV]` embeds
   `DictView[K, NV]`, and `SortedSetView[T]` embeds `SetView[T]`, so a consumer naming the base
@@ -147,16 +152,34 @@ to a plain `go test` — a shallow-copy `Clone` that silently shares the underly
   an indexed loop costs ~24% because bounds-check elimination does not survive `At`, and ranging
   `All` costs ~6x a raw range. Two of ADR `0015`'s four call-site tasks are recorded as
   explicitly **not** wins so they are not cited as motivation later.
-- **`Vector.Append` takes one element and is not variadic**, unlike `HashSet.Add(...T)`. This is
-  deliberate and measured: the `...T` signature is 41 of the 62 points of overhead on an append,
-  which is noise against a ~5 ns map insert and half the operation again against a 0.57 ns slice
-  append. `AppendAll`/`AppendAllSeq` cover bulk. **Making the rest of the package consistent with
-  this is an open follow-up in `0015`** — the dicts already match, the sets do not, and `HashSet`
-  has no bulk forms at all.
+- **Every single-element mutator takes one element; every bulk one is variadic** (ADRs `0015`,
+  `0017`). `Append(e T)` / `AppendAll(vs ...T)`, `Add(v T)` / `AddAll(vs ...T)`,
+  `Delete(k K)` / `DeleteAll(ks ...K)`, `Set(k, v)` / `SetAll(kvs ...KeyValue[K, V])`. The split is
+  measured, not stylistic: a `...T` call costs a fixed ~0.3-0.8 ns and **no allocation**, which is
+  ~60% of a slice append and ~5% of a map insert. It survives because collapsing it *cannot* remove
+  it — a dict's `Set` takes two arguments and its `SetAll` takes pairs — so splitting is what is
+  uniform here.
 - **`HashDict` is the default hash dict; `Map` is an adapter** (ADR `0009`). Reach for `Map` only
   when you need a free conversion from an existing `map[K]V`, builtin syntax, to pass the result
   where a `map[K]V` is expected, or working `encoding/json`. Everything else should use `HashDict`,
   which follows the same shape rules as the rest of the package.
+- **Bulk operations take slices, and every `*Slice` result is a full copy** (ADR `0017`). A
+  container materialises with `KeySlice`, `ValueSlice` or `AllSlice`; the result shares nothing with
+  the container in either direction. That contract is what makes `d.DeleteAll(d.KeySlice()...)`
+  correct rather than lucky — under a streaming API the same line silently corrupts a sorted
+  container. Cross-container construction is `NewVector(d.KeySlice()...)`.
+- **`New*` constructors copy their input and never take ownership of it.** This is uniform across
+  every container so that `New*` means one thing. An adopting constructor is worth 1.16x-1.70x and
+  is deliberately deferred to a later ADR, under a *distinct name*, taking `[]T` rather than `...T`,
+  and storing `slices.Clip` of what it is given — a spread carries the source's **capacity**, so
+  `src[:2]` arrives as len 2, cap 1024.
+- **An iterator reaches a bulk operation through `slices.Collect`**, and a `Seq2` through a
+  hand-written pair loop. The `*Seq` method twins are gone; this is the one place the slice currency
+  forces an allocation a streaming API would not.
+- **`Keys`/`Values`/`All` mean what the stdlib means** (ADR `0017` problem 4). `All` always yields
+  pairs; `Keys` and `Values` each yield one half. A set is **key-only** — its element is its key, so
+  it has `Keys`/`KeySlice` and no value side. A `Vector` is keyed by position, so `Values` yields
+  elements and `All` yields index/element pairs.
 - **`HashSet` and `HashDict` are structurally near-identical**, both a `noCopy` plus a map. A bug
   or an optimisation found in one applies to the other — check both.
 - **Name new types per ADR `0008`.** Implementations are `<Ordering><Concept>` — `HashSet`,
@@ -164,10 +187,10 @@ to a plain `go test` — a shallow-copy `Clone` that silently shares the underly
   exception is `Map`, which keeps the builtin's name because it is a thin naming of the builtin;
   a future `Slice[T] []T` would take the same exception.
 - **The eager-dereference rule from `0002` bites repeatedly.** Every method must dereference its
-  receiver — and every method taking a container or `Elems` argument must dereference that —
-  on a path that *always* executes. Variadic methods, empty iterators, and loops that can run zero
-  times all skip it silently. It has been violated three times so far; assert it with tests that
-  fail without the guard.
+  receiver on a path that *always* executes. Variadic methods, empty slices, and loops that can run
+  zero times all skip it silently — so `v.AppendAll()` with no arguments must still panic on a nil
+  receiver. It has been violated three times so far; `TestEmptyBulkCallsStillDereference` in
+  `contracts_test.go` covers every bulk method, and is the test to extend when a container is added.
 - **Serialization is unsettled library-wide, and currently silently lossy.** Container types
   have only unexported fields, so `json.Marshal` of a populated container returns `{}` with a
   **nil error**, discarding its contents; `json.Unmarshal` fails asymmetrically. This follows from

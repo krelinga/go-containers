@@ -7,7 +7,7 @@ import (
 	"github.com/krelinga/go-containers"
 )
 
-func ssVals(s *containers.SortedSet[int]) []int { return slices.Collect(s.All()) }
+func ssVals(s *containers.SortedSet[int]) []int { return slices.Collect(s.Keys()) }
 
 func TestSortedSetZeroValue(t *testing.T) {
 	var s containers.SortedSet[int]
@@ -20,7 +20,7 @@ func TestSortedSetZeroValue(t *testing.T) {
 	if got := ssVals(&s); got != nil {
 		t.Errorf("All on zero value = %v, want empty", got)
 	}
-	s.Add(10, 5)
+	s.AddAll(10, 5)
 	if got, want := ssVals(&s), []int{5, 10}; !slices.Equal(got, want) {
 		t.Errorf("after Add = %v, want %v", got, want)
 	}
@@ -33,15 +33,15 @@ func TestSortedSetNilPanicsUniformly(t *testing.T) {
 	other := containers.NewSortedSet(1)
 
 	mustPanic(t, "Add", func() { p.Add(1) })
-	mustPanic(t, "Add() no args", func() { p.Add() })
-	mustPanic(t, "Add multi", func() { p.Add(1, 2) })
-	mustPanic(t, "AddAll", func() { p.AddAllSeq(slices.Values([]int{1})) })
-	mustPanic(t, "AddAll empty", func() { p.AddAllSeq(func(func(int) bool) {}) })
-	mustPanic(t, "Remove", func() { p.Remove(1) })
-	mustPanic(t, "Remove() no args", func() { p.Remove() })
+	mustPanic(t, "Add() no args", func() { p.AddAll() })
+	mustPanic(t, "Add multi", func() { p.AddAll(1, 2) })
+	mustPanic(t, "AddAll", func() { p.AddAll(slices.Collect(slices.Values([]int{1}))...) })
+	mustPanic(t, "AddAll empty", func() { p.AddAll(slices.Collect(func(func(int) bool) {})...) })
+	mustPanic(t, "Remove", func() { p.Delete(1) })
+	mustPanic(t, "Remove() no args", func() { p.DeleteAll() })
 	mustPanic(t, "Has", func() { _ = p.Has(1) })
 	mustPanic(t, "Len", func() { _ = p.Len() })
-	mustPanic(t, "All", func() { _ = p.All() })
+	mustPanic(t, "All", func() { _ = p.Keys() })
 	mustPanic(t, "Range", func() { _ = p.Range(1, 2) })
 	mustPanic(t, "Floor", func() { _, _ = p.Floor(1) })
 	mustPanic(t, "Ceil", func() { _, _ = p.Ceil(1) })
@@ -75,10 +75,10 @@ func TestSortedSetAddPathsAgree(t *testing.T) {
 		one.Add(v)
 	}
 	multi := containers.NewSortedSet[int]()
-	multi.Add(40, 3, 12, 7, 3, 40)
+	multi.AddAll(40, 3, 12, 7, 3, 40)
 	viaAddAll := containers.NewSortedSet[int]()
-	viaAddAll.AddAllSeq(slices.Values([]int{40, 3, 12, 7, 3, 40}))
-	collected := containers.CollectSortedSetSeq(slices.Values([]int{40, 3, 12, 7, 3, 40}))
+	viaAddAll.AddAll(slices.Collect(slices.Values([]int{40, 3, 12, 7, 3, 40}))...)
+	collected := containers.NewSortedSet(slices.Collect(slices.Values([]int{40, 3, 12, 7, 3, 40}))...)
 
 	want := []int{3, 7, 12, 40}
 	for _, tc := range []struct {
@@ -93,13 +93,13 @@ func TestSortedSetAddPathsAgree(t *testing.T) {
 
 func TestSortedSetAddAllMergesWithExisting(t *testing.T) {
 	s := containers.NewSortedSet(10, 30, 50)
-	s.AddAllSeq(slices.Values([]int{20, 30, 60}))
+	s.AddAll(slices.Collect(slices.Values([]int{20, 30, 60}))...)
 	if got, want := ssVals(s), []int{10, 20, 30, 50, 60}; !slices.Equal(got, want) {
 		t.Errorf("= %v, want %v", got, want)
 	}
 
 	var z containers.SortedSet[int]
-	z.AddAllSeq(func(func(int) bool) {})
+	z.AddAll(slices.Collect(func(func(int) bool) {})...)
 	if z.Len() != 0 {
 		t.Error("empty AddAll on zero value should stay empty")
 	}
@@ -107,12 +107,12 @@ func TestSortedSetAddAllMergesWithExisting(t *testing.T) {
 
 func TestSortedSetRemove(t *testing.T) {
 	s := containers.NewSortedSet(1, 2, 3)
-	s.Remove(2, 99)
+	s.DeleteAll(2, 99)
 	if got, want := ssVals(s), []int{1, 3}; !slices.Equal(got, want) {
 		t.Errorf("= %v, want %v", got, want)
 	}
 	var z containers.SortedSet[int]
-	z.Remove(1) // no-op, not a panic
+	z.Delete(1) // no-op, not a panic
 }
 
 func TestSortedSetOrderedLookups(t *testing.T) {
@@ -172,7 +172,7 @@ func TestSortedSetRange(t *testing.T) {
 func TestSortedSetIteratorsBindAtCallTime(t *testing.T) {
 	var s containers.SortedSet[int]
 	s.Add(10)
-	all, rng := s.All(), s.Range(0, 100)
+	all, rng := s.Keys(), s.Range(0, 100)
 	s.Add(20)
 
 	if got := slices.Collect(all); !slices.Equal(got, []int{10}) {
@@ -210,7 +210,7 @@ func TestSortedSetAlgebra(t *testing.T) {
 	}
 	u := a.Union(b)
 	u.Add(99)
-	u.Remove(1)
+	u.Delete(1)
 	if !a.Has(1) || b.Has(99) {
 		t.Error("mutating the result leaked into an operand")
 	}
@@ -232,7 +232,7 @@ func TestSortedSetCloneIsIndependent(t *testing.T) {
 	orig := containers.NewSortedSet(1, 2)
 	clone := orig.Clone()
 	clone.Add(3)
-	orig.Remove(1)
+	orig.Delete(1)
 
 	if got, want := ssVals(orig), []int{2}; !slices.Equal(got, want) {
 		t.Errorf("orig = %v, want %v", got, want)

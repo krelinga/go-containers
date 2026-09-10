@@ -49,10 +49,20 @@ type SortedDict[K cmp.Ordered, V any] struct {
 	entries []sortedEntry[K, V]
 }
 
-// NewSortedDict returns an empty SortedDict. It is a convenience; the zero value
-// is equally usable.
-func NewSortedDict[K cmp.Ordered, V any]() *SortedDict[K, V] {
-	return &SortedDict[K, V]{}
+// NewSortedDict returns a SortedDict holding kvs. The zero value is equally
+// usable.
+//
+// Spread a slice to build from another container:
+//
+//	NewSortedDict(other.AllSlice()...)
+//
+// Where kvs repeats a key, the last occurrence wins (ADR 0004). kvs is copied
+// before anything is sorted, so the caller's slice is never reordered and is
+// not retained.
+func NewSortedDict[K cmp.Ordered, V any](kvs ...KeyValue[K, V]) *SortedDict[K, V] {
+	d := &SortedDict[K, V]{}
+	d.SetAll(kvs...)
+	return d
 }
 
 // find returns the index of k, or the index where it would be inserted.
@@ -101,6 +111,64 @@ func (m *SortedDict[K, V]) Len() int { return len(m.entries) }
 func (m *SortedDict[K, V]) All() iter.Seq2[K, V] {
 	es := m.entries // eager, so a nil receiver panics here like every other method
 	return seq2Over(es)
+}
+
+// Keys returns an iterator over the keys in ascending order.
+func (m *SortedDict[K, V]) Keys() iter.Seq[K] {
+	es := m.entries // eager, so a nil receiver panics here
+	return func(yield func(K) bool) {
+		for _, e := range es {
+			if !yield(e.k) {
+				return
+			}
+		}
+	}
+}
+
+// Values returns an iterator over the values, in ascending order of their keys.
+func (m *SortedDict[K, V]) Values() iter.Seq[V] {
+	es := m.entries
+	return func(yield func(V) bool) {
+		for _, e := range es {
+			if !yield(e.v) {
+				return
+			}
+		}
+	}
+}
+
+// KeySlice returns the keys as a new slice, in ascending order.
+//
+// The result is a full, independent copy (ADR 0017), which is what makes
+// m.DeleteAll(m.KeySlice()...) safe — deleting from a container while walking it
+// is not supported, and this contract removes the hazard rather than
+// documenting it.
+func (m *SortedDict[K, V]) KeySlice() []K {
+	out := make([]K, 0, len(m.entries))
+	for _, e := range m.entries {
+		out = append(out, e.k)
+	}
+	return out
+}
+
+// ValueSlice returns the values as a new slice, in ascending order of their
+// keys.
+func (m *SortedDict[K, V]) ValueSlice() []V {
+	out := make([]V, 0, len(m.entries))
+	for _, e := range m.entries {
+		out = append(out, e.v)
+	}
+	return out
+}
+
+// AllSlice returns the entries as a new slice of pairs, in ascending key order.
+// It is the bulk-transfer shape: NewSortedDict(m.AllSlice()...).
+func (m *SortedDict[K, V]) AllSlice() []KeyValue[K, V] {
+	out := make([]KeyValue[K, V], 0, len(m.entries))
+	for _, e := range m.entries {
+		out = append(out, KeyValue[K, V]{e.k, e.v})
+	}
+	return out
 }
 
 // Range returns an iterator over the entries with lo <= key < hi, in ascending
@@ -166,34 +234,26 @@ func (m *SortedDict[K, V]) Clone() *SortedDict[K, V] {
 	return &SortedDict[K, V]{entries: slices.Clone(m.entries)}
 }
 
-// SetAll adds every entry in src, replacing existing values for keys already
-// present. Where src yields the same key more than once, the last wins — the
-// same result as calling Set for each entry in order.
+// SetAll writes every entry of kvs, sorting once and merging rather than
+// inserting one at a time. Where kvs repeats a key, the last occurrence wins
+// (ADR 0004).
 //
-// src.Len() sizes the working slice; it is a hint, and a wrong one costs only a
-// worse allocation.
+// Spread a slice to bulk-write:
 //
-// SetAll sorts the input once and merges, which is O(k log k + n + k) for k entries
-// against a map of n. Calling Set in a loop is O(kn), because each out-of-order
-// insert memmoves half the backing array. experiments/bulkinsert measured the
-// crossover at roughly four to sixteen entries, nearly independent of n, with
-// SetAll 42x faster at n=100 000 and k=1 024. **Below that crossover Set is
-// marginally cheaper**, so prefer Set when adding one or two entries; SetAll is
-// the better choice for anything more.
+//	m.SetAll(other.AllSlice()...)
 //
-// src is fully consumed before the map is modified, so m.SetAll(m) is well
-// defined, if pointless.
-func (m *SortedDict[K, V]) SetAll(src Elems2[K, V]) {
-	base := m.entries              // eager, so a nil receiver panics even for an empty src
-	seq, n := src.All(), src.Len() // eager, so a nil src panics too
-	m.setAll(base, collectSortedEntries(seq, n))
-}
-
-// SetAllSeq is SetAll for a bare iterator, which cannot report its length.
-// Prefer SetAll when the source knows it.
-func (m *SortedDict[K, V]) SetAllSeq(seq iter.Seq2[K, V]) {
-	base := m.entries // eager, so a nil receiver panics even when seq is empty
-	m.setAll(base, collectSortedEntries(seq, 0))
+// kvs is copied before anything is sorted, so the caller's slice is never
+// reordered and is not retained.
+func (m *SortedDict[K, V]) SetAll(kvs ...KeyValue[K, V]) {
+	base := m.entries // eager, so a nil receiver panics even when kvs is empty
+	if len(kvs) == 0 {
+		return
+	}
+	add := make([]sortedEntry[K, V], len(kvs))
+	for i, kv := range kvs {
+		add[i] = sortedEntry[K, V]{k: kv.Key, v: kv.Value}
+	}
+	m.setAll(base, sortDistinctEntries(add))
 }
 
 func (m *SortedDict[K, V]) setAll(base, add []sortedEntry[K, V]) {
@@ -203,30 +263,20 @@ func (m *SortedDict[K, V]) setAll(base, add []sortedEntry[K, V]) {
 	m.entries = mergeSortedEntries(base, add)
 }
 
-// CollectSortedDict returns a SortedDict holding every entry in src. Where src
-// yields the same key more than once, the last wins.
-//
-// src.Len() is used to size the working slice, so this allocates once where
-// CollectSortedDictSeq must grow as it goes. The saving is allocation volume
-// rather than wall-clock time: the sort that follows dominates. See ADR 0006.
-//
-// It is also cheaper than NewSortedDict followed by SetAll, since with nothing
-// to merge against the merge degenerates to the sort alone.
-func CollectSortedDict[K cmp.Ordered, V any](src Elems2[K, V]) *SortedDict[K, V] {
-	return &SortedDict[K, V]{entries: collectSortedEntries(src.All(), src.Len())}
+// DeleteAll removes the entries under every key in ks. Keys not present are
+// ignored. Removal takes keys, never pairs (ADR 0017).
+func (m *SortedDict[K, V]) DeleteAll(ks ...K) {
+	if m.entries == nil {
+		// Forces the nil-receiver panic when ks is empty.
+		return
+	}
+	for _, k := range ks {
+		if i, found := m.find(k); found {
+			m.entries = slices.Delete(m.entries, i, i+1)
+		}
+	}
 }
 
-// CollectSortedDictSeq returns a SortedDict holding every entry in seq.
-//
-// Prefer CollectSortedDict when the source knows its length. Use this for bare
-// iterators — maps.All, or another container's Range — which cannot report one.
-func CollectSortedDictSeq[K cmp.Ordered, V any](seq iter.Seq2[K, V]) *SortedDict[K, V] {
-	return &SortedDict[K, V]{entries: collectSortedEntries(seq, 0)}
-}
-
-// collectSortedEntries drains seq into a slice sorted by key, keeping the last
-// entry for any repeated key. It preallocates to sizeHint when that is
-// positive; the hint only affects allocation, never which entries are kept.
 func collectSortedEntries[K cmp.Ordered, V any](seq iter.Seq2[K, V], sizeHint int) []sortedEntry[K, V] {
 	var es []sortedEntry[K, V]
 	if sizeHint > 0 {
@@ -235,11 +285,18 @@ func collectSortedEntries[K cmp.Ordered, V any](seq iter.Seq2[K, V], sizeHint in
 	for k, v := range seq {
 		es = append(es, sortedEntry[K, V]{k: k, v: v})
 	}
-	slices.SortStableFunc(es, func(a, b sortedEntry[K, V]) int { return cmp.Compare(a.k, b.k) })
+	return sortDistinctEntries(es)
+}
 
-	// Keep the LAST of each run of equal keys. slices.CompactFunc keeps the
-	// first, which would silently diverge from repeated Set. The sort is stable,
-	// so a run preserves the order seq yielded.
+// sortDistinctEntries sorts es by key and keeps the LAST entry of each run of
+// equal keys.
+//
+// slices.CompactFunc keeps the FIRST, which would silently diverge from
+// repeated Set and from ADR 0004's last-write-wins rule. The sort is stable, so
+// a run preserves the order the entries arrived in. Tests covering this must
+// use distinguishable values, or they pass either way.
+func sortDistinctEntries[K cmp.Ordered, V any](es []sortedEntry[K, V]) []sortedEntry[K, V] {
+	slices.SortStableFunc(es, func(a, b sortedEntry[K, V]) int { return cmp.Compare(a.k, b.k) })
 	out := es[:0]
 	for i, e := range es {
 		if i+1 < len(es) && es[i+1].k == e.k {

@@ -46,7 +46,7 @@ func unauthorizedStdlib(granted, requested []string) []string {
 
 func unauthorizedContainer(granted, requested []string) []string {
 	missing := containers.NewHashSet(requested...).Difference(containers.NewHashSet(granted...))
-	return slices.Sorted(missing.All())
+	return slices.Sorted(missing.Keys())
 }
 
 // ---------------------------------------------------------------------------
@@ -68,7 +68,7 @@ func sharedStdlib(a, b []string) []string {
 }
 
 func sharedContainer(a, b []string) []string {
-	return slices.Sorted(containers.NewHashSet(a...).Intersect(containers.NewHashSet(b...)).All())
+	return slices.Sorted(containers.NewHashSet(a...).Intersect(containers.NewHashSet(b...)).Keys())
 }
 
 // ---------------------------------------------------------------------------
@@ -85,7 +85,7 @@ func distinctStdlib(in []string) []string {
 }
 
 func distinctContainer(in []string) []string {
-	return slices.Sorted(containers.NewHashSet(in...).All())
+	return slices.Sorted(containers.NewHashSet(in...).Keys())
 }
 
 // ---------------------------------------------------------------------------
@@ -178,7 +178,7 @@ func TestDistinct(t *testing.T) {
 
 func ExampleHashSet() {
 	var granted containers.HashSet[string]
-	granted.Add("read", "write")
+	granted.AddAll("read", "write")
 
 	fmt.Println(granted.Has("read"), granted.Has("delete"), granted.Len())
 	// Output: true false 2
@@ -188,7 +188,7 @@ func ExampleHashSet_Difference() {
 	requested := containers.NewHashSet("read", "delete", "admin")
 	granted := containers.NewHashSet("read", "write")
 
-	fmt.Println(slices.Sorted(requested.Difference(granted).All()))
+	fmt.Println(slices.Sorted(requested.Difference(granted).Keys()))
 	// Output: [admin delete]
 }
 
@@ -420,7 +420,7 @@ func bulkLoadStdlib(src map[int]string) Table {
 
 func bulkLoadContainer(src map[int]string) []Tier {
 	var out []Tier
-	for k, v := range containers.CollectSortedDictSeq(maps.All(src)).All() {
+	for k, v := range containers.NewSortedDict(pairsOf(maps.All(src))...).All() {
 		out = append(out, Tier{k, v})
 	}
 	return out
@@ -451,10 +451,10 @@ func TestBulkLoad(t *testing.T) {
 	}
 }
 
-func ExampleCollectSortedDictSeq() {
-	rates := containers.CollectSortedDictSeq(maps.All(map[int]string{
+func ExampleNewSortedDict() {
+	rates := containers.NewSortedDict(pairsOf(maps.All(map[int]string{
 		100: "0.60", 1: "1.00", 50: "0.75", 10: "0.90",
-	}))
+	}))...)
 	for k, v := range rates.All() {
 		fmt.Println(k, v)
 	}
@@ -496,7 +496,7 @@ func newVersions(ns ...int) Versions {
 func versionsInOrderStdlib(v Versions) []int { return v }
 
 func versionsInOrderContainer(s *containers.SortedSet[int]) []int {
-	return slices.Collect(s.All())
+	return slices.Collect(s.Keys())
 }
 
 // Task I — versions with lo <= n < hi.
@@ -529,7 +529,7 @@ func versionAtOrBeforeContainer(s *containers.SortedSet[int], n int) (int, bool)
 // The same task using the Set this library already ships. Correct, and
 // O(n log n) per call because it re-sorts the whole set to answer one question.
 func versionAtOrBeforeViaSet(s *containers.HashSet[int], n int) (int, bool) {
-	vs := slices.Sorted(s.All())
+	vs := slices.Sorted(s.Keys())
 	i, found := slices.BinarySearch(vs, n)
 	if !found {
 		i--
@@ -706,7 +706,7 @@ func TestPrune(t *testing.T) {
 		})
 		t.Run("stdlib-sorted/"+tc.name, func(t *testing.T) {
 			sm := containers.NewSortedDict[int, int]()
-			sm.SetAllSeq(maps.All(tc.in))
+			sm.SetAll(pairsOf(maps.All(tc.in))...)
 			pruneSortedStdlib(sm, keepEven)
 			if got := slices.Sorted(maps.Keys(maps.Collect(sm.All()))); !slices.Equal(got, tc.want) {
 				t.Errorf("got %v, want %v", got, tc.want)
@@ -724,7 +724,7 @@ func TestPrune(t *testing.T) {
 		// asymmetry ADR 0007 recorded for Map, now avoidable.
 		t.Run("container-hashdict/"+tc.name, func(t *testing.T) {
 			hd := containers.NewHashDict[int, int]()
-			hd.SetAllSeq(maps.All(tc.in))
+			hd.SetAll(pairsOf(maps.All(tc.in))...)
 			pruneContainer[int, int](hd, keepEven)
 			if got := slices.Sorted(maps.Keys(maps.Collect(hd.All()))); !slices.Equal(got, tc.want) {
 				t.Errorf("got %v, want %v", got, tc.want)
@@ -732,7 +732,7 @@ func TestPrune(t *testing.T) {
 		})
 		t.Run("container-sorted/"+tc.name, func(t *testing.T) {
 			sm := containers.NewSortedDict[int, int]()
-			sm.SetAllSeq(maps.All(tc.in))
+			sm.SetAll(pairsOf(maps.All(tc.in))...)
 			pruneContainer[int, int](sm, keepEven)
 			if got := slices.Sorted(maps.Keys(maps.Collect(sm.All()))); !slices.Equal(got, tc.want) {
 				t.Errorf("got %v, want %v", got, tc.want)
@@ -760,12 +760,12 @@ func ExampleHashDict() {
 	// Output: 2 [cpu mem]
 }
 
-func ExampleCollectHashDict() {
+func ExampleNewHashDict() {
 	// Building one dict from another presizes from the source's length.
 	src := containers.NewSortedDict[string, int]()
-	src.SetAllSeq(maps.All(map[string]int{"b": 2, "a": 1, "c": 3}))
+	src.SetAll(pairsOf(maps.All(map[string]int{"b": 2, "a": 1, "c": 3}))...)
 
-	byHash := containers.CollectHashDict(src)
+	byHash := containers.NewHashDict(src.AllSlice()...)
 	fmt.Println(byHash.Len(), slices.Sorted(maps.Keys(maps.Collect(byHash.All()))))
 	// Output: 3 [a b c]
 }
@@ -809,7 +809,7 @@ func addDefaultsStdlib(out []string, defaults ...string) []string {
 
 // The callee appends in place. There is no return value to forget.
 func addDefaultsContainer(out *containers.Vector[string], defaults ...string) {
-	out.AppendAllSeq(slices.Values(defaults))
+	out.AppendAll(slices.Collect(slices.Values(defaults))...)
 }
 
 // ---------------------------------------------------------------------------
@@ -848,7 +848,7 @@ func TestTaskHContainer(t *testing.T) {
 			for _, e := range tc.record {
 				l.Record(e)
 			}
-			if got := slices.Collect(l.Entries().All()); !slices.Equal(got, tc.want) {
+			if got := l.Entries().ValueSlice(); !slices.Equal(got, tc.want) {
 				t.Errorf("Entries() = %v, want %v", got, tc.want)
 			}
 		})
@@ -930,7 +930,7 @@ func TestTaskIContainer(t *testing.T) {
 	addDefaultsContainer(out, "a", "b")
 
 	want := []string{"explicit", "a", "b"}
-	if got := slices.Collect(out.All()); !slices.Equal(got, want) {
+	if got := out.ValueSlice(); !slices.Equal(got, want) {
 		t.Errorf("addDefaultsContainer = %v, want %v", got, want)
 	}
 }
@@ -963,7 +963,7 @@ func ExampleVector() {
 	}
 
 	// The view was taken before any of those appends, and sees all of them.
-	fmt.Println(view.Len(), slices.Collect(view.All()))
+	fmt.Println(view.Len(), view.ValueSlice())
 	// Output: 3 [login read write]
 }
 
@@ -993,7 +993,7 @@ func TestTaskNContainer(t *testing.T) {
 			for _, e := range tc.record {
 				l.Record(e)
 			}
-			if got := slices.Collect(l.Entries().All()); !slices.Equal(got, tc.want) {
+			if got := l.Entries().ValueSlice(); !slices.Equal(got, tc.want) {
 				t.Errorf("Entries() = %v, want %v", got, tc.want)
 			}
 		})

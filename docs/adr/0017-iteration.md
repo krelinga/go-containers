@@ -1,9 +1,10 @@
 # 17. The iteration contracts
 
-- **Status:** Proposed — and deliberately **not a decision**. This ADR states
-  five problems precisely, records the evidence, sketches directions, and
-  develops three rival proposals. It decides nothing, except problem 4, which is
-  settled in place. A second ADR, or a revision of this one, should choose.
+- **Status:** **Accepted — proposal D.** This ADR states five problems, records
+  the evidence, sketches directions, and develops four rival proposals. It ends
+  by choosing **proposal D**: containers materialise to slices, and every bulk
+  operation is variadic in the element type. Proposals A, B and C are kept in
+  full, because what they cost is the reason D was chosen.
 - **Date:** 2026-09-08
 - **Evidence:** `experiments/iteration/` (`RESULTS.md`), with context from
   `experiments/vectorcost/`, `sliceadapter/`, `linkedlist/` and `sizedcollect/`.
@@ -2066,7 +2067,7 @@ eagerly. A should check it is not doing the same: `Range(lo, hi)` returning a
 on it. Nothing in A's write-up says either way, and the cheap version is the one
 where `RangeAll` holds the bounds and builds a direction on demand.
 
-### Proposal D: materialise to a slice
+### Proposal D: materialise to a slice — **ACCEPTED**
 
 C's appeal was raw simplicity, bought by giving up the size hint — which
 measured at 2.7x-3.7x and is too much to give up. D keeps C's simplicity and
@@ -2482,9 +2483,8 @@ proposed can be revisited if the streaming-backwards case turns out to matter.
 which depended on the `Collector`:
 
 - `Append(e T)`, `Set(k, v)`, `Add(v T)`, `Has`, `Get` and `Delete(k)` stay as
-  single-element operations. A collector for one element measured 49x the direct
-  call; a one-element variadic is cheaper than that but still not free, and the
-  bulk form is right there.
+  single-element operations — re-decided on D's own measurement rather than
+  inherited, in **the mutator-surface ruling below**.
 - **`HashSet.Add` and `SortedSet.Add` stop being variadic**, leaving `AddAll` as
   the bulk spelling. After this **no method in the package is variadic except the
   bulk ones**, which is the same end state A reached by a different route.
@@ -2515,6 +2515,54 @@ always executes — a rule violated three times in this repository's history,
 every time via a loop that could run zero times. `NewVector[int]()` needs the
 explicit type argument, exactly as today.
 
+**The mutator surface keeps its split**, and this is decided on measurement
+rather than inherited from A. A kept single-element mutators because a
+`Collector` for one element cost 49x the direct call; D has no `Collector`, so
+that argument does not transfer and the question had to be asked again: is there
+any reason not to collapse `Append`/`AppendAll`, `Add`/`AddAll` and
+`Delete`/`DeleteAll` into one variadic method each?
+
+Measured at both bounds — inlined, and with inlining disabled, since a real
+container method is larger than a benchmark model (finding 12):
+
+| | single | variadic | |
+|---|---|---|---|
+| vector append, inlined | 0.9303 ns | 0.9363 ns | +0.6% |
+| vector append, not inlined | 1.281 ns | 2.046 ns | **+60%** |
+| map insert, inlined | 4.371 ns | 4.747 ns | +8.6% |
+| map insert, not inlined | 5.259 ns | 5.545 ns | +5.4% |
+| map delete, inlined | 1.116 ns | 1.627 ns | +46% |
+
+**Zero allocations in every case**, at both bounds: the variadic slice is
+stack-allocated. That retires the allocation half of ADR `0015`'s reasoning and
+leaves only call overhead — roughly 0.3-0.8 ns, absolute rather than
+proportional. It vanishes against a map insert and is large against a slice
+append, which is why one change reads as 5% on `HashSet` and 60% on `Vector`.
+
+**But the deciding argument is structural, not the numbers: collapsing cannot
+remove the split.** A dict's single insert takes two arguments and its bulk
+insert takes pairs, so `Set(k, v)` and `SetAll(kvs ...KeyValue[K, V])` cannot
+merge — `d.Set(KeyValue[K, V]{k, v})` is a real ergonomic regression, and the
+whole reason `KeyValue` exists is to carry pairs through *bulk* operations.
+Collapsing therefore produces:
+
+```go
+v.Append(vs ...T)                 // one
+s.Add(vs ...T)                    // one
+d.Set(k, v); d.SetAll(kvs ...KV)  // still two
+```
+
+which trades "every container has a single form and a bulk form" for "most
+containers have one, dicts have two", **and pays up to 60% on the cheapest
+operation in the package to do it.** Removing exactly that kind of raggedness is
+problem 2's purpose, so the split stays. Under D, **splitting is the uniform
+choice**, because the dict cannot collapse.
+
+This also leaves ADR `0015`'s ruling on `Vector.Append` standing, by a narrower
+argument than the one `0015` gave: not that the variadic form allocates — it does
+not — but that its fixed cost is large relative to an append and buys nothing
+`AppendAll` does not already provide.
+
 **One reversal to record.** A rejected `AppendMany(es ...T)`, answering ADR
 `0015`'s follow-up in the negative, on the grounds that the slice optimisation
 belonged on `Collector` where it would serve every consumer. D has no
@@ -2535,3 +2583,38 @@ on wide ones, and uses a third of the allocations** — while replacing eight na
 types and eight free functions with one struct and none. The performance case
 it could have made is deferred, deliberately, to keep every `New*` meaning one
 thing.
+
+## Decision
+
+**Proposal D is adopted.** The four proposals answer one question — what a bulk
+operation should be handed — and they were separated by measurement rather than
+taste:
+
+- **A**, a sealed `Collector`, is the most capable and the largest: eight named
+  types and eight free functions to move a length that a slice carries for free.
+  It alone preserves streaming.
+- **B**, a `Source` value, was measured against A and did not clear the bar it
+  set for itself: its value-over-box win is real but evaporates at scale, and its
+  eager reverse half costs more than the box it avoids.
+- **C**, no primitive at all, gave up the size hint — measured at 2.7x-3.7x, and
+  silently forgettable, which is what ruled it out.
+- **D**, materialising to slices, keeps C's simplicity and gets the size back,
+  because a slice's length is exact and free.
+
+D costs a second set of methods on every container and every view, doubles peak
+memory on a bulk build, and gives up streaming and unbounded sources entirely.
+It is within 16% of A on narrow elements in either direction, 77% slower on wide
+ones, and uses a third of the allocations — while replacing sixteen named types
+and free functions with one struct.
+
+**What is deferred, deliberately**, each with its evidence already recorded:
+
+- **Reverse iteration.** `slices.Reverse` on an owned copy covers the common
+  case; reading a large container backwards without materialising it does not
+  have a spelling, and A's `Backward`/`RangeKeys`/`RangeAll` machinery is the
+  design to revisit.
+- **An adopting constructor.** Worth 1.16x-1.70x and a third of the memory on
+  wide elements, wanted under a distinct name, taking `[]T` rather than `...T`,
+  and storing `slices.Clip` of what it is given.
+- **Sub-ranges as anything but an `iter.Seq`.** ADR `0013`'s deferred "should
+  `Range` return a view?" stays deferred.

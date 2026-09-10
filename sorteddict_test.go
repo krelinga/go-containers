@@ -55,7 +55,7 @@ func TestSortedDictNilPanicsUniformly(t *testing.T) {
 	mustPanic(t, "Get", func() { _, _ = p.Get(1) })
 	mustPanic(t, "Delete", func() { p.Delete(1) })
 	mustPanic(t, "Len", func() { _ = p.Len() })
-	mustPanic(t, "All", func() { _ = p.All() })
+	mustPanic(t, "All", func() { _ = p.Keys() })
 	mustPanic(t, "Range", func() { _ = p.Range(1, 2) })
 	mustPanic(t, "Floor", func() { _, _, _ = p.Floor(1) })
 	mustPanic(t, "Ceil", func() { _, _, _ = p.Ceil(1) })
@@ -266,8 +266,8 @@ func TestSetAllLastWriteWins(t *testing.T) {
 	}
 
 	bulk := containers.NewSortedDict[int, string]()
-	bulk.SetAllSeq(seq)
-	collected := containers.CollectSortedDictSeq(seq)
+	bulk.SetAll(pairsOf(seq)...)
+	collected := containers.NewSortedDict(pairsOf(seq)...)
 
 	for _, tc := range []struct {
 		name string
@@ -299,7 +299,7 @@ func TestSetAllMergesWithExisting(t *testing.T) {
 	for _, k := range []int{10, 30, 50} {
 		m.Set(k, "old")
 	}
-	m.SetAllSeq(maps.All(map[int]string{20: "new", 30: "replaced", 60: "new"}))
+	m.SetAll(pairsOf(maps.All(map[int]string{20: "new", 30: "replaced", 60: "new"}))...)
 
 	if got, want := orderedKeys(m), []int{10, 20, 30, 50, 60}; !slices.Equal(got, want) {
 		t.Errorf("keys = %v, want %v", got, want)
@@ -317,48 +317,48 @@ func TestSetAllEdgeCases(t *testing.T) {
 
 	// Zero value receiver.
 	var z containers.SortedDict[int, string]
-	z.SetAllSeq(maps.All(map[int]string{2: "b", 1: "a"}))
+	z.SetAll(pairsOf(maps.All(map[int]string{2: "b", 1: "a"}))...)
 	if got, want := orderedKeys(&z), []int{1, 2}; !slices.Equal(got, want) {
 		t.Errorf("zero value SetAll = %v, want %v", got, want)
 	}
 
 	// Empty input leaves the map alone.
-	z.SetAllSeq(empty)
+	z.SetAll(pairsOf(empty)...)
 	if got, want := orderedKeys(&z), []int{1, 2}; !slices.Equal(got, want) {
 		t.Errorf("after empty SetAll = %v, want %v", got, want)
 	}
 
-	if containers.CollectSortedDictSeq(empty).Len() != 0 {
+	if containers.NewSortedDict(pairsOf(empty)...).Len() != 0 {
 		t.Error("CollectSortedDict of an empty seq should be empty")
 	}
 
 	// ADR 0002's eager-dereference rule: an EMPTY seq must still panic on a nil
 	// receiver, which a bare range over seq would skip.
 	var p *containers.SortedDict[int, string]
-	mustPanic(t, "SetAll nil receiver, empty seq", func() { p.SetAllSeq(empty) })
+	mustPanic(t, "SetAll nil receiver, empty seq", func() { p.SetAll(pairsOf(empty)...) })
 	mustPanic(t, "SetAll nil receiver, non-empty seq", func() {
-		p.SetAllSeq(maps.All(map[int]string{1: "a"}))
+		p.SetAll(pairsOf(maps.All(map[int]string{1: "a"}))...)
 	})
 }
 
 // The iter.Seq2 choice exists so these compose with no adapter.
 func TestSetAllComposes(t *testing.T) {
 	src := containers.NewSortedDict[int, string]()
-	src.SetAllSeq(maps.All(map[int]string{1: "a", 10: "b", 50: "c", 100: "d"}))
+	src.SetAll(pairsOf(maps.All(map[int]string{1: "a", 10: "b", 50: "c", 100: "d"}))...)
 
-	fromAll := containers.CollectSortedDict(src)
+	fromAll := containers.NewSortedDict(src.AllSlice()...)
 	if got, want := orderedKeys(fromAll), []int{1, 10, 50, 100}; !slices.Equal(got, want) {
 		t.Errorf("CollectSortedDict(src.All()) = %v, want %v", got, want)
 	}
 
-	fromRange := containers.CollectSortedDictSeq(src.Range(10, 100))
+	fromRange := containers.NewSortedDict(pairsOf(src.Range(10, 100))...)
 	if got, want := orderedKeys(fromRange), []int{10, 50}; !slices.Equal(got, want) {
 		t.Errorf("CollectSortedDict(src.Range(10,100)) = %v, want %v", got, want)
 	}
 
 	dst := containers.NewSortedDict[int, string]()
-	dst.SetAllSeq(src.Range(1, 11))
+	dst.SetAll(pairsOf(src.Range(1, 11))...)
 	if got, want := orderedKeys(dst), []int{1, 10}; !slices.Equal(got, want) {
-		t.Errorf("dst.SetAllSeq(src.Range(1,11)) = %v, want %v", got, want)
+		t.Errorf("dst.SetAll(pairsOf(src.Range(1,11))...) = %v, want %v", got, want)
 	}
 }

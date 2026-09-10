@@ -63,24 +63,6 @@ func NewVector[T any](vs ...T) *Vector[T] {
 	return &Vector[T]{es: slices.Clone(vs)}
 }
 
-// CollectVector returns a Vector holding everything src yields, preallocated
-// from src.Len. See ADR 0006.
-func CollectVector[T any](src Elems[T]) *Vector[T] {
-	n := src.Len() // eager, so a nil src panics
-	seq := src.All()
-	v := &Vector[T]{es: make([]T, 0, max(0, n))}
-	v.AppendAllSeq(seq)
-	return v
-}
-
-// CollectVectorSeq is CollectVector for a bare iterator, which cannot report
-// its length.
-func CollectVectorSeq[T any](seq iter.Seq[T]) *Vector[T] {
-	v := &Vector[T]{}
-	v.AppendAllSeq(seq)
-	return v
-}
-
 // Len reports how many elements the Vector holds.
 func (v *Vector[T]) Len() int { return len(v.es) }
 
@@ -98,37 +80,29 @@ func (v *Vector[T]) Set(i int, e T) { v.es[i] = e }
 //
 // It is deliberately not variadic, unlike HashSet.Add. A variadic signature
 // costs about 40% of an append, which is noise against a map insert and half
-// the operation again against a slice append. Use AppendAll or AppendAllSeq for
-// more than one. See ADR 0015 decision 3.
+// the operation again against a slice append. Use AppendAll for more than one.
+// ADR 0017 re-measured this: a variadic call costs a fixed ~0.3-0.8ns and no
+// allocation, which is 60% of an append and 5% of a map insert.
 func (v *Vector[T]) Append(e T) { v.es = append(v.es, e) }
 
-// AppendAll adds everything src yields, in order, preallocating from src.Len.
+// AppendAll adds every element of vs to the end, in order. Spread a slice to
+// bulk-append:
 //
-// src is fully consumed as it is applied.
-func (v *Vector[T]) AppendAll(src Elems[T]) {
-	n := src.Len()                     // eager, so a nil src panics
-	es := slices.Grow(v.es, max(0, n)) // eager, so a nil receiver panics
-	for e := range src.All() {
-		es = append(es, e)
-	}
-	v.es = es
+//	v.AppendAll(other.ValueSlice()...)
+//
+// vs is copied and not retained; the caller remains free to modify it.
+func (v *Vector[T]) AppendAll(vs ...T) {
+	// slices.Grow touches the receiver before the append, so a nil receiver
+	// panics even when vs is empty -- ADR 0002's eager-dereference rule.
+	es := slices.Grow(v.es, len(vs))
+	v.es = append(es, vs...)
 }
 
-// AppendAllSeq is AppendAll for a bare iterator, which cannot report its
-// length.
-func (v *Vector[T]) AppendAllSeq(seq iter.Seq[T]) {
-	es := v.es // eager, so a nil receiver panics even when seq is empty
-	for e := range seq {
-		es = append(es, e)
-	}
-	v.es = es
-}
-
-// All iterates the elements in order.
+// Values iterates the elements in order.
 //
 // The iterator binds the backing slice at call time, so a nil receiver panics
 // here rather than at iteration. See ADR 0002.
-func (v *Vector[T]) All() iter.Seq[T] {
+func (v *Vector[T]) Values() iter.Seq[T] {
 	es := v.es
 	return func(yield func(T) bool) {
 		for _, e := range es {
@@ -139,11 +113,12 @@ func (v *Vector[T]) All() iter.Seq[T] {
 	}
 }
 
-// AllIndexed iterates index and element together.
+// All iterates index and element together. A vector is keyed by position
+// (ADR 0017), so All yields pairs and Values yields the elements alone.
 //
 // It cannot be called All: Elems[T] already claims that name for the
 // value-only sequence, and a type cannot have both.
-func (v *Vector[T]) AllIndexed() iter.Seq2[int, T] {
+func (v *Vector[T]) All() iter.Seq2[int, T] {
 	es := v.es
 	return func(yield func(int, T) bool) {
 		for i, e := range es {
@@ -152,6 +127,23 @@ func (v *Vector[T]) AllIndexed() iter.Seq2[int, T] {
 			}
 		}
 	}
+}
+
+// ValueSlice returns the elements as a new slice, in order.
+//
+// The result is a full, independent copy (ADR 0017): appending to the Vector
+// afterwards is not visible through it, and writing to it is not visible in the
+// Vector.
+func (v *Vector[T]) ValueSlice() []T { return slices.Clone(v.es) }
+
+// AllSlice returns index/element pairs as a new slice, in order. It is the
+// bulk-transfer shape for feeding a dict: NewHashDict(v.AllSlice()...).
+func (v *Vector[T]) AllSlice() []KeyValue[int, T] {
+	out := make([]KeyValue[int, T], 0, len(v.es))
+	for i, e := range v.es {
+		out = append(out, KeyValue[int, T]{i, e})
+	}
+	return out
 }
 
 // Clone returns an independent Vector with the same elements. The backing

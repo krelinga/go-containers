@@ -49,9 +49,27 @@ func NewHashSet[T comparable](vs ...T) *HashSet[T] {
 	return s
 }
 
-// Add adds vs to the set. Adding a value already present is a no-op.
-func (s *HashSet[T]) Add(vs ...T) {
+// Add inserts one element. Adding a value already present is a no-op.
+//
+// AddAll is the bulk form; Add is deliberately not variadic (ADR 0017), because
+// a variadic call costs a fixed ~0.3-0.8ns that buys nothing AddAll does not
+// already provide.
+func (s *HashSet[T]) Add(v T) {
 	if s.m == nil {
+		s.m = make(map[T]struct{}, 1)
+	}
+	s.m[v] = struct{}{}
+}
+
+// AddAll inserts every element of vs. Spread a slice to bulk-insert:
+//
+//	s.AddAll(other.KeySlice()...)
+//
+// vs is copied and not retained; the caller remains free to modify it.
+func (s *HashSet[T]) AddAll(vs ...T) {
+	if s.m == nil {
+		// Assigned before the loop, so a nil receiver panics even when vs is
+		// empty -- ADR 0002's eager-dereference rule.
 		s.m = make(map[T]struct{}, len(vs))
 	}
 	for _, v := range vs {
@@ -59,15 +77,27 @@ func (s *HashSet[T]) Add(vs ...T) {
 	}
 }
 
-// Remove removes vs from the set. Removing a value not present is a no-op.
-func (s *HashSet[T]) Remove(vs ...T) {
+// Delete removes one element. Removing a value not present is a no-op.
+func (s *HashSet[T]) Delete(v T) {
 	if s.m == nil {
-		// Also forces the nil-receiver panic when vs is empty, which a bare
-		// range over vs would skip.
 		return
 	}
-	for _, v := range vs {
-		delete(s.m, v)
+	delete(s.m, v)
+}
+
+// DeleteAll removes every element of ks. Spread a slice to bulk-delete:
+//
+//	s.DeleteAll(s.KeySlice()...)   // safe: KeySlice is already a copy
+//
+// ks is not retained.
+func (s *HashSet[T]) DeleteAll(ks ...T) {
+	if s.m == nil {
+		// Forces the nil-receiver panic when ks is empty, which a bare range
+		// over ks would skip.
+		return
+	}
+	for _, k := range ks {
+		delete(s.m, k)
 	}
 }
 
@@ -80,11 +110,13 @@ func (s *HashSet[T]) Has(v T) bool {
 // Len returns the number of values in the set.
 func (s *HashSet[T]) Len() int { return len(s.m) }
 
-// All returns an iterator over the values in the set, in no particular order.
+// Keys returns an iterator over the elements of the set, in no particular
+// order. A set's element is its key (ADR 0017), so this is the key-shaped read
+// and there is no value side.
 //
-// The iterator is bound to the set's contents as of the call to All, not as of
+// The iterator is bound to the set's contents as of the call to Keys, not as of
 // iteration. Modifying the set during iteration is not supported.
-func (s *HashSet[T]) All() iter.Seq[T] {
+func (s *HashSet[T]) Keys() iter.Seq[T] {
 	m := s.m // read eagerly, so a nil receiver panics here rather than on iteration
 	return func(yield func(T) bool) {
 		for v := range m {
@@ -93,6 +125,20 @@ func (s *HashSet[T]) All() iter.Seq[T] {
 			}
 		}
 	}
+}
+
+// KeySlice returns the elements of the set as a new slice, in no particular
+// order.
+//
+// The result is a full, independent copy: nothing the set does afterwards is
+// visible through it, and nothing done to it is visible in the set. That is what
+// makes s.DeleteAll(s.KeySlice()...) safe.
+func (s *HashSet[T]) KeySlice() []T {
+	out := make([]T, 0, len(s.m))
+	for v := range s.m {
+		out = append(out, v)
+	}
+	return out
 }
 
 // Clone returns an independent copy of the set. Mutating the result does not
@@ -107,7 +153,7 @@ func (s *HashSet[T]) Clone() *HashSet[T] {
 // Union returns a new set containing every value in s or o.
 func (s *HashSet[T]) Union(o *HashSet[T]) *HashSet[T] {
 	out := s.Clone()
-	for v := range o.All() {
+	for v := range o.Keys() {
 		out.m[v] = struct{}{}
 	}
 	return out
@@ -121,7 +167,7 @@ func (s *HashSet[T]) Intersect(o *HashSet[T]) *HashSet[T] {
 		small, large = large, small
 	}
 	out := &HashSet[T]{m: make(map[T]struct{})}
-	for v := range small.All() {
+	for v := range small.Keys() {
 		if large.Has(v) {
 			out.m[v] = struct{}{}
 		}
@@ -134,7 +180,7 @@ func (s *HashSet[T]) Difference(o *HashSet[T]) *HashSet[T] {
 	// o.Len() both sizes the result and forces o to be evaluated, so a nil o
 	// panics even when s is empty and the loop below never runs.
 	out := &HashSet[T]{m: make(map[T]struct{}, max(0, s.Len()-o.Len()))}
-	for v := range s.All() {
+	for v := range s.Keys() {
 		if !o.Has(v) {
 			out.m[v] = struct{}{}
 		}

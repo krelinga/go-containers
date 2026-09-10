@@ -71,5 +71,67 @@ func (m Map[K, V]) Len() int { return len(m) }
 // builtin range produces.
 func (m Map[K, V]) All() iter.Seq2[K, V] { return maps.All(m) }
 
+// Keys returns an iterator over the keys, in the unspecified order a map range
+// produces.
+func (m Map[K, V]) Keys() iter.Seq[K] { return maps.Keys(m) }
+
+// Values returns an iterator over the values, in the unspecified order a map
+// range produces.
+func (m Map[K, V]) Values() iter.Seq[V] { return maps.Values(m) }
+
+// KeySlice returns the keys as a new slice, in no particular order. The result
+// is a full, independent copy (ADR 0017).
+func (m Map[K, V]) KeySlice() []K {
+	out := make([]K, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+// ValueSlice returns the values as a new slice, in no particular order.
+func (m Map[K, V]) ValueSlice() []V {
+	out := make([]V, 0, len(m))
+	for _, v := range m {
+		out = append(out, v)
+	}
+	return out
+}
+
+// AllSlice returns the entries as a new slice of pairs, in no particular order.
+func (m Map[K, V]) AllSlice() []KeyValue[K, V] {
+	out := make([]KeyValue[K, V], 0, len(m))
+	for k, v := range m {
+		out = append(out, KeyValue[K, V]{k, v})
+	}
+	return out
+}
+
+// SetAll writes every entry of kvs, replacing existing values for keys already
+// present. Where kvs repeats a key, the last occurrence wins (ADR 0004).
+//
+// Map has no constructor — a composite literal and make already build one,
+// which is the point of the type (ADR 0009) — but it is a bulk target like
+// every other dict:
+//
+//	m.SetAll(other.AllSlice()...)
+//
+// Map is a defined map type with value receivers, so it follows the builtin's
+// nil semantics rather than ADR 0002's: writing to a nil Map panics only once
+// there is something to write, so SetAll with no arguments is a no-op on one.
+func (m Map[K, V]) SetAll(kvs ...KeyValue[K, V]) {
+	for _, kv := range kvs {
+		m[kv.Key] = kv.Value
+	}
+}
+
+// DeleteAll removes the entries under every key in ks. Keys not present are
+// ignored. As with the builtin delete, doing this to a nil Map is a no-op.
+func (m Map[K, V]) DeleteAll(ks ...K) {
+	for _, k := range ks {
+		delete(m, k)
+	}
+}
+
 // Clone returns a shallow copy. The result does not alias m.
 func (m Map[K, V]) Clone() Map[K, V] { return maps.Clone(m) }

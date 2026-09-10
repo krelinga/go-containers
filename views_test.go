@@ -217,13 +217,13 @@ func TestViewAllDereferencesEagerly(t *testing.T) {
 	vw := itemViewer{itemKeys: itemKeys{known: map[string]*item{}}}
 
 	mustPanic(t, "hashSetView.All", func() {
-		_ = containers.ViewHashSet[*item, string](nil, itemKeys{}).All()
+		_ = containers.ViewHashSet[*item, string](nil, itemKeys{}).Keys()
 	})
 	mustPanic(t, "hashSetIdentityView.All", func() {
-		_ = containers.ViewHashSetIdentity[int](nil).All()
+		_ = containers.ViewHashSetIdentity[int](nil).Keys()
 	})
 	mustPanic(t, "sortedSetView.All", func() {
-		_ = containers.ViewSortedSet[int](nil).All()
+		_ = containers.ViewSortedSet[int](nil).Keys()
 	})
 	mustPanic(t, "hashDictView.All", func() {
 		_ = containers.ViewHashDict[*item, *item, string, itemView](nil, vw).All()
@@ -264,8 +264,8 @@ func TestEveryContainerHasAView(t *testing.T) {
 	if !pv.Has("x") || pv.Has("nope") {
 		t.Error("converting set view membership is wrong")
 	}
-	if got := slices.Collect(pv.All()); !slices.Equal(got, []string{"x"}) {
-		t.Errorf("converting set view All = %v", got)
+	if got := pv.KeySlice(); !slices.Equal(got, []string{"x"}) {
+		t.Errorf("converting set view KeySlice = %v", got)
 	}
 }
 
@@ -287,7 +287,7 @@ func TestIndexedViewConvertsElements(t *testing.T) {
 	}
 
 	var names []string
-	for _, e := range view.AllIndexed() {
+	for _, e := range view.All() {
 		names = append(names, e.Name())
 	}
 	if !slices.Equal(names, []string{"first", "second"}) {
@@ -342,7 +342,7 @@ func TestIndexedViewNilAndEagerness(t *testing.T) {
 		_ = containers.ViewVector[*item, itemView](nil, itemValuesOnly{}).All()
 	})
 	mustPanic(t, "vectorView.AllIndexed", func() {
-		_ = containers.ViewVector[*item, itemView](nil, itemValuesOnly{}).AllIndexed()
+		_ = containers.ViewVector[*item, itemView](nil, itemValuesOnly{}).All()
 	})
 }
 
@@ -359,7 +359,7 @@ func TestSliceViewConvertsElements(t *testing.T) {
 		t.Errorf("At(1).Name() = %q", got)
 	}
 	var names []string
-	for _, e := range view.AllIndexed() {
+	for _, e := range view.All() {
 		names = append(names, e.Name())
 	}
 	if !slices.Equal(names, []string{"first", "second"}) {
@@ -399,7 +399,7 @@ func TestSliceViewOfNil(t *testing.T) {
 	if v.Len() != 0 {
 		t.Errorf("Len = %d, want 0", v.Len())
 	}
-	if got := slices.Collect(v.All()); len(got) != 0 {
+	if got := v.ValueSlice(); len(got) != 0 {
 		t.Errorf("All = %v, want empty", got)
 	}
 	mustPanic(t, "At on an empty view", func() { _ = v.At(0) })
@@ -444,7 +444,7 @@ func TestSliceViewEagerness(t *testing.T) {
 		_ = containers.ViewSlice[*item, itemView](nil, nil).All()
 	})
 	mustPanic(t, "sliceView.AllIndexed with a nil viewer", func() {
-		_ = containers.ViewSlice[*item, itemView](nil, nil).AllIndexed()
+		_ = containers.ViewSlice[*item, itemView](nil, nil).All()
 	})
 }
 

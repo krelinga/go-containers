@@ -92,7 +92,7 @@ func TestMapOperations(t *testing.T) {
 // The value satisfies, unlike every other container here.
 func TestMapInterfaceSatisfaction(t *testing.T) {
 	var (
-		_ containers.Elems2[int, string]      = containers.Map[int, string]{}
+		_ containers.MutableDict[int, string] = containers.Map[int, string]{}
 		_ containers.MutableDict[int, string] = containers.Map[int, string]{}
 		_ containers.MutableDict[int, string] = containers.NewSortedDict[int, string]()
 	)
@@ -122,7 +122,7 @@ func TestMutableDictGenericOverBothBackings(t *testing.T) {
 		})
 		t.Run("SortedDict/"+tc.name, func(t *testing.T) {
 			sm := containers.NewSortedDict[int, int]()
-			sm.SetAllSeq(maps.All(tc.in))
+			sm.SetAll(pairsOf(maps.All(tc.in))...)
 			prune[int, int](sm, keepEven)
 			if got := slices.Sorted(maps.Keys(maps.Collect(sm.All()))); !slices.Equal(got, tc.want) {
 				t.Errorf("got %v, want %v", got, tc.want)

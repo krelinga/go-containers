@@ -271,4 +271,28 @@ Durable:
     `iter.Seq` — so a slice-based API has to keep its iterators too, rather than
     replacing them.
 
+12. **A `...T` parameter never allocates, and costs meaningfully only where the
+    operation is already almost free.** Measured both inlined and with inlining
+    disabled, since a real container method is larger than a benchmark model and
+    the truth sits between the two bounds:
+
+    | | single | variadic | |
+    |---|---|---|---|
+    | vector append, inlined | 0.9303 ns | 0.9363 ns | +0.6% |
+    | vector append, not inlined | 1.281 ns | 2.046 ns | **+60%** |
+    | map insert, inlined | 4.371 ns | 4.747 ns | +8.6% |
+    | map insert, not inlined | 5.259 ns | 5.545 ns | +5.4% |
+    | map delete, inlined | 1.116 ns | 1.627 ns | +46% |
+
+    **Zero allocations in every case, at both bounds** — the variadic slice is
+    stack-allocated and never reaches the heap. That removes the allocation
+    concern behind ADR `0015`'s ruling, leaving only the call overhead.
+
+    The overhead is proportional to nothing and absolute: roughly 0.3-0.8 ns per
+    call. It therefore disappears against a map insert and is large against a
+    slice append, which is why the same change reads as 5% on one container and
+    60% on another. **The durable form of this result is "a variadic call costs
+    well under a nanosecond and no allocation"**; whether that matters is a
+    property of what it is being added to.
+
 Perishable: every absolute number above.

@@ -3,6 +3,7 @@ package containers
 import (
 	"cmp"
 	"iter"
+	"slices"
 )
 
 // A view is a read-only handle on a container, plus the conversions a viewer
@@ -81,7 +82,15 @@ import (
 // Sealed: only this package's view types satisfy it, so a set cannot be passed
 // as one.
 type SetView[NT any] interface {
-	Elems[NT]
+	Len() int
+
+	// Keys iterates the elements, converted. A set's element is its key
+	// (ADR 0017).
+	Keys() iter.Seq[NT]
+
+	// KeySlice returns the elements as a new slice. The result is a full,
+	// independent copy, so it hands out nothing the view protects.
+	KeySlice() []NT
 
 	// Has reports whether an element is present. An element that does not
 	// convert back to the container's own type cannot be, so it reads as a miss.
@@ -98,7 +107,18 @@ type SetView[NT any] interface {
 //
 // Sealed: only this package's view types satisfy it.
 type DictView[NK, NV any] interface {
-	Elems2[NK, NV]
+	Len() int
+
+	// Keys, Values and All iterate the converted entries.
+	Keys() iter.Seq[NK]
+	Values() iter.Seq[NV]
+	All() iter.Seq2[NK, NV]
+
+	// KeySlice, ValueSlice and AllSlice materialise them. Each result is a
+	// full, independent copy, so none hands out anything the view protects.
+	KeySlice() []NK
+	ValueSlice() []NV
+	AllSlice() []KeyValue[NK, NV]
 
 	// Get returns the value under a key. A key that does not convert back to the
 	// container's own type cannot be present, so it reads as a miss.
@@ -151,13 +171,19 @@ type SortedDictView[K cmp.Ordered, NV any] interface {
 //
 // Sealed: only this package's view types satisfy it.
 type IndexedView[NT any] interface {
-	Elems[NT]
+	Len() int
+
+	// Values iterates the elements, converted; All pairs each with its index.
+	Values() iter.Seq[NT]
+	All() iter.Seq2[int, NT]
+
+	// ValueSlice and AllSlice materialise them, each as a full, independent
+	// copy.
+	ValueSlice() []NT
+	AllSlice() []KeyValue[int, NT]
 
 	// At returns the element at i, converted. It panics if i is out of range.
 	At(int) NT
-
-	// AllIndexed iterates index and converted element together.
-	AllIndexed() iter.Seq2[int, NT]
 
 	sealedView()
 }
@@ -184,8 +210,8 @@ func (v hashSetView[T, NT]) Has(nt NT) bool {
 	return ok && v.s.Has(t)
 }
 
-func (v hashSetView[T, NT]) All() iter.Seq[NT] {
-	seq, vw := v.s.All(), v.viewer // eager, so a broken view panics here
+func (v hashSetView[T, NT]) Keys() iter.Seq[NT] {
+	seq, vw := v.s.Keys(), v.viewer // eager, so a broken view panics here
 	return func(yield func(NT) bool) {
 		for t := range seq {
 			if !yield(vw.ToKeyView(t)) {
@@ -203,10 +229,10 @@ func ViewHashSetIdentity[T comparable](s *HashSet[T]) SetView[T] {
 	return hashSetIdentityView[T]{s}
 }
 
-func (v hashSetIdentityView[T]) sealedView()      {}
-func (v hashSetIdentityView[T]) Len() int         { return v.s.Len() }
-func (v hashSetIdentityView[T]) Has(t T) bool     { return v.s.Has(t) }
-func (v hashSetIdentityView[T]) All() iter.Seq[T] { return v.s.All() }
+func (v hashSetIdentityView[T]) sealedView()       {}
+func (v hashSetIdentityView[T]) Len() int          { return v.s.Len() }
+func (v hashSetIdentityView[T]) Has(t T) bool      { return v.s.Has(t) }
+func (v hashSetIdentityView[T]) Keys() iter.Seq[T] { return v.s.Keys() }
 
 // ---------------------------------------------------------------------------
 // SortedSet — no viewer, so one word for every construction.
@@ -222,7 +248,7 @@ func ViewSortedSet[T cmp.Ordered](s *SortedSet[T]) SortedSetView[T] {
 func (v sortedSetView[T]) sealedView()                {}
 func (v sortedSetView[T]) Len() int                   { return v.s.Len() }
 func (v sortedSetView[T]) Has(t T) bool               { return v.s.Has(t) }
-func (v sortedSetView[T]) All() iter.Seq[T]           { return v.s.All() }
+func (v sortedSetView[T]) Keys() iter.Seq[T]          { return v.s.Keys() }
 func (v sortedSetView[T]) Range(lo, hi T) iter.Seq[T] { return v.s.Range(lo, hi) }
 func (v sortedSetView[T]) Min() (T, bool)             { return v.s.Min() }
 func (v sortedSetView[T]) Max() (T, bool)             { return v.s.Max() }
@@ -460,7 +486,7 @@ func (v sliceView[T, NT]) Len() int    { return len(v.s) }
 
 func (v sliceView[T, NT]) At(i int) NT { return v.viewer.ToValueView(v.s[i]) }
 
-func (v sliceView[T, NT]) All() iter.Seq[NT] {
+func (v sliceView[T, NT]) Values() iter.Seq[NT] {
 	es, vw := v.s, v.viewer
 	if vw == nil {
 		panic("containers: view has no viewer")
@@ -474,7 +500,7 @@ func (v sliceView[T, NT]) All() iter.Seq[NT] {
 	}
 }
 
-func (v sliceView[T, NT]) AllIndexed() iter.Seq2[int, NT] {
+func (v sliceView[T, NT]) All() iter.Seq2[int, NT] {
 	es, vw := v.s, v.viewer
 	if vw == nil {
 		panic("containers: view has no viewer")
@@ -499,7 +525,7 @@ func (v sliceIdentityView[T]) sealedView() {}
 func (v sliceIdentityView[T]) Len() int    { return len(v.s) }
 func (v sliceIdentityView[T]) At(i int) T  { return v.s[i] }
 
-func (v sliceIdentityView[T]) All() iter.Seq[T] {
+func (v sliceIdentityView[T]) Values() iter.Seq[T] {
 	es := v.s
 	return func(yield func(T) bool) {
 		for _, e := range es {
@@ -510,7 +536,7 @@ func (v sliceIdentityView[T]) All() iter.Seq[T] {
 	}
 }
 
-func (v sliceIdentityView[T]) AllIndexed() iter.Seq2[int, T] {
+func (v sliceIdentityView[T]) All() iter.Seq2[int, T] {
 	es := v.s
 	return func(yield func(int, T) bool) {
 		for i, e := range es {
@@ -579,8 +605,8 @@ func (v vectorView[T, NT]) Len() int    { return v.vec.Len() }
 
 func (v vectorView[T, NT]) At(i int) NT { return v.viewer.ToValueView(v.vec.At(i)) }
 
-func (v vectorView[T, NT]) All() iter.Seq[NT] {
-	seq, vw := v.vec.All(), v.viewer // eager, so a broken view panics here
+func (v vectorView[T, NT]) Values() iter.Seq[NT] {
+	seq, vw := v.vec.Values(), v.viewer // eager, so a broken view panics here
 	return func(yield func(NT) bool) {
 		for e := range seq {
 			if !yield(vw.ToValueView(e)) {
@@ -590,8 +616,8 @@ func (v vectorView[T, NT]) All() iter.Seq[NT] {
 	}
 }
 
-func (v vectorView[T, NT]) AllIndexed() iter.Seq2[int, NT] {
-	seq, vw := v.vec.AllIndexed(), v.viewer // eager
+func (v vectorView[T, NT]) All() iter.Seq2[int, NT] {
+	seq, vw := v.vec.All(), v.viewer // eager
 	return func(yield func(int, NT) bool) {
 		for i, e := range seq {
 			if !yield(i, vw.ToValueView(e)) {
@@ -608,8 +634,137 @@ func ViewVectorIdentity[T any](vec *Vector[T]) IndexedView[T] {
 	return vectorIdentityView[T]{vec}
 }
 
-func (v vectorIdentityView[T]) sealedView()                   {}
-func (v vectorIdentityView[T]) Len() int                      { return v.vec.Len() }
-func (v vectorIdentityView[T]) At(i int) T                    { return v.vec.At(i) }
-func (v vectorIdentityView[T]) All() iter.Seq[T]              { return v.vec.All() }
-func (v vectorIdentityView[T]) AllIndexed() iter.Seq2[int, T] { return v.vec.AllIndexed() }
+func (v vectorIdentityView[T]) sealedView()            {}
+func (v vectorIdentityView[T]) Len() int               { return v.vec.Len() }
+func (v vectorIdentityView[T]) At(i int) T             { return v.vec.At(i) }
+func (v vectorIdentityView[T]) Values() iter.Seq[T]    { return v.vec.Values() }
+func (v vectorIdentityView[T]) All() iter.Seq2[int, T] { return v.vec.All() }
+
+// ---------------------------------------------------------------------------
+// Materialisers
+//
+// Every view offers the same *Slice methods its container does (ADR 0017),
+// because a container has to be constructible from a view -- a view is the
+// read-only boundary a caller is meant to pass around, and without these it
+// would be a dead end.
+//
+// Handing out a slice costs the view nothing, because the result is a full,
+// independent copy. A converting view applies its viewer once per element while
+// materialising, exactly as its iterator does.
+// ---------------------------------------------------------------------------
+
+func sliceOfSeq[T any](seq iter.Seq[T], n int) []T {
+	out := make([]T, 0, max(0, n))
+	for v := range seq {
+		out = append(out, v)
+	}
+	return out
+}
+
+func keysOfSeq2[K, V any](seq iter.Seq2[K, V], n int) []K {
+	out := make([]K, 0, max(0, n))
+	for k := range seq {
+		out = append(out, k)
+	}
+	return out
+}
+
+func valuesOfSeq2[K, V any](seq iter.Seq2[K, V], n int) []V {
+	out := make([]V, 0, max(0, n))
+	for _, v := range seq {
+		out = append(out, v)
+	}
+	return out
+}
+
+func pairsOfSeq2[K, V any](seq iter.Seq2[K, V], n int) []KeyValue[K, V] {
+	out := make([]KeyValue[K, V], 0, max(0, n))
+	for k, v := range seq {
+		out = append(out, KeyValue[K, V]{k, v})
+	}
+	return out
+}
+
+func keySeqOf[K, V any](seq iter.Seq2[K, V]) iter.Seq[K] {
+	return func(yield func(K) bool) {
+		for k := range seq {
+			if !yield(k) {
+				return
+			}
+		}
+	}
+}
+
+func valueSeqOf[K, V any](seq iter.Seq2[K, V]) iter.Seq[V] {
+	return func(yield func(V) bool) {
+		for _, v := range seq {
+			if !yield(v) {
+				return
+			}
+		}
+	}
+}
+
+func (v hashSetView[T, NT]) KeySlice() []NT    { return sliceOfSeq(v.Keys(), v.Len()) }
+func (v hashSetIdentityView[T]) KeySlice() []T { return v.s.KeySlice() }
+func (v sortedSetView[T]) KeySlice() []T       { return v.s.KeySlice() }
+
+func (v hashDictView[K, V, NK, NV]) Keys() iter.Seq[NK]   { return keySeqOf(v.All()) }
+func (v hashDictView[K, V, NK, NV]) Values() iter.Seq[NV] { return valueSeqOf(v.All()) }
+func (v hashDictView[K, V, NK, NV]) KeySlice() []NK       { return keysOfSeq2(v.All(), v.Len()) }
+func (v hashDictView[K, V, NK, NV]) ValueSlice() []NV     { return valuesOfSeq2(v.All(), v.Len()) }
+func (v hashDictView[K, V, NK, NV]) AllSlice() []KeyValue[NK, NV] {
+	return pairsOfSeq2(v.All(), v.Len())
+}
+
+func (v hashDictIdentityView[K, V]) Keys() iter.Seq[K]          { return v.d.Keys() }
+func (v hashDictIdentityView[K, V]) Values() iter.Seq[V]        { return v.d.Values() }
+func (v hashDictIdentityView[K, V]) KeySlice() []K              { return v.d.KeySlice() }
+func (v hashDictIdentityView[K, V]) ValueSlice() []V            { return v.d.ValueSlice() }
+func (v hashDictIdentityView[K, V]) AllSlice() []KeyValue[K, V] { return v.d.AllSlice() }
+
+func (v sortedDictView[K, V, NV]) Keys() iter.Seq[K]    { return v.d.Keys() }
+func (v sortedDictView[K, V, NV]) Values() iter.Seq[NV] { return valueSeqOf(v.All()) }
+func (v sortedDictView[K, V, NV]) KeySlice() []K        { return v.d.KeySlice() }
+func (v sortedDictView[K, V, NV]) ValueSlice() []NV     { return valuesOfSeq2(v.All(), v.Len()) }
+func (v sortedDictView[K, V, NV]) AllSlice() []KeyValue[K, NV] {
+	return pairsOfSeq2(v.All(), v.Len())
+}
+
+func (v sortedDictIdentityView[K, V]) Keys() iter.Seq[K]          { return v.d.Keys() }
+func (v sortedDictIdentityView[K, V]) Values() iter.Seq[V]        { return v.d.Values() }
+func (v sortedDictIdentityView[K, V]) KeySlice() []K              { return v.d.KeySlice() }
+func (v sortedDictIdentityView[K, V]) ValueSlice() []V            { return v.d.ValueSlice() }
+func (v sortedDictIdentityView[K, V]) AllSlice() []KeyValue[K, V] { return v.d.AllSlice() }
+
+func (v mapView[K, V, NK, NV]) Keys() iter.Seq[NK]   { return keySeqOf(v.All()) }
+func (v mapView[K, V, NK, NV]) Values() iter.Seq[NV] { return valueSeqOf(v.All()) }
+func (v mapView[K, V, NK, NV]) KeySlice() []NK       { return keysOfSeq2(v.All(), v.Len()) }
+func (v mapView[K, V, NK, NV]) ValueSlice() []NV     { return valuesOfSeq2(v.All(), v.Len()) }
+func (v mapView[K, V, NK, NV]) AllSlice() []KeyValue[NK, NV] {
+	return pairsOfSeq2(v.All(), v.Len())
+}
+
+func (v mapIdentityView[K, V]) Keys() iter.Seq[K]          { return v.m.Keys() }
+func (v mapIdentityView[K, V]) Values() iter.Seq[V]        { return v.m.Values() }
+func (v mapIdentityView[K, V]) KeySlice() []K              { return v.m.KeySlice() }
+func (v mapIdentityView[K, V]) ValueSlice() []V            { return v.m.ValueSlice() }
+func (v mapIdentityView[K, V]) AllSlice() []KeyValue[K, V] { return v.m.AllSlice() }
+
+func (v sliceView[T, NT]) ValueSlice() []NT { return sliceOfSeq(v.Values(), v.Len()) }
+func (v sliceView[T, NT]) AllSlice() []KeyValue[int, NT] {
+	return pairsOfSeq2(v.All(), v.Len())
+}
+
+func (v sliceIdentityView[T]) ValueSlice() []T { return slices.Clone(v.s) }
+func (v sliceIdentityView[T]) AllSlice() []KeyValue[int, T] {
+	return pairsOfSeq2(v.All(), v.Len())
+}
+
+func (v vectorView[T, NT]) ValueSlice() []NT { return sliceOfSeq(v.Values(), v.Len()) }
+func (v vectorView[T, NT]) AllSlice() []KeyValue[int, NT] {
+	return pairsOfSeq2(v.All(), v.Len())
+}
+
+func (v vectorIdentityView[T]) ValueSlice() []T              { return v.vec.ValueSlice() }
+func (v vectorIdentityView[T]) AllSlice() []KeyValue[int, T] { return v.vec.AllSlice() }
