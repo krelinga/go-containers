@@ -275,7 +275,7 @@ A copy taken before the first write does not share. That is the divergence
 `noCopy` exists to catch, and it would be back with the guard removed. **So pure
 value receivers, and a read-only zero value, is not a preference — it is forced.**
 
-#### Recovering the view hierarchy with embedding, not a conversion method
+#### Recovering the view hierarchy: embedding, and why it is not the answer
 
 The version of option (b) priced earlier gave ordered views a `.Set()` method.
 Struct **embedding** is better on every axis:
@@ -297,9 +297,175 @@ type SortedSetView[T any] struct {
   made awkward.
 
 Verified in `TestEmbeddingRecoversSubstitution`. What remains is that the
-selector must be *written*: substitution is explicit rather than implicit. That
-is the whole of the hierarchy cost, and it is now a field access rather than a
-method call.
+selector must be *written*: substitution is explicit rather than implicit.
+
+**That residue is avoidable, and the next section is the better shape.** Keeping
+the hierarchy in an *interface* tier rather than in the view structs makes
+substitution implicit again, at no runtime cost — so embedding is recorded here
+as a working fallback rather than as the recommendation.
+
+#### The view layer: concrete types plus capability interfaces
+
+Embedding the view types in one another, above, is not the right shape. The
+better one separates the two jobs a view does today, which the sealed interface
+currently conflates:
+
+```go
+// Tier 1 -- a concrete struct per container. This is the GUARANTEE.
+type HashSetView[NT any]    struct{ st *hashSetViewState[…] }
+type SortedSetView[T any]   struct{ st *sortedSetViewState[T] }
+type HashDictView[NK, NV any] struct{ … }
+// … one per container, named for it.
+
+// Tier 2 -- capability interfaces. This is the GENERALITY.
+// Deliberately NOT sealed: containers satisfy them too.
+type Set[T any] interface {
+	Len() int
+	Has(T) bool
+	Keys() iter.Seq[T]
+	KeySlice() []T
+}
+
+type OrderedSet[T cmp.Ordered] interface {
+	Set[T]
+	Min() (T, bool)
+	Max() (T, bool)
+	Floor(T) (T, bool)
+	Ceil(T) (T, bool)
+	Range(lo, hi T) iter.Seq[T]
+}
+
+type Dict[K, V any] interface { … }
+type OrderedDict[K cmp.Ordered, V any] interface { Dict[K, V]; … }
+```
+
+Two boundaries, two spellings, and the choice says what you mean:
+
+```go
+func handOut() HashSetView[string]  // nothing can write through this
+func audit(s Set[string])           // I need reads; container or view, I don't care
+```
+
+**What it recovers, verified.** `TestInterfaceHierarchySurvives`: `OrderedSet`
+embeds `Set`, so an ordered view substitutes for the base **implicitly** — no
+field selector, no conversion method — and composes into a `[]Set[T]`. That is
+ADR `0013` decision 2, intact. Struct-embedded views gave it up; this design does
+not, because the hierarchy lives in the interface layer where embedding *is*
+subtyping.
+
+`TestBothSatisfyTheCapabilityInterface`: a container and a view both satisfy
+`Set[T]` and both pass through the same generic boundary. That is the thing the
+status quo cannot do at all — today a function needing reads must choose between
+`SetView[T]` (excludes containers) and a concrete container type (excludes
+everything else).
+
+##### Wart 1: the capability interface is assertable, and that is the trade
+
+`Set[T]` is unsealed by design, so a value inside it can be asserted back out.
+Measured behaviour, not speculation (`TestCapabilityInterfaceIsAssertable`):
+
+```go
+var s Set[string] = myHashSet          // a CONTAINER
+back, _ := s.(*HashSet[string])        // succeeds
+back.Add("smuggled")                   // write access recovered
+
+var v Set[string] = myHashSetView      // a VIEW
+_, ok := v.(*HashSet[string])          // fails -- nothing writable to recover
+```
+
+**So `Set[T]` is a convenience, not a guarantee**, and the guarantee lives in
+tier 1. This is a direct answer to why ADR `0013` deleted `Set` and `Dict`: they
+were deleted because they were the *only* read mechanism, so a boundary naming
+one looked like a guarantee and was not. Here they are the second of two, and the
+first one is a real guarantee. **The reversal is deliberate and should be
+recorded as one** — ADR `0008`'s "the bare concept for reads" comes back, under a
+justification `0013` did not have available.
+
+##### Wart 2: every view must be exactly one word
+
+This is the hard constraint, and it is measured. Passing a concrete view into a
+`Set[T]` parameter — the boundary the whole design exists to make cheap:
+
+| | | allocs |
+|---|---|---|
+| container | 0.7549 ns | 0 |
+| identity view, one word | 0.8772 ns | **0** |
+| converting view, viewer inline (three words) | **13.59 ns** | **1** |
+| converting view, viewer behind a pointer (one word) | 1.107 ns | **0** |
+
+A one-word struct is pointer-shaped and boxes free; anything wider allocates **on
+every crossing**. So a converting view cannot hold its viewer inline — it must
+push it behind a pointer, paying **one allocation at construction** (11.85 ns)
+instead of one per boundary.
+
+**That is exactly what the library already does.** ADRs `0012` and `0013` record
+that "a view carrying a viewer costs one allocation, at construction, and nothing
+per boundary crossing", and an identity view costs none at all. The two-tier
+design preserves that profile precisely. What changes is that the one-word
+constraint stops being an implementation detail and becomes a **rule** — and it
+is quietly easy to violate, because adding a second field to a view struct
+compiles fine and silently allocates at every call site that generalises.
+
+##### Wart 3: the interface tier reintroduces a panicking state
+
+Option (b)'s value layer removes the panicking zero value: reads are total. The
+interface tier puts one back, because a *nil interface* has no dynamic type:
+
+| | `k == nil` | `k.Len()` |
+|---|---|---|
+| `var k Set[int]` | true | **panics** |
+| `k = HashSetView[int]{}` (zero view) | false | 0 |
+| `k = populated view` | false | n |
+
+Note this is *not* Go's typed-nil trap in its dangerous form: state 2 is a
+non-nil interface holding a zero value, and under option (b)'s total-reads rule
+calling it is **safe**, not a panic. The trap is defused for values. What remains
+is that state 1 exists at all, and that `== nil` distinguishes it from states 2
+and 3 while `IsZero()` distinguishes 2 from 3. Two questions, two spellings,
+neither of which is new — but they now live in different tiers.
+
+##### Wart 4: "read-only AND polymorphic" stops being expressible
+
+The deepest wart, and it deserves stating plainly because it is a genuine loss.
+
+- **Tier 1** gives read-only, one backing.
+- **Tier 2** gives any backing, and admits containers — so not read-only.
+- **Neither gives read-only across backings.**
+
+That combination is exactly what today's sealed `SetView[T]` provides, and it is
+in use: `countPresent[T any](s containers.SetView[T], probes ...T)` in
+`contracts_test.go` is read-only and backing-agnostic. Under a strict two-tier
+design that function must give up one or the other.
+
+Three ways out, in increasing order of surface:
+
+- **Accept the loss.** Such boundaries take `Set[T]` and rely on the caller not
+  smuggling a container in to write through later. Honest, and weaker than today.
+- **Keep a sealed middle tier**: `HashSetView[T]` (concrete) satisfies
+  `SetView[T]` (sealed, views only) satisfies `Set[T]` (unsealed, containers
+  too). Every combination expressible, at three names per concept.
+- **Seal by construction instead.** A concrete view whose only field is
+  unexported cannot be built populated outside the package, so `sealedView()`
+  becomes unnecessary — but that seals *tier 1*, not tier 2, and does not help.
+
+The middle option is the complete one and is what a full design would likely
+take; the cost is that the vocabulary grows to `HashSetView` / `SetView` / `Set`
+for a single idea.
+
+##### Wart 5: naming, and what collides
+
+- **The container names block the obvious read-interface names.** `SortedSet[T]`
+  is a container, so the ordered read contract has to be `OrderedSet[T]`, and
+  likewise `OrderedDict[K, V]`. Mild, but it means the interface tier and the
+  implementation tier use different adjectives for the same ordering.
+- **Concrete views do not substitute for one another.** `HashSetView[T]` and
+  `SortedSetView[T]` are unrelated structs; anything wanting either takes the
+  interface. That is the intended rule and worth stating, because it makes tier 1
+  useful only at boundaries you fully control.
+- **The exported surface grows**: roughly seven concrete view structs plus four
+  to six interfaces, against five interfaces and fourteen unexported structs
+  today. More names, each individually simpler, and each concrete view carrying a
+  doc line that says *do not add a second field*.
 
 #### `IsZero` is provided and rarely needed
 
@@ -338,7 +504,11 @@ and the doc comment on each type says copies share. This is the same contract
 | zero view, reads | panics | 0 / false / empty |
 | "is it empty" | `Len() == 0` | `Len() == 0` |
 | "was it constructed" | `== nil` | `IsZero()` |
-| ordered → base view | implicit (embedding) | `sv.SetView` (field selector) |
+| ordered → base view | implicit (embedding) | implicit, via the interface tier |
+| read-only guarantee | sealed `SetView[T]` | concrete `HashSetView[T]` |
+| generic over backing | sealed `SetView[T]` | `Set[T]` interface |
+| generic over backing **and** read-only | `SetView[T]` | **needs a third tier** |
+| a function that reads either a container or a view | **impossible** | `Set[T]` |
 | `HashDict` vs `Map` | two types, ADR `0007` asymmetry | **one type** |
 | set algebra on a contract | impossible | still impossible |
 
@@ -360,11 +530,15 @@ Ordered by how much judgement each needs, not by size:
    types is gone, so this stops being a separate question and becomes a
    consequence.
 4. **Rewrite every container as `struct{ st *state }` with value receivers**, and
-   every view as `struct{ impl sealedImpl }`, with the nil check on every read
-   — inside the returned closure, handing `yield` through, per the refined
-   placement rule.
-5. **Re-embed the ordered views** and add the field selector at every
-   ordered-to-base call site.
+   every view as a **one-word** concrete struct named for its container, with the
+   nil check on every read — inside the returned closure, handing `yield`
+   through, per the refined placement rule. The one-word constraint is
+   load-bearing and easy to violate: a converting view holds its viewer behind a
+   pointer, never inline.
+5. **Add the capability interfaces** — `Set`, `OrderedSet`, `Dict`,
+   `OrderedDict` — unsealed, satisfied by containers and views alike, and decide
+   whether a sealed middle tier is kept for boundaries that need read-only
+   *across* backings.
 6. **Delete `noCopy`, `container_layout_test.go`, and the copylocks note in
    `CLAUDE.md`.** Replace with a documented copies-share contract per type.
 7. **Rewrite `contracts.go`'s assertions** from `(*HashSet[int])(nil)` to
@@ -378,8 +552,10 @@ decision softened from implicit to explicit (`0013`'s substitution), a class of
 error detection traded for builtin-matching semantics, and a whole-library
 migration.
 
-What it buys is the thing this ADR keeps circling: **the library stops having two
-kinds of handle.** Whether that is worth the four costs above is a judgement
+What it buys is two things. **The library stops having two kinds of handle** —
+and, with the view layer split into concrete types plus capability interfaces,
+**a function that just needs reads can accept a container or a view**, which the
+status quo cannot express at all. Whether that is worth the four costs above is a judgement
 about how much the container/view split actually hurts in practice — and the
 honest answer is that no call site in this repository currently demonstrates that
 it does. **That, not cost, is what option (b) is still waiting on.**

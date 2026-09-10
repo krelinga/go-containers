@@ -8,6 +8,9 @@ var (
 	sinkStrs   []string
 	sinkStr    string
 	sinkOBBase obSetView[string]
+	sinkIdv    identityView[string]
+	sinkWide   wideView[string, string]
+	sinkNarrow narrowView[string, string]
 	sinkBase   structSetView[string]
 	sinkIface  ifaceSetView[string]
 	sinkWrap   wrapSetView[string]
@@ -635,6 +638,73 @@ func BenchmarkOptionBEmbedding(b *testing.B) {
 		b.ReportAllocs()
 		for b.Loop() {
 			sinkStrs = full.KeySlice()
+		}
+	})
+}
+
+// 10. The two-tier design's decisive cost: passing a concrete view into a
+// capability-interface parameter. A one-word struct is pointer-shaped and boxes
+// free; anything wider allocates on every crossing.
+func BenchmarkTwoTier(b *testing.B) {
+	c := newPtrSet(fixture(n)...)
+	idv := viewIdentity(c)
+	wide := viewWide[string, string](c, upper{})
+	narrow := viewNarrow[string, string](c, upper{})
+
+	b.Run("construct/identity(1 word)", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkIdv = viewIdentity(c)
+		}
+	})
+	b.Run("construct/converting-wide(3 words)", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkWide = viewWide[string, string](c, upper{})
+		}
+	})
+	b.Run("construct/converting-narrow(1 word)", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkNarrow = viewNarrow[string, string](c, upper{})
+		}
+	})
+
+	// The boundary the design exists to make cheap.
+	b.Run("pass-to-Set/container", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkInt = countThrough[string](c)
+		}
+	})
+	b.Run("pass-to-Set/identity(1 word)", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkInt = countThrough[string](idv)
+		}
+	})
+	b.Run("pass-to-Set/converting-wide(3 words)", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkInt = countThrough[string](wide)
+		}
+	})
+	b.Run("pass-to-Set/converting-narrow(1 word)", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkInt = countThrough[string](narrow)
+		}
+	})
+
+	// Direct calls on the concrete type, for reference.
+	b.Run("direct/identity.Len", func(b *testing.B) {
+		for b.Loop() {
+			sinkInt = idv.Len()
+		}
+	})
+	b.Run("direct/narrow.Len", func(b *testing.B) {
+		for b.Loop() {
+			sinkInt = narrow.Len()
 		}
 	})
 }

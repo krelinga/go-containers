@@ -189,6 +189,37 @@ works — and a copy taken before the first write does not share, giving
 reintroduced with the guard removed**, which is why pure value receivers and a
 read-only zero value are forced rather than chosen.
 
+## 7. The two-tier view layer: a view must be exactly one word
+
+Concrete view structs for the read-only guarantee, plus unsealed capability
+interfaces so generic code accepts a container or a view. The decisive cost is
+passing a concrete view into an interface parameter, because that is the
+boundary the design exists to make cheap.
+
+| passing into `Set[T]` | | allocs |
+|---|---|---|
+| the container itself | 0.7549 ns | 0 |
+| identity view, **one word** | 0.8772 ns | **0** |
+| converting view, viewer inline (**three words**) | **13.59 ns** | **1** |
+| converting view, viewer behind a pointer (**one word**) | 1.107 ns | **0** |
+| construct the one-word converting view | 11.85 ns | 1 |
+
+**A one-word struct is pointer-shaped and boxes free; anything wider allocates on
+every crossing.** So a converting view must push its viewer behind a pointer,
+paying one allocation at construction rather than one per boundary — which is
+exactly the profile ADRs `0012` and `0013` already record for today's views. The
+design preserves it; what changes is that the one-word shape becomes a rule, and
+it is silently violable by adding a second field.
+
+**Three semantic results.** `TestBothSatisfyTheCapabilityInterface`: a container
+and a view both satisfy `Set[T]` and pass through the same generic boundary —
+which the status quo cannot express. `TestInterfaceHierarchySurvives`:
+`OrderedSet` embeds `Set`, so substitution stays **implicit** and composes into a
+`[]Set[T]`, recovering what struct-embedded views gave up.
+`TestCapabilityInterfaceIsAssertable`: a **container** placed in `Set[T]` asserts
+back to a writable container, while a **view** does not — so the interface is a
+convenience and the concrete view is the guarantee.
+
 ## Durable / perishable
 
 **Durable.** A reference struct is free relative to a pointer, on any method
