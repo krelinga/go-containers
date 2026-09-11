@@ -407,6 +407,72 @@ made double reversal a **compile error**, but that was for a *source*, which had
 no state to flip; a span has a field, and a type to forbid it would buy nothing.
 A caller who writes it has a bug, and it is not worth a second type to catch.
 
+#### Sub-option C-alt: constructors instead of methods
+
+Spans could be built by free functions taking a shape interface, rather than by
+a `Range` and a `Backward` on every container and view:
+
+```go
+func NewKeySpan[K cmp.Ordered](src SortedKeys[K], lo, hi K) KeySpan[K]
+func NewKeyValueSpan[K cmp.Ordered, V any](src SortedKeyValues[K, V], lo, hi K) KeyValueSpan[K, V]
+func Backward[K cmp.Ordered](src SortedKeys[K]) KeySpan[K]
+```
+
+**Caller code:**
+
+```go
+// C, methods
+sp := m.Range(20, 40).Backward()
+rev := m.Backward()
+
+// C-alt, constructors
+sp := containers.NewKeyValueSpan(m, 20, 40).Backward()
+rev := containers.Backward(m)
+```
+
+**What it would buy, and it is not nothing:**
+
+- **No method explosion.** `Range` and `Backward` on four sorted types — two
+  containers, two views — is eight methods. Two or three constructors replace
+  them, and a fifth sorted type later adds none.
+- **Uniform over containers and views** by construction, since both satisfy the
+  shape interface. The method form has to define the same two methods twice per
+  shape.
+- **It dissolves the open question above.** `SortedKeyValues` could keep its
+  current `Range(lo, hi) iter.Seq2[K, V]` signature untouched, because the span
+  is built by a *function* rather than by a method that would have to collide
+  with it. No accepted ADR `0018` interface changes.
+- It follows ADR `0017` proposal A's instinct — `KeysOf(d)`, `ItemsFrom(seq)` —
+  which that ADR ultimately rejected for construction, but on grounds about
+  *size hints* that do not apply here.
+
+**What it costs, measured, and this is decisive:**
+
+| building a span from… | | allocs |
+|---|---|---|
+| a container, by method | 0.8162 ns | **0** |
+| a container, by constructor | 0.8147 ns | **0** |
+| a view, by constructor | 12.40 ns | **1** |
+| a view, by method boxing the view | 13.16 ns | 1 |
+| a view, by method **copying the view's inner interface** | **0.8289 ns** | **0** |
+
+Constructor and method are **cost-neutral for containers, and for the naive view
+implementation**. The last row is the one that decides it: **only a method can
+reach past the view's own struct and copy the interface it already holds.** A
+constructor receives the view through a shape interface, by which point the
+boxing has already happened — there is nothing left to avoid.
+
+**So C-alt is 15x dearer on every span taken from a view, and allocates where
+the method form does not.** Views are the read-only boundary this library asks
+callers to pass around; making the windowed read on one the expensive path
+inverts the incentive.
+
+**Recorded as rejected within solution C**, but for a reason worth keeping: the
+constructor form is better on surface and worse on cost, and the cost is
+structural rather than incidental. If views ever stop holding an interface —
+ADR `0018` records a `…IdentityView` variant that would not — this should be
+re-read, because the asymmetry disappears with it.
+
 #### `Backward` on every container and view that can afford it
 
 The rule: **a container or view gets `Backward` exactly when it is slice-backed**,
@@ -469,7 +535,9 @@ Two sub-questions, neither answered here:
    (iterating, returns an `iter.Seq`) only because `SortedKeys[K]` declares the
    latter. Redeclaring the interfaces in terms of spans would remove the
    duplication and make `Range` mean one thing everywhere — at the cost of
-   changing an accepted ADR `0018` interface. The
+   changing an accepted ADR `0018` interface. **Sub-option C-alt dissolves this
+   question instead of answering it**, and is rejected on cost; if that cost
+   ever changes, this question returns with it. The
    alternative is two span types per shape — a forward one carrying `MinKey` and
    friends, and a read-only backward one — which the type system would enforce
    but which doubles the vocabulary.

@@ -335,3 +335,69 @@ func BenchmarkSpanLen(b *testing.B) {
 		_ = sink
 	})
 }
+
+// 8. Constructor form against method form, for a one-word source (a container)
+// and a two-word one (a view).
+func BenchmarkConstructorVsMethod(b *testing.B) {
+	s := fixture()
+	one := oneWordSource[int]{st: s.st}
+	two := twoWordSource[int]{impl: one}
+	const lo, hi = 500, 564
+	var sink ctorSpan[int]
+
+	b.Run("container/method", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sink = one.Range(lo, hi)
+		}
+	})
+	b.Run("container/constructor", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sink = NewSpan[int](one, lo, hi)
+		}
+	})
+	b.Run("view/method", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sink = two.Range(lo, hi)
+		}
+	})
+	b.Run("view/constructor", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sink = NewSpan[int](two, lo, hi)
+		}
+	})
+	_ = sink
+}
+
+// 9. The asymmetry a constructor cannot reach: a view's method can copy the
+// interface the view already holds.
+func BenchmarkViewInnerCopy(b *testing.B) {
+	s := fixture()
+	one := oneWordSource[int]{st: s.st}
+	two := twoWordSource[int]{impl: one}
+	const lo, hi = 500, 564
+	var sink ctorSpan[int]
+
+	b.Run("view/constructor(boxes the view)", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sink = NewSpan[int](two, lo, hi)
+		}
+	})
+	b.Run("view/method(boxes the view)", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sink = two.Range(lo, hi)
+		}
+	})
+	b.Run("view/method(copies the inner iface)", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sink = two.RangeInner(lo, hi)
+		}
+	})
+	_ = sink
+}

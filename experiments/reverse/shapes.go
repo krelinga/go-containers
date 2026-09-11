@@ -322,3 +322,72 @@ func (s sortedSet[T]) F_IndexBounded(lo, hi T) indexBoundedSpan[T] {
 	}
 	return indexBoundedSpan[T]{st: s.st, i: i, j: j}
 }
+
+// ---------------------------------------------------------------------------
+// C-alt: spans built by CONSTRUCTORS taking a shape interface, rather than by
+// methods on each container and view.
+//
+// The question is what passing the source through that interface costs. Under
+// ADR 0018 a container is one word (pointer-shaped, boxes free) and a view is
+// two (a struct holding an interface, which does not).
+// ---------------------------------------------------------------------------
+
+type sortedKeys[T any] interface {
+	Len() int
+	walk(i, j int, rev bool) iter.Seq[T]
+	search(t T) int
+}
+
+func (p ptrWindowed[T]) search(t T) int { i, _ := slices.BinarySearch(p.st.es, t); return i }
+
+// oneWordSource is what a CONTAINER looks like: one pointer.
+type oneWordSource[T ~int] struct{ st *state[T] }
+
+func (s oneWordSource[T]) Len() int { return len(s.st.es) }
+func (s oneWordSource[T]) search(t T) int {
+	i, _ := slices.BinarySearch(s.st.es, t)
+	return i
+}
+func (s oneWordSource[T]) walk(i, j int, rev bool) iter.Seq[T] {
+	if rev {
+		return backward(s.st.es[i:j])
+	}
+	return forward(s.st.es[i:j])
+}
+
+// twoWordSource is what a VIEW looks like: a struct holding an interface.
+type twoWordSource[T ~int] struct{ impl sortedKeys[T] }
+
+func (s twoWordSource[T]) Len() int                            { return s.impl.Len() }
+func (s twoWordSource[T]) search(t T) int                      { return s.impl.search(t) }
+func (s twoWordSource[T]) walk(i, j int, rev bool) iter.Seq[T] { return s.impl.walk(i, j, rev) }
+
+type ctorSpan[T ~int] struct {
+	src    sortedKeys[T]
+	lo, hi T
+	rev    bool
+}
+
+func (sp ctorSpan[T]) Backward() ctorSpan[T] { sp.rev = !sp.rev; return sp }
+
+// NewSpan is the constructor form: one function for every source.
+func NewSpan[T ~int](src sortedKeys[T], lo, hi T) ctorSpan[T] {
+	return ctorSpan[T]{src: src, lo: lo, hi: hi}
+}
+
+// The method form, for comparison: each source grows its own Range.
+func (s oneWordSource[T]) Range(lo, hi T) ctorSpan[T] {
+	return ctorSpan[T]{src: s, lo: lo, hi: hi}
+}
+
+func (s twoWordSource[T]) Range(lo, hi T) ctorSpan[T] {
+	return ctorSpan[T]{src: s, lo: lo, hi: hi}
+}
+
+// RangeInner is what only a METHOD can do: reach past the view's own struct and
+// copy the interface it already holds, rather than boxing the view itself. A
+// constructor taking the view through an interface cannot -- by the time it
+// sees the view, the boxing has happened.
+func (s twoWordSource[T]) RangeInner(lo, hi T) ctorSpan[T] {
+	return ctorSpan[T]{src: s.impl, lo: lo, hi: hi}
+}
