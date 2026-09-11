@@ -63,6 +63,9 @@ func (m Map[K, V]) DeleteAll(ks ...K) {
 func (m Map[K, V]) Len() int { return len(m) }
 
 // Keys iterates the keys in the unspecified order a map range produces.
+//
+// This binds the live map, so a later write IS seen -- exactly as ranging a
+// builtin map behaves. Do not modify a container while iterating it.
 func (m Map[K, V]) Keys() iter.Seq[K] { return maps.Keys(m) }
 
 // Values iterates the values in the unspecified order a map range produces.

@@ -77,8 +77,11 @@ func (v Vector[T]) AppendAll(vs ...T) {
 }
 
 // Values iterates the elements in order.
+//
+// The slice header is captured at the call, not at iteration: a later Append is
+// not seen, a later Set(i, x) within range IS. See SortedSet.Keys for the full
+// rule.
 func (v Vector[T]) Values() iter.Seq[T] {
-	// Bound to the contents as of this call (ADR 0002).
 	var es []T
 	if v.st != nil {
 		es = v.st.es

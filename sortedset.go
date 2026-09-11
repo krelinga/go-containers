@@ -101,13 +101,25 @@ func (s SortedSet[T]) Len() int {
 
 // Keys iterates the elements in ascending order.
 //
-// The nil check sits inside the returned closure and hands yield straight to
-// the inner walk: checking before the closure, or ranging and re-yielding,
-// each puts a closure on the heap (ADR 0018).
+// # What the iterator is bound to
+//
+// The slice HEADER is captured here, at the call, not at iteration. That is a
+// weaker guarantee than a snapshot, and the difference matters:
+//
+//   - A later Add, Delete or any change of LENGTH is not seen: the captured
+//     header keeps the old length, and a growth reallocates away from it.
+//   - A later write to an element already in range IS seen, because the header
+//     points at the same backing array. An insert that shifts elements within
+//     spare capacity is seen the same way.
+//
+// So the guarantee is: taking an iterator never panics and never observes a
+// reallocation. Modifying a container while iterating it remains unsupported,
+// exactly as it is for a builtin map.
+//
+// Capturing the header before the single return is also what keeps the nil
+// check off the heap. Two returns yielding two closures, or a closure that
+// ranges the inner sequence and re-yields, each allocate (ADR 0018).
 func (s SortedSet[T]) Keys() iter.Seq[T] {
-	// The slice is read HERE, not at iteration, so the iterator is bound to the
-	// contents as of this call (ADRs 0002, 0013). The nil check does not cost a
-	// second closure, because there is still only one return.
 	var es []T
 	if s.st != nil {
 		es = s.st.es

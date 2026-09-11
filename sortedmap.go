@@ -120,8 +120,11 @@ func (m SortedMap[K, V]) Len() int {
 }
 
 // All iterates the entries in ascending key order.
+//
+// The slice header is captured at the call, not at iteration. See SortedSet.Keys
+// for exactly what that does and does not guarantee -- it is weaker than a
+// snapshot, and the same in every slice-backed container here.
 func (m SortedMap[K, V]) All() iter.Seq2[K, V] {
-	// Bound to the contents as of this call, not of iteration.
 	var es []sortedEntry[K, V]
 	if m.st != nil {
 		es = m.st.entries

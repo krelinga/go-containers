@@ -83,6 +83,11 @@ func (s MapSet[T]) Len() int { return len(s.m) }
 
 // Keys iterates the elements in no particular order. A set's element is its key
 // (ADR 0017), so this is the key-shaped read and there is no value side.
+//
+// Unlike the slice-backed containers, this binds the LIVE map: a later Add IS
+// seen. That is what ranging a builtin map gives you, and modifying a map while
+// iterating it is unspecified in Go -- so the rule is the same either way, which
+// is: do not modify a container while iterating it.
 func (s MapSet[T]) Keys() iter.Seq[T] { return maps.Keys(s.m) }
 
 // KeySlice returns the elements as a new slice, in no particular order.

@@ -4,59 +4,60 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-`package containers` at the repo root is the library. Three containers, each with a `_test.go`
-beside it:
+`package containers` at the repo root is the library. Every container is a
+**reference type** (ADR `0018`): a one-word value whose copies share the same contents.
 
-| file | type | backing |
-|---|---|---|
-| `hashset.go` | `HashSet[T comparable]` | map, unordered |
-| `sortedset.go` | `SortedSet[T cmp.Ordered]` | sorted slice |
-| `hashdict.go` | `HashDict[K comparable, V any]` | map, unordered |
-| `sorteddict.go` | `SortedDict[K cmp.Ordered, V any]` | sorted slice |
-| `map.go` | `Map[K comparable, V any]` | a defined `map[K]V` — an **adapter**, not a default |
-| `vector.go` | `Vector[T any]` | an owned slice, insertion-ordered (ADR `0015`) |
-| — | *(no `Slice` type)* | a plain `[]T` gets a view instead (ADR `0016`) |
-| `keyvalue.go` | `KeyValue[K, V]` | the pair type bulk operations carry (ADR `0017`) |
-| `contracts.go` | the interfaces below | — |
-| `views.go` | `SetView`, `DictView`, `SortedSetView`, `SortedDictView`, `IndexedView` | sealed read-only interfaces (ADRs `0011`, `0012`, `0013`, `0015`, `0016`, `0017`) |
-| `viewers.go` | `KeyViewer`, `ValueViewer`, the `CanView<Container>` set | the conversions a view applies (ADR `0012`) |
+| file | type | backing | its view |
+|---|---|---|---|
+| `mapset.go` | `MapSet[T comparable]` | map | `MapSetView[NT]` |
+| `sortedset.go` | `SortedSet[T cmp.Ordered]` | sorted slice | `SortedSetView[T]` |
+| `map.go` | `Map[K comparable, V any]` | a defined `map[K]V` | `MapView[NK, NV]` |
+| `sortedmap.go` | `SortedMap[K cmp.Ordered, V any]` | sorted slice | `SortedMapView[K, NV]` |
+| `vector.go` | `Vector[T any]` | slice, insertion-ordered (ADR `0015`) | `VectorView[NT]` |
+| — | *(no `Slice` type)* | a plain `[]T` | `VectorView[NT]`, via `ViewSlice` |
+| `entry.go` | `Entry[S, V]` | the pair type bulk operations carry | — |
+| `contracts.go` | the shape interfaces below | — | — |
+| `views.go` | the view structs and their constructors | — | — |
+| `viewers.go` | `KeyViewer`, `ValueViewer`, the `CanView<Container>` set | the conversions a view applies (ADR `0012`) | — |
 
-There is **one** contract layer: `MutableSet[T]` and `MutableDict[K, V]` (ADR `0008`, narrowed by
-`0013`, flattened by `0017`). Each declares the reads and the writes directly.
+**The shape interfaces** are named for what a type *exposes*, not for what kind of
+container it is, so none of them collides with a container name:
 
-**`Elems` and `Elems2` are gone** (ADR `0017`). Their job was carrying a length for preallocating
-constructors; bulk operations now take slices, which carry their own. Nothing replaced them — do
-not reintroduce a universal read tier.
+```
+    Keys[K]              Values[V]             Positions[P]
+       |                  |      |                   |
+       +-> KeyValues[K,V]      PositionValues[P,V] <-+
+       |        |
+SortedKeys[K]   +-> SortedKeyValues[K,V]
+       |                |
+MutableKeys[K]   MutableKeyValues[K,V]
+```
 
-They take `any` elements and keys, not `comparable` (ADR `0012`). Implementations state their own
-constraints.
+They are **not sealed**: containers satisfy them, and so do views. That is the
+point — a function needing only reads takes one and accepts either. They are a
+convenience, **not a guarantee**: a *container* placed in one can be asserted
+back out and written through. Where the guarantee matters, take a concrete view
+type; nothing can assert one back to anything writable.
 
-**There is no read-only contract tier.** ADR `0013` deleted `Set` and `Dict`: a container
-satisfies a structural read contract inherently, so one prevents nothing — a holder asserts back
-and writes. Read-only is expressed by the sealed view interfaces instead. A function that must not
-write takes `SetView`/`DictView`; a caller holding a container wraps it with
-`View<Container>Identity`, which converts nothing and allocates nothing.
+`callsites_test.go` holds every stdlib-vs-container comparison. Alongside:
+`docs/adr/` (design decisions) and `experiments/` (measurement harnesses, each
+its own module). **Check an ADR's status before treating it as binding** — most
+are Accepted, `0010` is Proposed, `0014` is **Rejected and superseded by `0018`**,
+and `0017` is Accepted **as proposal D** while containing three rejected
+proposals in full. `0018` is Accepted **as option (b)** and likewise keeps its
+rejected options.
 
-`callsites_test.go` holds every stdlib-vs-container comparison. Alongside: `docs/adr/` (design
-decisions) and `experiments/` (measurement harnesses, each its own module). **Check an ADR's
-status before treating it as binding** — most are Accepted, `0010` is Proposed, and `0014` and
-`0018` are **Rejected**, so their contents describe a road not taken; `0018` supersedes `0014`. `0017` is Accepted **as proposal D**; it
-also contains proposals A, B and C in full, which are *not* binding — they are the rejected
-alternatives, kept because what they cost is the reason D was chosen.
-
-Intent, per the module path `github.com/krelinga/go-containers`: a generic (type-parameterized)
-container library. Still early — several ADRs constrain code not yet written more than they
-describe code that exists, so treat unsettled areas as open.
+Intent, per the module path `github.com/krelinga/go-containers`: a generic
+(type-parameterized) container library.
 
 ## Commands
 
 ```sh
 go build ./...
-go vet ./...                           # REQUIRED before pushing -- see note below
+go vet ./...
 go test ./...
-go test -vet=all ./...                 # tests plus the FULL vet set, incl. copylocks
+go test -vet=all ./...                 # tests plus the FULL vet set
 go test -run '^TestName$' ./...        # single test
-go test -run '^TestName$/^subtest$' ./...
 go test -race ./...
 gofmt -l .                             # list unformatted files; -w to rewrite
 
@@ -65,147 +66,123 @@ cd experiments/<name> && ./run.sh      # regenerate that experiment's bench.txt
 COUNT=20 BENCHTIME=1s ./run.sh         # more samples
 ```
 
-**`go test` does not run copylocks.** It runs only a high-confidence subset of vet
-(`atomic, bool, buildtags, directive, errorsas, ifaceassert, nilfunc, printf, stringintconv,
-tests`). The `noCopy` protection that container types rely on (ADR `0002`) is therefore invisible
-to a plain `go test` — a shallow-copy `Clone` that silently shares the underlying map passes both
-`go test ./...` and `go build ./...`. Run `go vet ./...` or `go test -vet=all ./...`.
-
 ## Conventions
 
-- **Package name is `containers`, not `go-containers`.** The `go-` prefix belongs to the repo name
-  only; it is not part of the import identifier.
-- `go.mod` pins `go 1.26.7` at patch granularity, so the toolchain must be at least that version.
-  The devcontainer's Go feature supplies it; a host Go older than 1.26.7 will refuse to build.
-- Single flat package at the repo root — add new container types as sibling files, not subpackages,
-  unless there is a reason to split.
-- **Read `docs/adr/` before designing a container type.** Accepted ADRs are binding on new code;
-  `0014` and `0018` are Rejected and are not, and `0014` is **superseded by `0018`** — read the
-  later one.
-- **Containers stay pointers to non-copyable structs** (ADR `0002`). `0014` re-affirmed that after
-  designing the alternative in full, and `0018` re-affirmed it again after `0017` invalidated
-  `0014`'s decisive argument — read `0018`, not `0014`, for the current reasoning. Reference-type containers were measured to be *free*
-  at the representation level, but a reference container cannot be compared to nil, so it needs
-  an `IsZero`/`IsNil` method while views — sealed interfaces since `0013` — use `== nil`. Every
-  route to one spelling either kept two or reintroduced Go's typed-nil trap. **Do not reopen this
-  without a new answer to that question**; the cost measurements are already done in
-  `experiments/reftypes/` and re-done against today's method set in
-  `experiments/refcontainers/`. **`0018` leaves one thing genuinely open**: `Map` and `HashDict`
-  now have identical method sets except `NewHashDict`, so `HashDict` exists only to paper over ADR
-  `0007`. Resolving that does not require reference containers and wants its own ADR.
-  `0001` governs when an accessor returns a read-only view rather than a copy. `0002` fixes the
-  shape of a container type — uniform pointer receivers, a usable zero value, a `noCopy` field
-  declared *first*, and no nil-receiver or nil-argument special cases. `0004` and `0006` govern
-  bulk insertion and the sized read-only contract.
-- **A new container satisfies `MutableSet` or `MutableDict` whole** (`contracts.go`), and the
-  compile-time assertions at the bottom of that file are how you find out. That means the iterator
-  reads, the `*Slice` materialisers, the single-element accessors and the mutators.
-- **A view carries the same `*Slice` methods its container does** (ADR `0017`), so a container can
-  be built from a view — otherwise the read-only boundary would be a dead end. Handing out a slice
-  costs a view nothing, because the result is a copy; a converting view applies its viewer once per
-  element while materialising.
-- **Every container has a view, and a new one is not finished without it** (ADRs `0011`, `0012`
-  and `0013`; `views.go`, `viewers.go`). Build one with `View<Container>(c, viewer)`, or
-  `View<Container>Identity(c)` to convert nothing. A constructor returns a **sealed interface** —
-  `SetView[NT]` or `DictView[NK, NV]`, the `Sorted*` forms which embed those and add the ordered
-  reads, or `IndexedView[NT]`, which stands alone because a sequence's reads are positional. The
-  concrete structs are unexported and may change.
-- **A plain `[]T` has a view too, and it views a *value*** (ADR `0016`). `ViewSlice(s)` takes a
-  slice, not `*[]T`, because a slice is a value and a reallocated slice is a new slice — which is
-  exactly why `Vector` exists. So an element write is visible through the view and an **append is
-  not**: the append made a different slice value the view was never given. It is the one view that
-  costs an allocation, a slice header being three words. Reach for it to expose a `[]T` field
-  read-only without changing the field's type; reach for `Vector` when growth must be visible to
-  every holder.
-- **`IndexedView` is named for the capability, and `ListView` is its declared destination**
-  (ADR `0016`). A list is position/value pairs whose position type varies — `int` here, a cursor
-  for `LinkedList` — so the general contract is `ListView[P, NT]`, and `IndexedView[NT]` becomes
-  a generic alias for `ListView[int, NT]` when that lands. `ListView` is deliberately unclaimed
-  until then, for the reason ADR `0010` gives for not calling itself `List`.
-  The seal is one unexported method, and it works in both directions at compile time: a container
-  cannot be passed where a view is expected (`missing method sealedView`), and a view cannot be
-  asserted back to its container (`impossible type assertion`).
-  A view is not a snapshot, is not proof against `reflect`+`unsafe`, and is not automatic: a
-  boundary declared with an unsealed type — `MutableDict`, which containers satisfy — accepts the
-  container as happily as ever. The seal binds where the boundary names it.
-- **Ordered views substitute for unordered ones.** `SortedDictView[K, NV]` embeds
-  `DictView[K, NV]`, and `SortedSetView[T]` embeds `SetView[T]`, so a consumer naming the base
-  never names an implementation — a `Map` view and a `HashDict` view are the *same type*. This
-  type-checks only because ordered views convert values only; **converting ordered keys would
-  break the hierarchy** as well as reopening order preservation.
-- **A view carrying a viewer costs one allocation, at construction, and nothing per boundary
-  crossing.** A view that converts nothing — every `Identity` view, and every `SortedSetView` —
-  is one word and allocates nothing at all, which is what makes the identity wrap free. Adding a
-  method to a view interface is *not* a breaking change, since nothing outside the package can
-  implement one.
-- **A nil view panics when used, and nothing checks for it.** A view is an interface now, so
-  `var v DictView[K, V]` is nil and `v == nil` compiles. Per ADR `0002` no method or constructor
-  special-cases it.
-- **There is deliberately no `View()` method** (ADR `0012`). It read as "give me a view" with no
-  hint that key and value handling is a dimension at all, so it invited the assumption that keys
-  were safe. Callers name the conversion, or name its absence with the `Identity` constructor.
-- **Hash containers convert keys both ways; ordered containers convert values only** (ADR `0012`).
-  `KeyViewer` has `ToKeyView(K) NK` outbound and `FromKeyView(NK) (K, bool)` inbound, where a
-  failed conversion reads as a miss. `SortedSet` and `SortedDict` key on `cmp.Ordered`, which
-  admits only immutable value types, so their keys need no protection: `Range`/`Floor`/`Ceil` take
-  `K` directly and `SortedSetView` carries no viewer at all. This is what sidesteps
-  order-preservation entirely — **revisit it if sorted containers ever sort by a function.**
-- **`Vector` is not a replacement for `[]T`** (ADR `0015`). It earns its place at an API
-  boundary, where a `[]T` field cannot be handed out read-only and an accessor over one must copy
-  — O(n) per call, O(n²) in a caller's loop — or return a mutable interior. A `Vector` field hands
-  out a `IndexedView` at O(1) and no allocation. It is *worse* than a slice for local code:
-  an indexed loop costs ~24% because bounds-check elimination does not survive `At`, and ranging
-  `All` costs ~6x a raw range. Two of ADR `0015`'s four call-site tasks are recorded as
-  explicitly **not** wins so they are not cited as motivation later.
-- **Every single-element mutator takes one element; every bulk one is variadic** (ADRs `0015`,
-  `0017`). `Append(e T)` / `AppendAll(vs ...T)`, `Add(v T)` / `AddAll(vs ...T)`,
-  `Delete(k K)` / `DeleteAll(ks ...K)`, `Set(k, v)` / `SetAll(kvs ...KeyValue[K, V])`. The split is
-  measured, not stylistic: a `...T` call costs a fixed ~0.3-0.8 ns and **no allocation**, which is
-  ~60% of a slice append and ~5% of a map insert. It survives because collapsing it *cannot* remove
-  it — a dict's `Set` takes two arguments and its `SetAll` takes pairs — so splitting is what is
-  uniform here.
-- **`HashDict` is the default hash dict; `Map` is an adapter** (ADR `0009`). Reach for `Map` only
-  when you need a free conversion from an existing `map[K]V`, builtin syntax, to pass the result
-  where a `map[K]V` is expected, or working `encoding/json`. Everything else should use `HashDict`,
-  which follows the same shape rules as the rest of the package.
-- **Bulk operations take slices, and every `*Slice` result is a full copy** (ADR `0017`). A
-  container materialises with `KeySlice`, `ValueSlice` or `AllSlice`; the result shares nothing with
-  the container in either direction. That contract is what makes `d.DeleteAll(d.KeySlice()...)`
-  correct rather than lucky — under a streaming API the same line silently corrupts a sorted
-  container. Cross-container construction is `NewVector(d.KeySlice()...)`.
-- **`New*` constructors copy their input and never take ownership of it.** This is uniform across
-  every container so that `New*` means one thing. An adopting constructor is worth 1.16x-1.70x and
-  is deliberately deferred to a later ADR, under a *distinct name*, taking `[]T` rather than `...T`,
-  and storing `slices.Clip` of what it is given — a spread carries the source's **capacity**, so
-  `src[:2]` arrives as len 2, cap 1024.
-- **An iterator reaches a bulk operation through `slices.Collect`**, and a `Seq2` through a
-  hand-written pair loop. The `*Seq` method twins are gone; this is the one place the slice currency
+### The three rules that have caused the most confusion
+
+These are first because they are the ones that get re-derived wrongly.
+
+- **Reads are total; writes panic. The zero value is the builtin's zero value.**
+  `var s MapSet[int]` reads as empty — `Len()` is 0, `Has` is false, iterating
+  yields nothing, `KeySlice()` is nil — and `s.Add(1)` panics, exactly as
+  `m[k] = v` does on a nil map. **A bulk call that writes nothing does not
+  panic** (`s.AddAll()` with no arguments is fine), and **deletes are no-ops**,
+  because `delete(nilMap, k)` is. `IsZero()` answers the narrower "was this ever
+  constructed", which is as rarely needed as `m == nil` is.
+  **This replaced ADR `0002`'s eager-dereference rule**, which required every
+  method to panic on an unconstructed receiver. Do not reintroduce it.
+  `TestZeroValueMatchesTheBuiltin` asserts the whole rule for every container at
+  once, and is the test to extend when a container is added.
+
+- **An iterator captures the slice HEADER, not the contents — and map-backed
+  containers capture nothing.** This is weaker than a snapshot and the difference
+  is real:
+
+  | | slice-backed (`SortedSet`, `SortedMap`, `Vector`) | map-backed (`MapSet`, `Map`) |
+  |---|---|---|
+  | later `Add`/`Delete` (length change) | **not** seen | **seen** |
+  | later `Set(i, x)` in range | **seen** | n/a |
+  | insert shifting within spare capacity | **seen** | n/a |
+
+  What is actually guaranteed is narrow: **taking an iterator never panics and
+  never observes a reallocation.** Modifying a container while iterating it is
+  unsupported, which is what ranging a builtin map already gives you. Earlier
+  ADRs say an iterator is "bound to the contents as of the call" — that
+  overstates it in both directions; the doc comment on `SortedSet.Keys` has the
+  accurate version.
+
+- **Copies share; `Clone` is how you get a separate one.** `t := s` gives another
+  handle on the same container. `noCopy`, the copylocks caveat and the layout
+  test are all gone (ADR `0018`) because the bug class they policed no longer
+  exists — but the opposite hazard does, and nothing checks it.
+
+### Shape and naming
+
+- **Package name is `containers`, not `go-containers`.**
+- `go.mod` pins `go 1.26.7` at patch granularity.
+- Single flat package at the repo root — add new container types as sibling
+  files, not subpackages.
+- **Names are `<Backing><Concept>`** (ADR `0018`, superseding `0008` section 3):
+  `MapSet`/`Map` are map-backed, `SortedSet`/`SortedMap` are sorted-slice-backed.
+  `Map` is the centre of the scheme rather than an exception to it.
+- **A new container satisfies its shape interfaces whole**, and the compile-time
+  assertions at the bottom of `contracts.go` are how you find out. Views satisfy
+  the read tiers and must **never** satisfy a mutation tier.
+- **Every container has a view, and a new one is not finished without it.** Build
+  one with `View<Container>(c, viewer)` or `View<Container>Identity(c)`.
+- **A view is exactly two words: `struct{ impl <shape interface> }`.** The
+  interface erases the container's type parameter, which a converting view needs
+  because `MapSetView[NT]` cannot name the `T` it came from. Construction is
+  free; the cost is that passing a view into a shape-interface parameter boxes
+  (~14.5 ns, 1 alloc) where passing a *container* does not. If that ever matters,
+  ADR `0018` records the alternative: per-container `…IdentityView` types.
+- **A view's zero value reads as empty**, like its container's. The exception is
+  `VectorView.At`, which panics, because an index is out of range for anything
+  empty.
+- **A plain `[]T` has a view too, and it views a *value*** (ADR `0016`).
+  `ViewSlice(s)` takes a slice, not `*[]T`: an element write shows through and an
+  **append does not**, because the append made a different slice. Reach for
+  `Vector` when growth must be visible to every holder.
+- **There is deliberately no `View()` method** (ADR `0012`). Callers name the
+  conversion, or name its absence with the `Identity` constructor.
+- **Hash containers convert keys both ways; ordered containers convert values
+  only** (ADR `0012`). `SortedSet` and `SortedMap` key on `cmp.Ordered`, which
+  admits only immutable value types, so their keys need no protection — which is
+  what sidesteps order preservation. **Revisit if sorted containers ever sort by
+  a function.**
+
+### Reads, writes and bulk operations
+
+- **`Keys`/`Values`/`All` mean what the stdlib means** (ADR `0017`). `All` yields
+  pairs; `Keys` and `Values` each yield one half. A set is **key-only** — its
+  element is its key. A `Vector` is keyed by **position**, so it has
+  `Positions`/`PositionSlice` and no `Keys`.
+- **The ordered reads come in two spellings.** `MinKey`/`MaxKey`/`FloorKey`/
+  `CeilKey`/`RangeKeys` return keys and are on sorted sets **and** sorted maps,
+  which is what lets one `SortedKeys[K]` cover both. `Min`/`Max`/`Floor`/`Ceil`/
+  `Range` return pairs and are on sorted maps only. `RangeKeys` on a map is a
+  native key-only walk, not a derived one: deriving it would copy every value to
+  discard it, measured at 14.9x for wide values (ADR `0017`).
+- **Bulk operations take slices, and every `*Slice` result is a full copy**
+  (ADR `0017`). That contract is what makes `d.DeleteAll(d.KeySlice()...)`
+  correct rather than lucky. Cross-container construction is
+  `NewVector(m.KeySlice()...)`.
+- **`New*` constructors copy their input and never take ownership of it.** An
+  adopting constructor is worth 1.16x-1.70x and is deferred to a later ADR, under
+  a *distinct name*, taking `[]T` rather than `...T`, and storing `slices.Clip`
+  of what it is given — a spread carries the source's **capacity**, so `src[:2]`
+  arrives as len 2, cap 1024.
+- **Single-element mutators take one element; bulk ones are variadic** (ADRs
+  `0015`, `0017`). A `...T` call costs a fixed ~0.3-0.8 ns and no allocation —
+  ~60% of a slice append, ~5% of a map insert. Collapsing the split *cannot*
+  remove it, because a map's `Set` takes two arguments and its `SetAll` takes
+  pairs.
+- **An iterator reaches a bulk operation through `slices.Collect`**, and a `Seq2`
+  through a hand-written pair loop. This is the one place the slice currency
   forces an allocation a streaming API would not.
-- **`Keys`/`Values`/`All` mean what the stdlib means** (ADR `0017` problem 4). `All` always yields
-  pairs; `Keys` and `Values` each yield one half. A set is **key-only** — its element is its key, so
-  it has `Keys`/`KeySlice` and no value side. A `Vector` is keyed by position, so `Values` yields
-  elements and `All` yields index/element pairs.
-- **`HashSet` and `HashDict` are structurally near-identical**, both a `noCopy` plus a map. A bug
-  or an optimisation found in one applies to the other — check both.
-- **Name new types per ADR `0008`.** Implementations are `<Ordering><Concept>` — `HashSet`,
-  `SortedDict`. Contracts are `Mutable<Concept>` for writes and the bare concept for reads. The one
-  exception is `Map`, which keeps the builtin's name because it is a thin naming of the builtin;
-  a future `Slice[T] []T` would take the same exception.
-- **The eager-dereference rule from `0002` bites repeatedly.** Every method must dereference its
-  receiver on a path that *always* executes. Variadic methods, empty slices, and loops that can run
-  zero times all skip it silently — so `v.AppendAll()` with no arguments must still panic on a nil
-  receiver. It has been violated three times so far; `TestEmptyBulkCallsStillDereference` in
-  `contracts_test.go` covers every bulk method, and is the test to extend when a container is added.
-- **Serialization is unsettled library-wide, and currently silently lossy.** Container types
-  have only unexported fields, so `json.Marshal` of a populated container returns `{}` with a
-  **nil error**, discarding its contents; `json.Unmarshal` fails asymmetrically. This follows from
-  the shape ADR `0002` fixes, so it will recur for every container added. **Handle it once across
-  the library in its own ADR — do not add `MarshalJSON`/`UnmarshalJSON` to a single container in
-  the meantime**, or the types will diverge before the decision is made.
-- **ADRs `0001`-`0007` use the pre-`0008` names** and are deliberately left that way, since they
-  record decisions as they were made. ADR `0008` section 2 has the old-to-new mapping. In
-  particular `Set` there means today's `HashSet`, and `SortedMap` means `SortedDict`; `Set` now
-  names the read-only set contract instead.
+
+### Still open
+
+- **Serialization is unsettled and currently silently lossy** for the
+  slice-backed containers, which have only unexported fields. `Map` round-trips,
+  being a map. **Handle it once across the library in its own ADR** — do not add
+  `MarshalJSON` to a single container in the meantime.
+- **`Vector` has no mutation contract.** ADR `0015` punted one until there is a
+  second mutable sequence; the mutation *shape* interfaces are deferred for the
+  same reason (ADR `0018`).
+- **ADRs `0001`-`0007` use pre-`0008` names**, and `0008`-`0017` use pre-`0018`
+  names (`HashSet`, `HashDict`, `SortedDict`, `KeyValue`). They are left that way
+  deliberately: they record decisions as they were made. `0018` has the mapping.
 
 ## Experiments
 
