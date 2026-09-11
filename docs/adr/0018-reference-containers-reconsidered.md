@@ -1,11 +1,12 @@
 # 18. Containers as reference types, reconsidered
 
-- **Status:** **Rejected — on a narrower basis than ADR `0014` gave, and closer
-  than `0014` was.** The status quo stands. `0014`'s *decisive* argument is dead:
-  option (b) is now free on every measured path and coherent as a design, so it
-  is rejected on the balance of its API costs rather than on cost or feasibility.
-  **Option (b) is built out in full below**, including how it would match builtin
-  map semantics, because it is the version a future attempt should start from.
+- **Status:** **Accepted — option (b).** Containers and views are both one-word
+  reference values; the zero value reads as empty and panics on a write, exactly
+  as the builtin it stands in for; `noCopy` and the copylocks caveat are gone;
+  `HashDict` is deleted and `Map` is the map-backed key/value container.
+  Implemented. ADR `0014`'s rejection is superseded twice over: its decisive
+  argument died with `Elems2`, and what remained was weighed and accepted here.
+  Options (a), (c) and (d) are kept in full as the rejected alternatives.
 - **Date:** 2026-09-10
 - **Supersedes:** ADR **`0014`**, which is now historical. Its measurements
   remain valid; its conclusion is reached here by a different route, and two of
@@ -934,8 +935,9 @@ without changing how every container is represented.
 
 ## Decision
 
-**Rejected. The status quo stands.** But the reasoning is now narrower than
-`0014`'s, and worth stating precisely, because the old reason no longer applies.
+**Accepted: option (b).** What follows records why, and what it cost — including
+two things found only by implementing it, which the design sections above got
+wrong.
 
 **The status quo already has one nil spelling.** `*HashSet[T]` is a pointer and
 `SetView[T]` is an interface; `== nil` works on both, and neither needs a method.

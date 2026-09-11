@@ -12,10 +12,10 @@ import (
 // iterator reaches one through a slice. In the library's own API that bridge is
 // slices.Collect for the one-shape iterators; there is no stdlib equivalent for
 // a Seq2, so tests use this.
-func pairsOf[K, V any](seq iter.Seq2[K, V]) []containers.KeyValue[K, V] {
-	var out []containers.KeyValue[K, V]
+func pairsOf[K, V any](seq iter.Seq2[K, V]) []containers.Entry[K, V] {
+	var out []containers.Entry[K, V]
 	for k, v := range seq {
-		out = append(out, containers.KeyValue[K, V]{Key: k, Value: v})
+		out = append(out, containers.Entry[K, V]{Slot: k, Value: v})
 	}
 	return out
 }

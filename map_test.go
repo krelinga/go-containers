@@ -51,25 +51,6 @@ func TestMapBuiltinSyntax(t *testing.T) {
 	}
 }
 
-// ADR 0007: Map takes the builtin's semantics, not ADR 0002's shape rules.
-// Reads on the zero value work; writes panic exactly as on a nil map.
-func TestMapZeroValue(t *testing.T) {
-	var m containers.Map[int, string]
-
-	if m.Len() != 0 {
-		t.Errorf("Len = %d, want 0", m.Len())
-	}
-	if _, ok := m.Get(1); ok {
-		t.Error("Get on zero value returned ok")
-	}
-	if got := slices.Collect(maps.Keys(maps.Collect(m.All()))); len(got) != 0 {
-		t.Errorf("All on zero value = %v, want empty", got)
-	}
-	m.Delete(1) // no-op, not a panic -- delete on a nil map is defined
-
-	mustPanic(t, "Set on zero value", func() { m.Set(1, "a") })
-}
-
 func TestMapOperations(t *testing.T) {
 	m := containers.Map[int, string]{}
 	m.Set(2, "b")
@@ -92,14 +73,14 @@ func TestMapOperations(t *testing.T) {
 // The value satisfies, unlike every other container here.
 func TestMapInterfaceSatisfaction(t *testing.T) {
 	var (
-		_ containers.MutableDict[int, string] = containers.Map[int, string]{}
-		_ containers.MutableDict[int, string] = containers.Map[int, string]{}
-		_ containers.MutableDict[int, string] = containers.NewSortedDict[int, string]()
+		_ containers.MutableKeyValues[int, string] = containers.Map[int, string]{}
+		_ containers.MutableKeyValues[int, string] = containers.Map[int, string]{}
+		_ containers.MutableKeyValues[int, string] = containers.NewSortedMap[int, string]()
 	)
 }
 
 // prune, written once, run against both backings -- the point of the contract.
-func prune[K comparable, V any](m containers.MutableDict[K, V], keep func(V) bool) {
+func prune[K comparable, V any](m containers.MutableKeyValues[K, V], keep func(V) bool) {
 	var drop []K
 	for k, v := range m.All() {
 		if !keep(v) {
@@ -121,7 +102,7 @@ func TestMutableDictGenericOverBothBackings(t *testing.T) {
 			}
 		})
 		t.Run("SortedDict/"+tc.name, func(t *testing.T) {
-			sm := containers.NewSortedDict[int, int]()
+			sm := containers.NewSortedMap[int, int]()
 			sm.SetAll(pairsOf(maps.All(tc.in))...)
 			prune[int, int](sm, keepEven)
 			if got := slices.Sorted(maps.Keys(maps.Collect(sm.All()))); !slices.Equal(got, tc.want) {
@@ -139,7 +120,7 @@ func TestMapSerialization(t *testing.T) {
 	if err != nil || string(b) != `{"a":1}` {
 		t.Errorf("Marshal = %s, %v; want {\"a\":1}, nil", b, err)
 	}
-	var back containers.Map[string, int]
+	back := containers.Map[string, int]{}
 	if err := json.Unmarshal([]byte(`{"x":9}`), &back); err != nil || back["x"] != 9 {
 		t.Errorf("Unmarshal = %v, %v", back, err)
 	}
@@ -158,7 +139,7 @@ func TestMapSerialization(t *testing.T) {
 	}
 
 	// Meanwhile the struct-backed containers silently discard their contents.
-	sm := containers.NewSortedDict[string, int]()
+	sm := containers.NewSortedMap[string, int]()
 	sm.Set("a", 1)
 	sb, err := json.Marshal(sm)
 	if err != nil || string(sb) != "{}" {

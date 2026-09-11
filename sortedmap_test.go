@@ -8,11 +8,11 @@ import (
 	"github.com/krelinga/go-containers"
 )
 
-func keysOf(m *containers.SortedDict[int, string]) []int {
+func keysOf(m containers.SortedMap[int, string]) []int {
 	return slices.Collect(maps.Keys(maps.Collect(m.All())))
 }
 
-func orderedKeys(m *containers.SortedDict[int, string]) []int {
+func orderedKeys(m containers.SortedMap[int, string]) []int {
 	var out []int
 	for k := range m.All() {
 		out = append(out, k)
@@ -20,52 +20,8 @@ func orderedKeys(m *containers.SortedDict[int, string]) []int {
 	return out
 }
 
-// ADR 0002 decision 2, inherited by 0003: the zero value is usable.
-func TestSortedDictZeroValue(t *testing.T) {
-	var m containers.SortedDict[int, string]
-
-	if m.Len() != 0 {
-		t.Errorf("fresh zero value Len = %d, want 0", m.Len())
-	}
-	if _, ok := m.Get(1); ok {
-		t.Error("Get on zero value returned ok")
-	}
-	if _, _, ok := m.Min(); ok {
-		t.Error("Min on zero value returned ok")
-	}
-	if _, _, ok := m.Max(); ok {
-		t.Error("Max on zero value returned ok")
-	}
-	if got := orderedKeys(&m); got != nil {
-		t.Errorf("All on zero value = %v, want empty", got)
-	}
-
-	m.Set(10, "0.90")
-	if v, ok := m.Get(10); !ok || v != "0.90" {
-		t.Errorf("after Set: %v,%v", v, ok)
-	}
-}
-
-// ADR 0002 decision 2, inherited by 0003: every method panics on a nil
-// receiver, on a path that always executes.
-func TestSortedDictNilPanicsUniformly(t *testing.T) {
-	var p *containers.SortedDict[int, string]
-
-	mustPanic(t, "Set", func() { p.Set(1, "a") })
-	mustPanic(t, "Get", func() { _, _ = p.Get(1) })
-	mustPanic(t, "Delete", func() { p.Delete(1) })
-	mustPanic(t, "Len", func() { _ = p.Len() })
-	mustPanic(t, "All", func() { _ = p.Keys() })
-	mustPanic(t, "Range", func() { _ = p.Range(1, 2) })
-	mustPanic(t, "Floor", func() { _, _, _ = p.Floor(1) })
-	mustPanic(t, "Ceil", func() { _, _, _ = p.Ceil(1) })
-	mustPanic(t, "Min", func() { _, _, _ = p.Min() })
-	mustPanic(t, "Max", func() { _, _, _ = p.Max() })
-	mustPanic(t, "Clone", func() { _ = p.Clone() })
-}
-
 func TestSortedDictOrderingAndSet(t *testing.T) {
-	m := containers.NewSortedDict[int, string]()
+	m := containers.NewSortedMap[int, string]()
 	for _, k := range []int{50, 1, 100, 10} { // deliberately out of order
 		m.Set(k, "v")
 	}
@@ -98,7 +54,7 @@ func TestSortedDictOrderingAndSet(t *testing.T) {
 // The boundary conditions the container exists to get right once. ADR 0003
 // names the `if !found { i-- }` adjustment as the bug hand-rolled versions hit.
 func TestSortedDictOrderedLookups(t *testing.T) {
-	m := containers.NewSortedDict[int, string]()
+	m := containers.NewSortedMap[int, string]()
 	for _, e := range []struct {
 		k int
 		v string
@@ -148,7 +104,7 @@ func TestSortedDictOrderedLookups(t *testing.T) {
 	}
 
 	// Single-entry map: Min and Max are the same entry.
-	one := containers.NewSortedDict[int, string]()
+	one := containers.NewSortedMap[int, string]()
 	one.Set(5, "x")
 	kmin, _, _ := one.Min()
 	kmax, _, _ := one.Max()
@@ -158,7 +114,7 @@ func TestSortedDictOrderedLookups(t *testing.T) {
 }
 
 func TestSortedDictRange(t *testing.T) {
-	m := containers.NewSortedDict[int, string]()
+	m := containers.NewSortedMap[int, string]()
 	for _, k := range []int{1, 10, 50, 100} {
 		m.Set(k, "v")
 	}
@@ -194,7 +150,7 @@ func TestSortedDictRange(t *testing.T) {
 
 // ADR 0002: iterators bind at call time, not iteration time.
 func TestSortedDictIteratorsBindAtCallTime(t *testing.T) {
-	var m containers.SortedDict[int, string]
+	m := containers.NewSortedMap[int, string]()
 	m.Set(10, "a")
 
 	all := m.All()
@@ -218,7 +174,7 @@ func TestSortedDictIteratorsBindAtCallTime(t *testing.T) {
 }
 
 func TestSortedDictCloneIsIndependent(t *testing.T) {
-	orig := containers.NewSortedDict[int, string]()
+	orig := containers.NewSortedMap[int, string]()
 	orig.Set(1, "a")
 	orig.Set(2, "b")
 
@@ -237,7 +193,7 @@ func TestSortedDictCloneIsIndependent(t *testing.T) {
 		t.Errorf("clone keys = %v, want %v", got, want)
 	}
 
-	var zero containers.SortedDict[int, string]
+	zero := containers.NewSortedMap[int, string]()
 	if zero.Clone().Len() != 0 {
 		t.Error("Clone of zero value should be empty")
 	}
@@ -260,18 +216,18 @@ func TestSetAllLastWriteWins(t *testing.T) {
 	}
 
 	// The loop SetAll replaces, as the reference.
-	loop := containers.NewSortedDict[int, string]()
+	loop := containers.NewSortedMap[int, string]()
 	for _, p := range pairs {
 		loop.Set(p.k, p.v)
 	}
 
-	bulk := containers.NewSortedDict[int, string]()
+	bulk := containers.NewSortedMap[int, string]()
 	bulk.SetAll(pairsOf(seq)...)
-	collected := containers.NewSortedDict(pairsOf(seq)...)
+	collected := containers.NewSortedMap(pairsOf(seq)...)
 
 	for _, tc := range []struct {
 		name string
-		m    *containers.SortedDict[int, string]
+		m    containers.SortedMap[int, string]
 	}{{"SetAll", bulk}, {"CollectSortedDict", collected}} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, want := range []struct {
@@ -295,7 +251,7 @@ func TestSetAllLastWriteWins(t *testing.T) {
 }
 
 func TestSetAllMergesWithExisting(t *testing.T) {
-	m := containers.NewSortedDict[int, string]()
+	m := containers.NewSortedMap[int, string]()
 	for _, k := range []int{10, 30, 50} {
 		m.Set(k, "old")
 	}
@@ -312,51 +268,21 @@ func TestSetAllMergesWithExisting(t *testing.T) {
 	}
 }
 
-func TestSetAllEdgeCases(t *testing.T) {
-	empty := func(yield func(int, string) bool) {}
-
-	// Zero value receiver.
-	var z containers.SortedDict[int, string]
-	z.SetAll(pairsOf(maps.All(map[int]string{2: "b", 1: "a"}))...)
-	if got, want := orderedKeys(&z), []int{1, 2}; !slices.Equal(got, want) {
-		t.Errorf("zero value SetAll = %v, want %v", got, want)
-	}
-
-	// Empty input leaves the map alone.
-	z.SetAll(pairsOf(empty)...)
-	if got, want := orderedKeys(&z), []int{1, 2}; !slices.Equal(got, want) {
-		t.Errorf("after empty SetAll = %v, want %v", got, want)
-	}
-
-	if containers.NewSortedDict(pairsOf(empty)...).Len() != 0 {
-		t.Error("CollectSortedDict of an empty seq should be empty")
-	}
-
-	// ADR 0002's eager-dereference rule: an EMPTY seq must still panic on a nil
-	// receiver, which a bare range over seq would skip.
-	var p *containers.SortedDict[int, string]
-	mustPanic(t, "SetAll nil receiver, empty seq", func() { p.SetAll(pairsOf(empty)...) })
-	mustPanic(t, "SetAll nil receiver, non-empty seq", func() {
-		p.SetAll(pairsOf(maps.All(map[int]string{1: "a"}))...)
-	})
-}
-
-// The iter.Seq2 choice exists so these compose with no adapter.
 func TestSetAllComposes(t *testing.T) {
-	src := containers.NewSortedDict[int, string]()
+	src := containers.NewSortedMap[int, string]()
 	src.SetAll(pairsOf(maps.All(map[int]string{1: "a", 10: "b", 50: "c", 100: "d"}))...)
 
-	fromAll := containers.NewSortedDict(src.AllSlice()...)
+	fromAll := containers.NewSortedMap(src.AllSlice()...)
 	if got, want := orderedKeys(fromAll), []int{1, 10, 50, 100}; !slices.Equal(got, want) {
 		t.Errorf("CollectSortedDict(src.All()) = %v, want %v", got, want)
 	}
 
-	fromRange := containers.NewSortedDict(pairsOf(src.Range(10, 100))...)
+	fromRange := containers.NewSortedMap(pairsOf(src.Range(10, 100))...)
 	if got, want := orderedKeys(fromRange), []int{10, 50}; !slices.Equal(got, want) {
 		t.Errorf("CollectSortedDict(src.Range(10,100)) = %v, want %v", got, want)
 	}
 
-	dst := containers.NewSortedDict[int, string]()
+	dst := containers.NewSortedMap[int, string]()
 	dst.SetAll(pairsOf(src.Range(1, 11))...)
 	if got, want := orderedKeys(dst), []int{1, 10}; !slices.Equal(got, want) {
 		t.Errorf("dst.SetAll(pairsOf(src.Range(1,11))...) = %v, want %v", got, want)

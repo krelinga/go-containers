@@ -6,99 +6,75 @@ import (
 	"slices"
 )
 
-// A SortedSet is a set whose values are kept in ascending order.
+// SortedSet is a set kept in ascending order, backed by a sorted slice.
 //
-// The zero value is an empty SortedSet ready to use:
+// It is a reference type (ADR 0018): a one-word value whose copies share the
+// same contents. The backing slice sits behind a pointer because a slice header
+// must be replaced when it grows -- that replacement is what every copy must
+// see, and is the aliasing surprise this library was begun over.
 //
-//	var s containers.SortedSet[int]
-//	s.Add(10)
+// The zero value reads as empty and panics on a write, matching a nil map:
 //
-// As with Set and SortedDict, every method has a pointer receiver, a nil
-// *SortedSet panics on any method, and copying the struct shares the backing
-// array — use Clone, and prefer a SortedSet field over a *SortedSet field.
-// `go vet` reports struct copies, though `go test` does not run that check: use
-// `go vet ./...` or `go test -vet=all`.
-//
-// # Choosing between Set and SortedSet
-//
-// Set is map-backed: O(1) membership and insertion, but no order. SortedSet is
-// backed by a sorted slice: O(log n) membership, O(n) insertion, and ordered
-// iteration, range scans and Floor/Ceil for free.
-//
-// Prefer Set unless ordering is *queried*. Sorting a Set's contents once for
-// output is cheaper than maintaining order on every insert; SortedSet earns its
-// place when Range, Floor, Ceil, Min or Max are called repeatedly.
-//
-// Random-order insertion is O(n) per value, since each insert memmoves half the
-// backing array. AddAll sorts once and merges instead — see its documentation.
-//
-// A SortedSet is not safe for concurrent use.
+//	var s SortedSet[int]
+//	s.Len()      // 0
+//	s.Has(1)     // false
+//	s.Add(1)     // panics
 type SortedSet[T cmp.Ordered] struct {
-	_  noCopy
-	es []T
+	st *sortedSetState[T]
 }
 
-// NewSortedSet returns a SortedSet containing vs. The zero value is equally
-// usable.
-func NewSortedSet[T cmp.Ordered](vs ...T) *SortedSet[T] {
-	s := &SortedSet[T]{}
+type sortedSetState[T cmp.Ordered] struct{ es []T }
+
+// NewSortedSet returns a SortedSet containing vs.
+//
+// vs is copied before anything is sorted, so the caller's slice is never
+// reordered and is not retained (ADR 0017).
+func NewSortedSet[T cmp.Ordered](vs ...T) SortedSet[T] {
+	s := SortedSet[T]{st: &sortedSetState[T]{}}
 	s.AddAll(vs...)
 	return s
 }
 
-// Add inserts one element. Values already present are ignored.
-//
-// This is an insert, O(n). AddAll sorts and merges instead, which is much
-// cheaper for more than a couple of elements — so prefer it in a loop.
-func (s *SortedSet[T]) Add(v T) {
-	base := s.es // eager, so a nil receiver panics here
-	if i, found := slices.BinarySearch(base, v); !found {
-		s.es = slices.Insert(base, i, v)
+// IsZero reports whether s was ever constructed.
+func (s SortedSet[T]) IsZero() bool { return s.st == nil }
+
+// Add inserts one element, O(n). AddAll sorts and merges instead, which is much
+// cheaper for more than a couple of elements.
+func (s SortedSet[T]) Add(v T) {
+	if i, found := slices.BinarySearch(s.st.es, v); !found {
+		s.st.es = slices.Insert(s.st.es, i, v)
 	}
 }
 
-// AddAll inserts every element of vs, sorting once and merging rather than
-// inserting one at a time: O(k log k + n + k) against O(kn). Spread a slice to
-// bulk-insert:
-//
-//	s.AddAll(other.KeySlice()...)
-//
-// vs is copied before anything is sorted, so the caller's slice is never
-// reordered and is not retained.
-func (s *SortedSet[T]) AddAll(vs ...T) {
-	base := s.es // eager, so a nil receiver panics even when vs is empty
+// AddAll inserts every element of vs, sorting once and merging:
+// O(k log k + n + k) against O(kn).
+func (s SortedSet[T]) AddAll(vs ...T) {
 	if len(vs) == 0 {
-		return
+		return // writes nothing, so it does not panic -- as the builtin does not
 	}
-	s.es = mergeSortedValues(base, sortDistinct(slices.Clone(vs)))
+	s.st.es = mergeSortedValues(s.st.es, sortDistinct(slices.Clone(vs)))
 }
 
-// Delete removes one element. Values not present are ignored.
-func (s *SortedSet[T]) Delete(v T) {
-	if s.es == nil {
+// Delete removes one element, or does nothing if it is absent. Deleting from a
+// zero SortedSet is a no-op, as delete on a nil map is.
+func (s SortedSet[T]) Delete(v T) {
+	if s.st == nil {
 		return
 	}
-	if i, found := slices.BinarySearch(s.es, v); found {
-		s.es = slices.Delete(s.es, i, i+1)
+	if i, found := slices.BinarySearch(s.st.es, v); found {
+		s.st.es = slices.Delete(s.st.es, i, i+1)
 	}
 }
 
-// DeleteAll removes every element of ks. Spread a slice to bulk-delete:
-//
-//	s.DeleteAll(s.KeySlice()...)
-//
-// That call is safe because KeySlice already returned a copy; deleting from a
-// container while walking it is not supported, and this contract is what makes
-// the obvious spelling correct rather than merely lucky.
-func (s *SortedSet[T]) DeleteAll(ks ...T) {
-	if s.es == nil {
-		// Forces the nil-receiver panic when ks is empty, which a bare range
-		// over ks would skip.
+// DeleteAll removes every element of ks. s.DeleteAll(s.KeySlice()...) is safe,
+// because KeySlice already returned a copy (ADR 0017).
+func (s SortedSet[T]) DeleteAll(ks ...T) {
+	if s.st == nil {
 		return
 	}
 	for _, k := range ks {
-		if i, found := slices.BinarySearch(s.es, k); found {
-			s.es = slices.Delete(s.es, i, i+1)
+		if i, found := slices.BinarySearch(s.st.es, k); found {
+			s.st.es = slices.Delete(s.st.es, i, i+1)
 		}
 	}
 }
@@ -106,162 +82,162 @@ func (s *SortedSet[T]) DeleteAll(ks ...T) {
 // Has reports whether v is in the set.
 //
 // This calls slices.BinarySearch directly rather than searching through a
-// comparator closure, which ADR 0005 measured at roughly 3.4x — the reason
-// SortedSet owns its backing rather than wrapping SortedDict[T, struct{}].
-func (s *SortedSet[T]) Has(v T) bool {
-	_, found := slices.BinarySearch(s.es, v)
+// comparator closure, which ADR 0005 measured at roughly 3.4x.
+func (s SortedSet[T]) Has(v T) bool {
+	if s.st == nil {
+		return false
+	}
+	_, found := slices.BinarySearch(s.st.es, v)
 	return found
 }
 
-// Len returns the number of values in the set.
-func (s *SortedSet[T]) Len() int { return len(s.es) }
+// Len returns the number of elements.
+func (s SortedSet[T]) Len() int {
+	if s.st == nil {
+		return 0
+	}
+	return len(s.st.es)
+}
 
-// All returns an iterator over the values in ascending order.
+// Keys iterates the elements in ascending order.
 //
-// The iterator is bound to the set's contents as of the call to All, not as of
-// iteration. Modifying the set during iteration is not supported.
-func (s *SortedSet[T]) Keys() iter.Seq[T] {
-	es := s.es // eager, so a nil receiver panics here like every other method
+// The nil check sits inside the returned closure and hands yield straight to
+// the inner walk: checking before the closure, or ranging and re-yielding,
+// each puts a closure on the heap (ADR 0018).
+func (s SortedSet[T]) Keys() iter.Seq[T] {
+	// The slice is read HERE, not at iteration, so the iterator is bound to the
+	// contents as of this call (ADRs 0002, 0013). The nil check does not cost a
+	// second closure, because there is still only one return.
+	var es []T
+	if s.st != nil {
+		es = s.st.es
+	}
 	return seqOverValues(es)
 }
 
-// KeySlice returns the elements of the set as a new slice, in ascending order.
-//
-// The result is a full, independent copy (ADR 0017): nothing the set does
-// afterwards is visible through it, and nothing done to it is visible in the
-// set. That is what makes s.DeleteAll(s.KeySlice()...) safe.
-func (s *SortedSet[T]) KeySlice() []T { return slices.Clone(s.es) }
+// KeySlice returns the elements as a new slice, in ascending order.
+func (s SortedSet[T]) KeySlice() []T {
+	if s.st == nil {
+		return nil
+	}
+	return slices.Clone(s.st.es)
+}
 
-// Range returns an iterator over the values with lo <= v < hi, in ascending
-// order. If hi <= lo the range is empty.
+// RangeKeys iterates the elements in [lo, hi), ascending. Empty if hi <= lo.
 //
-// Bounds are resolved when Range is called, not when the result is iterated.
-// The iterator does not expose the backing array.
-func (s *SortedSet[T]) Range(lo, hi T) iter.Seq[T] {
-	i, _ := slices.BinarySearch(s.es, lo)
-	j, _ := slices.BinarySearch(s.es, hi)
+// Bounds are resolved when RangeKeys is called, not when the result is
+// iterated.
+func (s SortedSet[T]) RangeKeys(lo, hi T) iter.Seq[T] {
+	if s.st == nil {
+		return func(func(T) bool) {}
+	}
+	i, _ := slices.BinarySearch(s.st.es, lo)
+	j, _ := slices.BinarySearch(s.st.es, hi)
 	if j < i {
 		j = i
 	}
-	return seqOverValues(s.es[i:j])
+	return seqOverValues(s.st.es[i:j])
 }
 
 func seqOverValues[T cmp.Ordered](es []T) iter.Seq[T] {
 	return func(yield func(T) bool) {
-		for _, v := range es {
-			if !yield(v) {
+		for _, e := range es {
+			if !yield(e) {
 				return
 			}
 		}
 	}
 }
 
-// Floor returns the largest value <= v.
-func (s *SortedSet[T]) Floor(v T) (T, bool) {
-	i, found := slices.BinarySearch(s.es, v)
-	if !found {
-		i-- // BinarySearch returned the insertion point; the value before it is the floor
-	}
-	return s.at(i)
-}
-
-// Ceil returns the smallest value >= v.
-func (s *SortedSet[T]) Ceil(v T) (T, bool) {
-	i, _ := slices.BinarySearch(s.es, v) // exact index if present, else the first greater
-	return s.at(i)
-}
-
-// Min returns the smallest value.
-func (s *SortedSet[T]) Min() (T, bool) { return s.at(0) }
-
-// Max returns the largest value.
-func (s *SortedSet[T]) Max() (T, bool) { return s.at(len(s.es) - 1) }
-
-// at returns the value at i, reporting false if i is out of range. It is the
-// single place the ordered lookups' boundary conditions live.
-func (s *SortedSet[T]) at(i int) (T, bool) {
-	if i < 0 || i >= len(s.es) {
+// FloorKey returns the largest element <= v.
+func (s SortedSet[T]) FloorKey(v T) (T, bool) {
+	if s.st == nil {
 		var zero T
 		return zero, false
 	}
-	return s.es[i], true
+	i, found := slices.BinarySearch(s.st.es, v)
+	if found {
+		return s.st.es[i], true
+	}
+	return s.at(i - 1)
 }
 
-// Clone returns an independent copy. Mutating the result does not affect s.
-func (s *SortedSet[T]) Clone() *SortedSet[T] {
-	return &SortedSet[T]{es: slices.Clone(s.es)}
+// CeilKey returns the smallest element >= v.
+func (s SortedSet[T]) CeilKey(v T) (T, bool) {
+	if s.st == nil {
+		var zero T
+		return zero, false
+	}
+	i, _ := slices.BinarySearch(s.st.es, v)
+	return s.at(i)
 }
 
-// Union returns a new set containing every value in s or o.
+// MinKey returns the smallest element.
 //
-// Both operands are already sorted, so this is a linear merge, O(n+m), rather
-// than n probes of O(log m).
-func (s *SortedSet[T]) Union(o *SortedSet[T]) *SortedSet[T] {
-	return &SortedSet[T]{es: mergeSortedValues(s.es, o.es)}
+// Named MinKey rather than Min because a set's element is its key (ADR 0017),
+// and because it is what lets SortedKeys cover sorted sets and sorted maps
+// alike (ADR 0018).
+func (s SortedSet[T]) MinKey() (T, bool) { return s.at(0) }
+
+// MaxKey returns the largest element.
+func (s SortedSet[T]) MaxKey() (T, bool) {
+	if s.st == nil {
+		var zero T
+		return zero, false
+	}
+	return s.at(len(s.st.es) - 1)
 }
 
-// Intersect returns a new set containing the values in both s and o.
-func (s *SortedSet[T]) Intersect(o *SortedSet[T]) *SortedSet[T] {
-	a, b := s.es, o.es
-	out := make([]T, 0, min(len(a), len(b)))
-	for i, j := 0, 0; i < len(a) && j < len(b); {
-		switch cmp.Compare(a[i], b[j]) {
-		case -1:
-			i++
-		case +1:
-			j++
-		default:
-			out = append(out, a[i])
-			i++
-			j++
+func (s SortedSet[T]) at(i int) (T, bool) {
+	if s.st == nil || i < 0 || i >= len(s.st.es) {
+		var zero T
+		return zero, false
+	}
+	return s.st.es[i], true
+}
+
+// Clone returns an independent copy.
+func (s SortedSet[T]) Clone() SortedSet[T] {
+	if s.st == nil {
+		return SortedSet[T]{}
+	}
+	return SortedSet[T]{st: &sortedSetState[T]{es: slices.Clone(s.st.es)}}
+}
+
+// Union returns a new set holding every element of s and o.
+func (s SortedSet[T]) Union(o SortedSet[T]) SortedSet[T] {
+	return SortedSet[T]{st: &sortedSetState[T]{es: mergeSortedValues(s.KeySlice(), o.KeySlice())}}
+}
+
+// Intersect returns a new set holding the elements present in both.
+func (s SortedSet[T]) Intersect(o SortedSet[T]) SortedSet[T] {
+	var out []T
+	for _, v := range s.KeySlice() {
+		if o.Has(v) {
+			out = append(out, v)
 		}
 	}
-	return &SortedSet[T]{es: out}
+	return SortedSet[T]{st: &sortedSetState[T]{es: out}}
 }
 
-// Difference returns a new set containing the values in s that are not in o.
-func (s *SortedSet[T]) Difference(o *SortedSet[T]) *SortedSet[T] {
-	a, b := s.es, o.es
-	out := make([]T, 0, len(a))
-	i, j := 0, 0
-	for i < len(a) && j < len(b) {
-		switch cmp.Compare(a[i], b[j]) {
-		case -1:
-			out = append(out, a[i])
-			i++
-		case +1:
-			j++
-		default:
-			i++
-			j++
+// Difference returns a new set holding the elements of s not in o.
+func (s SortedSet[T]) Difference(o SortedSet[T]) SortedSet[T] {
+	var out []T
+	for _, v := range s.KeySlice() {
+		if !o.Has(v) {
+			out = append(out, v)
 		}
 	}
-	return &SortedSet[T]{es: append(out, a[i:]...)}
+	return SortedSet[T]{st: &sortedSetState[T]{es: out}}
 }
 
-// collectSortedValues drains seq into a sorted, distinct slice. Unlike
-// SortedDict's equivalent there is no last-write-wins question: the values are
-// the keys, so duplicates simply collapse.
-// collectSortedValues drains seq into a sorted, distinct slice, preallocating
-// to sizeHint when it is positive. The hint only affects allocation: every
-// value seq yields is appended regardless of how many that turns out to be.
-func collectSortedValues[T cmp.Ordered](seq iter.Seq[T], sizeHint int) []T {
-	var vs []T
-	if sizeHint > 0 {
-		vs = make([]T, 0, sizeHint)
-	}
-	for v := range seq {
-		vs = append(vs, v)
-	}
-	return sortDistinct(vs)
-}
-
+// sortDistinct sorts vs and keeps the LAST of each run of equal values.
 func sortDistinct[T cmp.Ordered](vs []T) []T {
 	slices.Sort(vs)
 	return slices.Compact(vs)
 }
 
-// mergeSortedValues merges two ascending, distinct runs into a new slice.
+// mergeSortedValues merges two ascending, distinct runs.
 func mergeSortedValues[T cmp.Ordered](a, b []T) []T {
 	out := make([]T, 0, len(a)+len(b))
 	i, j := 0, 0

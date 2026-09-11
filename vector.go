@@ -5,150 +5,153 @@ import (
 	"slices"
 )
 
-// A Vector is a sequence that owns its backing slice.
+// Vector is an insertion-ordered sequence backed by a slice.
 //
-// The zero value is an empty Vector ready to use:
+// It is a reference type (ADR 0018): a one-word value whose copies share the
+// same contents. The backing slice sits behind a pointer precisely so that a
+// reallocation is invisible to callers -- which is the whole reason Vector
+// exists rather than a plain []T (ADR 0015).
 //
-//	var v containers.Vector[string]
-//	v.Append("read")
+// The zero value reads as empty and panics on a write. Appending to a nil
+// slice works, which looks like a counterexample until you notice that append
+// RETURNS rather than mutates: the builtin counterpart to v.Append(e) is
+// m[k] = v, which panics.
 //
-// # What it is for
-//
-// A slice header is a *value*, so length and backing pointer are copied on
-// every assignment and every call. Three hazards follow, and a Vector removes
-// all three by owning the slice behind a pointer:
-//
-//   - **Appends off a shared header alias.** With spare capacity, two appends
-//     from one header write the same backing cell and the first result is
-//     silently overwritten.
-//   - **A callee's append is invisible** unless it returns the slice and the
-//     caller reassigns. Nothing at the call site says so.
-//   - **Reallocation splits holders.** Two names for one slice share a backing
-//     array until it grows, and stop sharing afterwards.
-//
-// Every holder of a *Vector reaches the same header, so an append is seen by
-// all of them and **a reallocation is not observable.**
-//
-// The stronger reason is ADR 0001's: a []T field cannot be handed out
-// read-only, so an accessor over one must copy — O(n) per call, and O(n²) when
-// called in a caller's loop — or return a mutable interior. A Vector field can
-// have a view instead, at O(1) and no allocation. See IndexedView.
-//
-// # What it is not
-//
-// **A Vector is not a replacement for []T.** Building a slice locally gains
-// nothing from one, and reading a sequence you already hold is measurably worse:
-// an indexed loop costs ~24% because bounds-check elimination does not survive
-// At, and ranging All costs ~6x a raw range — though that last figure is the
-// price of iter.Seq itself, which slices.Values pays too. A Vector earns its
-// place at an API boundary, not in local code. See ADR 0015 and
-// experiments/vectorcost.
-//
-// Every method has a pointer receiver, so calling one on an addressable Vector
-// value takes its address automatically. A nil *Vector is not usable: every
-// method panics on one, deliberately.
-//
-// A Vector is not safe for concurrent use.
+// Vector is not a replacement for []T. It earns its place at an API boundary,
+// where a []T field cannot be handed out read-only; it is worse than a slice
+// for local code (ADR 0015).
 type Vector[T any] struct {
-	_  noCopy
-	es []T
+	st *vectorState[T]
 }
 
-// NewVector returns a Vector containing vs. It is a convenience for
-// construction with initial values; the zero value of Vector is equally usable.
-//
-// vs is copied, so the caller's slice and the Vector do not share a backing
-// array.
-func NewVector[T any](vs ...T) *Vector[T] {
-	return &Vector[T]{es: slices.Clone(vs)}
+type vectorState[T any] struct{ es []T }
+
+// NewVector returns a Vector containing vs. vs is copied and not retained.
+func NewVector[T any](vs ...T) Vector[T] {
+	return Vector[T]{st: &vectorState[T]{es: slices.Clone(vs)}}
 }
+
+// IsZero reports whether v was ever constructed.
+func (v Vector[T]) IsZero() bool { return v.st == nil }
 
 // Len reports how many elements the Vector holds.
-func (v *Vector[T]) Len() int { return len(v.es) }
+func (v Vector[T]) Len() int {
+	if v.st == nil {
+		return 0
+	}
+	return len(v.st.es)
+}
 
 // At returns the element at i. It panics if i is out of range, exactly as
-// indexing a slice does.
-//
-// There is deliberately no comma-ok form: matching the builtin is the point of
-// an index accessor, and a caller who needs to test has Len.
-func (v *Vector[T]) At(i int) T { return v.es[i] }
+// indexing a slice does -- including on a zero Vector, where every index is out
+// of range.
+func (v Vector[T]) At(i int) T {
+	if v.st == nil {
+		panic("containers: Vector index out of range on a zero Vector")
+	}
+	return v.st.es[i]
+}
 
 // Set replaces the element at i. It panics if i is out of range.
-func (v *Vector[T]) Set(i int, e T) { v.es[i] = e }
+func (v Vector[T]) Set(i int, e T) {
+	if v.st == nil {
+		panic("containers: Vector index out of range on a zero Vector")
+	}
+	v.st.es[i] = e
+}
 
-// Append adds one element to the end.
+// Append adds one element to the end. Appending to a zero Vector panics.
 //
-// It is deliberately not variadic, unlike HashSet.Add. A variadic signature
-// costs about 40% of an append, which is noise against a map insert and half
-// the operation again against a slice append. Use AppendAll for more than one.
-// ADR 0017 re-measured this: a variadic call costs a fixed ~0.3-0.8ns and no
-// allocation, which is 60% of an append and 5% of a map insert.
-func (v *Vector[T]) Append(e T) { v.es = append(v.es, e) }
+// It is deliberately not variadic: a variadic call costs a fixed ~0.3-0.8ns and
+// no allocation, which is ~60% of an append (ADRs 0015, 0017). AppendAll covers
+// bulk.
+func (v Vector[T]) Append(e T) { v.st.es = append(v.st.es, e) }
 
-// AppendAll adds every element of vs to the end, in order. Spread a slice to
-// bulk-append:
-//
-//	v.AppendAll(other.ValueSlice()...)
-//
-// vs is copied and not retained; the caller remains free to modify it.
-func (v *Vector[T]) AppendAll(vs ...T) {
-	// slices.Grow touches the receiver before the append, so a nil receiver
-	// panics even when vs is empty -- ADR 0002's eager-dereference rule.
-	es := slices.Grow(v.es, len(vs))
-	v.es = append(es, vs...)
+// AppendAll adds every element of vs, in order. vs is copied and not retained.
+func (v Vector[T]) AppendAll(vs ...T) {
+	if len(vs) == 0 {
+		return // writes nothing, so it does not panic
+	}
+	es := slices.Grow(v.st.es, len(vs))
+	v.st.es = append(es, vs...)
 }
 
 // Values iterates the elements in order.
+func (v Vector[T]) Values() iter.Seq[T] {
+	// Bound to the contents as of this call (ADR 0002).
+	var es []T
+	if v.st != nil {
+		es = v.st.es
+	}
+	return slices.Values(es)
+}
+
+// Positions iterates the valid indices in order.
 //
-// The iterator binds the backing slice at call time, so a nil receiver panics
-// here rather than at iteration. See ADR 0002.
-func (v *Vector[T]) Values() iter.Seq[T] {
-	es := v.es
-	return func(yield func(T) bool) {
-		for _, e := range es {
-			if !yield(e) {
+// Redundant for a Vector, where it is just 0..Len()-1, and not redundant for
+// generic code over PositionValues[P, V] where P may be a cursor (ADR 0018).
+func (v Vector[T]) Positions() iter.Seq[int] {
+	var es []T
+	if v.st != nil {
+		es = v.st.es
+	}
+	return func(yield func(int) bool) {
+		for i := range es {
+			if !yield(i) {
 				return
 			}
 		}
 	}
 }
 
-// All iterates index and element together. A vector is keyed by position
-// (ADR 0017), so All yields pairs and Values yields the elements alone.
-// This is the shape ADR 0017's problem 1 was about: a type has one All, so the
-// pair-shaped read gets it and the element-shaped read is Values, matching the
-// stdlib's meaning of both names.
-func (v *Vector[T]) All() iter.Seq2[int, T] {
-	es := v.es
-	return func(yield func(int, T) bool) {
-		for i, e := range es {
-			if !yield(i, e) {
-				return
-			}
-		}
+// All iterates index and element together. A Vector is keyed by position, so
+// All yields pairs and Values yields the elements alone (ADR 0017).
+func (v Vector[T]) All() iter.Seq2[int, T] {
+	var es []T
+	if v.st != nil {
+		es = v.st.es
 	}
+	return slices.All(es)
 }
 
-// ValueSlice returns the elements as a new slice, in order.
-//
-// The result is a full, independent copy (ADR 0017): appending to the Vector
-// afterwards is not visible through it, and writing to it is not visible in the
-// Vector.
-func (v *Vector[T]) ValueSlice() []T { return slices.Clone(v.es) }
+// ValueSlice returns the elements as a new slice, in order. The result is a
+// full, independent copy (ADR 0017).
+func (v Vector[T]) ValueSlice() []T {
+	if v.st == nil {
+		return nil
+	}
+	return slices.Clone(v.st.es)
+}
 
-// AllSlice returns index/element pairs as a new slice, in order. It is the
-// bulk-transfer shape for feeding a dict: NewHashDict(v.AllSlice()...).
-func (v *Vector[T]) AllSlice() []KeyValue[int, T] {
-	out := make([]KeyValue[int, T], 0, len(v.es))
-	for i, e := range v.es {
-		out = append(out, KeyValue[int, T]{i, e})
+// PositionSlice returns the valid indices as a new slice.
+func (v Vector[T]) PositionSlice() []int {
+	if v.st == nil {
+		return nil
+	}
+	out := make([]int, len(v.st.es))
+	for i := range out {
+		out[i] = i
 	}
 	return out
 }
 
-// Clone returns an independent Vector with the same elements. The backing
-// slices are separate; the elements themselves are copied as values, so a
-// Vector of pointers yields a Vector of the same pointers.
-func (v *Vector[T]) Clone() *Vector[T] {
-	return &Vector[T]{es: slices.Clone(v.es)}
+// AllSlice returns index/element pairs as a new slice, in order. It is the
+// bulk-transfer shape for feeding a map: NewSortedMap(v.AllSlice()...).
+func (v Vector[T]) AllSlice() []Entry[int, T] {
+	if v.st == nil {
+		return nil
+	}
+	out := make([]Entry[int, T], 0, len(v.st.es))
+	for i, e := range v.st.es {
+		out = append(out, Entry[int, T]{i, e})
+	}
+	return out
+}
+
+// Clone returns an independent copy.
+func (v Vector[T]) Clone() Vector[T] {
+	if v.st == nil {
+		return Vector[T]{}
+	}
+	return Vector[T]{st: &vectorState[T]{es: slices.Clone(v.st.es)}}
 }

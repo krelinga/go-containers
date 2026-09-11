@@ -11,7 +11,7 @@ package containers
 // **Requirements** describe what one constructor needs, and are named for the
 // operation. Do not implement these directly; a viewer satisfies them by
 // implementing the capabilities they compose. Their purpose is the error
-// message: failing to satisfy CanViewHashDict says which operation you cannot
+// message: failing to satisfy CanViewMapDeleted says which operation you cannot
 // perform, rather than which structural property you lack.
 //
 // Write the halves separately and compose by embedding. A stateless composed
@@ -51,15 +51,9 @@ type ValueViewer[V, NV any] interface {
 	ToValueView(V) NV
 }
 
-// CanViewHashSet is what ViewHashSet requires.
-type CanViewHashSet[T, NT any] interface {
+// CanViewMapSet is what ViewHashSet requires.
+type CanViewMapSet[T, NT any] interface {
 	KeyViewer[T, NT]
-}
-
-// CanViewHashDict is what ViewHashDict requires.
-type CanViewHashDict[K, NK, V, NV any] interface {
-	KeyViewer[K, NK]
-	ValueViewer[V, NV]
 }
 
 // CanViewMap is what ViewMap requires.
@@ -68,12 +62,12 @@ type CanViewMap[K, NK, V, NV any] interface {
 	ValueViewer[V, NV]
 }
 
-// CanViewSortedDict is what ViewSortedDict requires.
+// CanViewSortedMap is what ViewSortedDict requires.
 //
 // Values only. A sorted container's keys are cmp.Ordered, which admits only
 // integers, floats and strings — every one an immutable value type — so there is
 // nothing for key conversion to protect. See ADR 0012, decision 3.
-type CanViewSortedDict[V, NV any] interface {
+type CanViewSortedMap[V, NV any] interface {
 	ValueViewer[V, NV]
 }
 
@@ -115,7 +109,7 @@ type CanViewVector[T, NT any] interface {
 // It is structurally identical to CanViewVector and separate from it on purpose.
 // These interfaces are named for the constructor that requires them, so that
 // failing to satisfy one names the operation you cannot perform rather than the
-// structural property you lack. CanViewHashDict and CanViewMap are identical to
+// structural property you lack. CanViewMapDeleted and CanViewMap are identical to
 // each other on the same grounds. See ADR 0012.
 type CanViewSlice[T, NT any] interface {
 	ValueViewer[T, NT]

@@ -45,7 +45,7 @@ func unauthorizedStdlib(granted, requested []string) []string {
 }
 
 func unauthorizedContainer(granted, requested []string) []string {
-	missing := containers.NewHashSet(requested...).Difference(containers.NewHashSet(granted...))
+	missing := containers.NewMapSet(requested...).Difference(containers.NewMapSet(granted...))
 	return slices.Sorted(missing.Keys())
 }
 
@@ -68,7 +68,7 @@ func sharedStdlib(a, b []string) []string {
 }
 
 func sharedContainer(a, b []string) []string {
-	return slices.Sorted(containers.NewHashSet(a...).Intersect(containers.NewHashSet(b...)).Keys())
+	return slices.Sorted(containers.NewMapSet(a...).Intersect(containers.NewMapSet(b...)).Keys())
 }
 
 // ---------------------------------------------------------------------------
@@ -85,7 +85,7 @@ func distinctStdlib(in []string) []string {
 }
 
 func distinctContainer(in []string) []string {
-	return slices.Sorted(containers.NewHashSet(in...).Keys())
+	return slices.Sorted(containers.NewMapSet(in...).Keys())
 }
 
 // ---------------------------------------------------------------------------
@@ -176,17 +176,17 @@ func TestDistinct(t *testing.T) {
 
 // Examples, for godoc.
 
-func ExampleHashSet() {
-	var granted containers.HashSet[string]
+func ExampleMapSet() {
+	granted := containers.NewMapSet[string]()
 	granted.AddAll("read", "write")
 
 	fmt.Println(granted.Has("read"), granted.Has("delete"), granted.Len())
 	// Output: true false 2
 }
 
-func ExampleHashSet_Difference() {
-	requested := containers.NewHashSet("read", "delete", "admin")
-	granted := containers.NewHashSet("read", "write")
+func ExampleMapSet_Difference() {
+	requested := containers.NewMapSet("read", "delete", "admin")
+	granted := containers.NewMapSet("read", "write")
 
 	fmt.Println(slices.Sorted(requested.Difference(granted).Keys()))
 	// Output: [admin delete]
@@ -241,7 +241,7 @@ func newTable(tiers ...Tier) Table {
 
 func tiersInOrderStdlib(t Table) []Tier { return t }
 
-func tiersInOrderContainer(m *containers.SortedDict[int, string]) []Tier {
+func tiersInOrderContainer(m containers.SortedMap[int, string]) []Tier {
 	var out []Tier
 	for k, v := range m.All() {
 		out = append(out, Tier{k, v})
@@ -262,7 +262,7 @@ func tiersInRangeStdlib(t Table, lo, hi int) []Tier {
 	return t[i:j]
 }
 
-func tiersInRangeContainer(m *containers.SortedDict[int, string], lo, hi int) []Tier {
+func tiersInRangeContainer(m containers.SortedMap[int, string], lo, hi int) []Tier {
 	var out []Tier
 	for k, v := range m.Range(lo, hi) {
 		out = append(out, Tier{k, v})
@@ -288,7 +288,7 @@ func tierForStdlib(t Table, qty int) (Tier, bool) {
 	return t[i], true
 }
 
-func tierForContainer(m *containers.SortedDict[int, string], qty int) (Tier, bool) {
+func tierForContainer(m containers.SortedMap[int, string], qty int) (Tier, bool) {
 	k, v, ok := m.Floor(qty)
 	return Tier{k, v}, ok
 }
@@ -299,8 +299,8 @@ func tierForContainer(m *containers.SortedDict[int, string], qty int) (Tier, boo
 
 var rateTable = []Tier{{1, "1.00"}, {10, "0.90"}, {50, "0.75"}, {100, "0.60"}}
 
-func newSortedDict(tiers ...Tier) *containers.SortedDict[int, string] {
-	m := containers.NewSortedDict[int, string]()
+func newSortedDict(tiers ...Tier) containers.SortedMap[int, string] {
+	m := containers.NewSortedMap[int, string]()
 	for _, e := range tiers {
 		m.Set(e.MinQty, e.Price)
 	}
@@ -377,8 +377,8 @@ func TestTierFor(t *testing.T) {
 	}
 }
 
-func ExampleSortedDict_Floor() {
-	rates := containers.NewSortedDict[int, string]()
+func ExampleSortedMap_Floor() {
+	rates := containers.NewSortedMap[int, string]()
 	rates.Set(1, "1.00")
 	rates.Set(10, "0.90")
 	rates.Set(50, "0.75")
@@ -388,8 +388,8 @@ func ExampleSortedDict_Floor() {
 	// Output: 10 0.90 true
 }
 
-func ExampleSortedDict_Range() {
-	rates := containers.NewSortedDict[int, string]()
+func ExampleSortedMap_Range() {
+	rates := containers.NewSortedMap[int, string]()
 	for k, v := range map[int]string{1: "1.00", 10: "0.90", 50: "0.75", 100: "0.60"} {
 		rates.Set(k, v)
 	}
@@ -420,7 +420,7 @@ func bulkLoadStdlib(src map[int]string) Table {
 
 func bulkLoadContainer(src map[int]string) []Tier {
 	var out []Tier
-	for k, v := range containers.NewSortedDict(pairsOf(maps.All(src))...).All() {
+	for k, v := range containers.NewSortedMap(pairsOf(maps.All(src))...).All() {
 		out = append(out, Tier{k, v})
 	}
 	return out
@@ -451,8 +451,8 @@ func TestBulkLoad(t *testing.T) {
 	}
 }
 
-func ExampleNewSortedDict() {
-	rates := containers.NewSortedDict(pairsOf(maps.All(map[int]string{
+func ExampleNewSortedMap() {
+	rates := containers.NewSortedMap(pairsOf(maps.All(map[int]string{
 		100: "0.60", 1: "1.00", 50: "0.75", 10: "0.90",
 	}))...)
 	for k, v := range rates.All() {
@@ -495,7 +495,7 @@ func newVersions(ns ...int) Versions {
 // Task H — all versions in order. The baseline is already sorted.
 func versionsInOrderStdlib(v Versions) []int { return v }
 
-func versionsInOrderContainer(s *containers.SortedSet[int]) []int {
+func versionsInOrderContainer(s containers.SortedSet[int]) []int {
 	return slices.Collect(s.Keys())
 }
 
@@ -506,8 +506,8 @@ func versionsInRangeStdlib(v Versions, lo, hi int) []int {
 	return v[i:j]
 }
 
-func versionsInRangeContainer(s *containers.SortedSet[int], lo, hi int) []int {
-	return slices.Collect(s.Range(lo, hi))
+func versionsInRangeContainer(s containers.SortedSet[int], lo, hi int) []int {
+	return slices.Collect(s.RangeKeys(lo, hi))
 }
 
 // Task J — newest version at or before n.
@@ -522,13 +522,13 @@ func versionAtOrBeforeStdlib(v Versions, n int) (int, bool) {
 	return v[i], true
 }
 
-func versionAtOrBeforeContainer(s *containers.SortedSet[int], n int) (int, bool) {
-	return s.Floor(n)
+func versionAtOrBeforeContainer(s containers.SortedSet[int], n int) (int, bool) {
+	return s.FloorKey(n)
 }
 
 // The same task using the Set this library already ships. Correct, and
 // O(n log n) per call because it re-sorts the whole set to answer one question.
-func versionAtOrBeforeViaSet(s *containers.HashSet[int], n int) (int, bool) {
+func versionAtOrBeforeViaSet(s containers.MapSet[int], n int) (int, bool) {
 	vs := slices.Sorted(s.Keys())
 	i, found := slices.BinarySearch(vs, n)
 	if !found {
@@ -600,7 +600,7 @@ func TestVersionsInRange(t *testing.T) {
 
 func TestVersionAtOrBefore(t *testing.T) {
 	v := newVersions(releaseVersions...)
-	s := containers.NewHashSet(releaseVersions...)
+	s := containers.NewMapSet(releaseVersions...)
 	ss := containers.NewSortedSet(releaseVersions...)
 	for _, tc := range versionFloorCases {
 		t.Run("stdlib/"+tc.name, func(t *testing.T) {
@@ -621,16 +621,16 @@ func TestVersionAtOrBefore(t *testing.T) {
 	}
 }
 
-func ExampleSortedSet_Floor() {
+func ExampleSortedSet_FloorKey() {
 	deployed := containers.NewSortedSet(3, 7, 12, 40)
-	v, ok := deployed.Floor(9)
+	v, ok := deployed.FloorKey(9)
 	fmt.Println(v, ok)
 	// Output: 7 true
 }
 
-func ExampleSortedSet_Range() {
+func ExampleSortedSet_RangeKeys() {
 	deployed := containers.NewSortedSet(3, 7, 12, 40)
-	fmt.Println(slices.Collect(deployed.Range(7, 40)))
+	fmt.Println(slices.Collect(deployed.RangeKeys(7, 40)))
 	// Output: [7 12]
 }
 
@@ -655,7 +655,7 @@ func pruneMapStdlib[K comparable, V any](m map[K]V, keep func(V) bool) {
 	}
 }
 
-func pruneSortedStdlib[K cmp.Ordered, V any](m *containers.SortedDict[K, V], keep func(V) bool) {
+func pruneSortedStdlib[K cmp.Ordered, V any](m containers.SortedMap[K, V], keep func(V) bool) {
 	var drop []K
 	for k, v := range m.All() {
 		if !keep(v) {
@@ -670,7 +670,7 @@ func pruneSortedStdlib[K cmp.Ordered, V any](m *containers.SortedDict[K, V], kee
 // The container version: one function body for both backings. It uses the more
 // conservative iteration discipline, so it collects keys where pruneMapStdlib
 // deletes in place -- the cost of working against both.
-func pruneContainer[K comparable, V any](m containers.MutableDict[K, V], keep func(V) bool) {
+func pruneContainer[K comparable, V any](m containers.MutableKeyValues[K, V], keep func(V) bool) {
 	var drop []K
 	for k, v := range m.All() {
 		if !keep(v) {
@@ -705,7 +705,7 @@ func TestPrune(t *testing.T) {
 			}
 		})
 		t.Run("stdlib-sorted/"+tc.name, func(t *testing.T) {
-			sm := containers.NewSortedDict[int, int]()
+			sm := containers.NewSortedMap[int, int]()
 			sm.SetAll(pairsOf(maps.All(tc.in))...)
 			pruneSortedStdlib(sm, keepEven)
 			if got := slices.Sorted(maps.Keys(maps.Collect(sm.All()))); !slices.Equal(got, tc.want) {
@@ -723,7 +723,7 @@ func TestPrune(t *testing.T) {
 		// HashDict takes the pointer, like every other container -- the
 		// asymmetry ADR 0007 recorded for Map, now avoidable.
 		t.Run("container-hashdict/"+tc.name, func(t *testing.T) {
-			hd := containers.NewHashDict[int, int]()
+			hd := containers.Map[int, int]{}
 			hd.SetAll(pairsOf(maps.All(tc.in))...)
 			pruneContainer[int, int](hd, keepEven)
 			if got := slices.Sorted(maps.Keys(maps.Collect(hd.All()))); !slices.Equal(got, tc.want) {
@@ -731,7 +731,7 @@ func TestPrune(t *testing.T) {
 			}
 		})
 		t.Run("container-sorted/"+tc.name, func(t *testing.T) {
-			sm := containers.NewSortedDict[int, int]()
+			sm := containers.NewSortedMap[int, int]()
 			sm.SetAll(pairsOf(maps.All(tc.in))...)
 			pruneContainer[int, int](sm, keepEven)
 			if got := slices.Sorted(maps.Keys(maps.Collect(sm.All()))); !slices.Equal(got, tc.want) {
@@ -750,9 +750,9 @@ func ExampleMap() {
 	// Output: 3 4 [cpu disk mem]
 }
 
-func ExampleHashDict() {
+func ExampleMap_SetAll() {
 	// The zero value is usable, unlike Map's.
-	var limits containers.HashDict[string, int]
+	limits := containers.Map[string, int]{}
 	limits.Set("cpu", 4)
 	limits.Set("mem", 16)
 
@@ -760,12 +760,16 @@ func ExampleHashDict() {
 	// Output: 2 [cpu mem]
 }
 
-func ExampleNewHashDict() {
+func ExampleMap_bulk() {
 	// Building one dict from another presizes from the source's length.
-	src := containers.NewSortedDict[string, int]()
+	src := containers.NewSortedMap[string, int]()
 	src.SetAll(pairsOf(maps.All(map[string]int{"b": 2, "a": 1, "c": 3}))...)
 
-	byHash := containers.NewHashDict(src.AllSlice()...)
+	byHash := func() containers.Map[string, int] {
+		m := containers.Map[string, int]{}
+		m.SetAll(src.AllSlice()...)
+		return m
+	}()
 	fmt.Println(byHash.Len(), slices.Sorted(maps.Keys(maps.Collect(byHash.All()))))
 	// Output: 3 [a b c]
 }
@@ -786,14 +790,22 @@ func (l *auditLogStdlib) Record(e string) { l.entries = append(l.entries, e) }
 // Safe, and O(n) on every call.
 func (l *auditLogStdlib) Entries() []string { return slices.Clone(l.entries) }
 
+// The zero value of a reference container is READ-ONLY (ADR 0018), so a struct
+// embedding one must construct it. This is the concrete shape of that ADR's
+// reversal of ADR 0002's usable-zero-value rule, and it shows up exactly here:
+// a field that used to work by declaration now needs a constructor.
 type auditLogContainer struct{ entries containers.Vector[string] }
+
+func newAuditLogContainer() *auditLogContainer {
+	return &auditLogContainer{entries: containers.NewVector[string]()}
+}
 
 func (l *auditLogContainer) Record(e string) { l.entries.Append(e) }
 
 // Safe, O(1), and no allocation: the view cannot write, so there is nothing to
 // defend against by copying.
-func (l *auditLogContainer) Entries() containers.IndexedView[string] {
-	return containers.ViewVectorIdentity(&l.entries)
+func (l *auditLogContainer) Entries() containers.VectorView[string] {
+	return containers.ViewVectorIdentity(l.entries)
 }
 
 // ---------------------------------------------------------------------------
@@ -808,7 +820,7 @@ func addDefaultsStdlib(out []string, defaults ...string) []string {
 }
 
 // The callee appends in place. There is no return value to forget.
-func addDefaultsContainer(out *containers.Vector[string], defaults ...string) {
+func addDefaultsContainer(out containers.Vector[string], defaults ...string) {
 	out.AppendAll(slices.Collect(slices.Values(defaults))...)
 }
 
@@ -844,7 +856,7 @@ func TestTaskHStdlib(t *testing.T) {
 func TestTaskHContainer(t *testing.T) {
 	for _, tc := range sequenceCases {
 		t.Run(tc.name, func(t *testing.T) {
-			var l auditLogContainer
+			l := newAuditLogContainer()
 			for _, e := range tc.record {
 				l.Record(e)
 			}
@@ -874,7 +886,7 @@ func TestTaskHStdlibAccessorDoesNotLeak(t *testing.T) {
 // log; the container's hands out a view and allocates nothing, at any size.
 func TestTaskHAccessorAllocations(t *testing.T) {
 	var sl auditLogStdlib
-	var cn auditLogContainer
+	cn := newAuditLogContainer()
 	for i := range 64 {
 		e := fmt.Sprint(i)
 		sl.Record(e)
@@ -887,7 +899,7 @@ func TestTaskHAccessorAllocations(t *testing.T) {
 	}
 	_ = sinkSlice
 
-	var sinkView containers.IndexedView[string]
+	var sinkView containers.VectorView[string]
 	if got := testing.AllocsPerRun(100, func() { sinkView = cn.Entries() }); got != 0 {
 		t.Errorf("view accessor allocated %v times, want 0", got)
 	}
@@ -900,14 +912,14 @@ func TestTaskHAccessorAllocations(t *testing.T) {
 // safe because the view has no way to write at all -- there is no Set, no
 // Append, and no path back to the Vector.
 func TestTaskHContainerAccessorCannotWrite(t *testing.T) {
-	var l auditLogContainer
+	l := newAuditLogContainer()
 	l.Record("login")
 
 	got := l.Entries()
 	if _, ok := any(got).(interface{ Set(int, string) }); ok {
 		t.Error("view exposed Set")
 	}
-	if _, ok := any(got).(*containers.Vector[string]); ok {
+	if _, ok := any(got).(containers.Vector[string]); ok {
 		t.Error("view was assertable back to the Vector")
 	}
 	if got.At(0) != "login" {
@@ -955,8 +967,8 @@ func TestTaskIForgettingTheAssignment(t *testing.T) {
 // A Vector accessor keeps working across the reallocations that would split
 // two holders of a slice header.
 func ExampleVector() {
-	var log containers.Vector[string]
-	view := containers.ViewVectorIdentity(&log)
+	log := containers.NewVector[string]()
+	view := containers.ViewVectorIdentity(log)
 
 	for _, e := range []string{"login", "read", "write"} {
 		log.Append(e) // reallocates as it grows
@@ -982,7 +994,7 @@ type auditLogSliceView struct{ entries []string }
 
 func (l *auditLogSliceView) Record(e string) { l.entries = append(l.entries, e) }
 
-func (l *auditLogSliceView) Entries() containers.IndexedView[string] {
+func (l *auditLogSliceView) Entries() containers.VectorView[string] {
 	return containers.ViewSliceIdentity(l.entries)
 }
 

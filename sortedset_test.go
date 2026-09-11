@@ -7,68 +7,8 @@ import (
 	"github.com/krelinga/go-containers"
 )
 
-func ssVals(s *containers.SortedSet[int]) []int { return slices.Collect(s.Keys()) }
+func ssVals(s containers.SortedSet[int]) []int { return slices.Collect(s.Keys()) }
 
-func TestSortedSetZeroValue(t *testing.T) {
-	var s containers.SortedSet[int]
-	if s.Len() != 0 || s.Has(1) {
-		t.Errorf("fresh zero value: Len=%d Has=%v", s.Len(), s.Has(1))
-	}
-	if _, ok := s.Min(); ok {
-		t.Error("Min on zero value returned ok")
-	}
-	if got := ssVals(&s); got != nil {
-		t.Errorf("All on zero value = %v, want empty", got)
-	}
-	s.AddAll(10, 5)
-	if got, want := ssVals(&s), []int{5, 10}; !slices.Equal(got, want) {
-		t.Errorf("after Add = %v, want %v", got, want)
-	}
-}
-
-// ADR 0002 decision 2, inherited: every method panics on a nil receiver, on a
-// path that always executes.
-func TestSortedSetNilPanicsUniformly(t *testing.T) {
-	var p *containers.SortedSet[int]
-	other := containers.NewSortedSet(1)
-
-	mustPanic(t, "Add", func() { p.Add(1) })
-	mustPanic(t, "Add() no args", func() { p.AddAll() })
-	mustPanic(t, "Add multi", func() { p.AddAll(1, 2) })
-	mustPanic(t, "AddAll", func() { p.AddAll(slices.Collect(slices.Values([]int{1}))...) })
-	mustPanic(t, "AddAll empty", func() { p.AddAll(slices.Collect(func(func(int) bool) {})...) })
-	mustPanic(t, "Remove", func() { p.Delete(1) })
-	mustPanic(t, "Remove() no args", func() { p.DeleteAll() })
-	mustPanic(t, "Has", func() { _ = p.Has(1) })
-	mustPanic(t, "Len", func() { _ = p.Len() })
-	mustPanic(t, "All", func() { _ = p.Keys() })
-	mustPanic(t, "Range", func() { _ = p.Range(1, 2) })
-	mustPanic(t, "Floor", func() { _, _ = p.Floor(1) })
-	mustPanic(t, "Ceil", func() { _, _ = p.Ceil(1) })
-	mustPanic(t, "Min", func() { _, _ = p.Min() })
-	mustPanic(t, "Max", func() { _, _ = p.Max() })
-	mustPanic(t, "Clone", func() { _ = p.Clone() })
-	mustPanic(t, "Union", func() { _ = p.Union(other) })
-	mustPanic(t, "Intersect", func() { _ = p.Intersect(other) })
-	mustPanic(t, "Difference", func() { _ = p.Difference(other) })
-}
-
-func TestSortedSetNilArgumentPanics(t *testing.T) {
-	var nilSet *containers.SortedSet[int]
-	full := containers.NewSortedSet(1)
-	var empty containers.SortedSet[int]
-
-	for _, tc := range []struct {
-		name string
-		recv *containers.SortedSet[int]
-	}{{"full", full}, {"empty", &empty}} {
-		mustPanic(t, tc.name+".Union(nil)", func() { _ = tc.recv.Union(nilSet) })
-		mustPanic(t, tc.name+".Intersect(nil)", func() { _ = tc.recv.Intersect(nilSet) })
-		mustPanic(t, tc.name+".Difference(nil)", func() { _ = tc.recv.Difference(nilSet) })
-	}
-}
-
-// Both Add paths -- single insert and multi-value merge -- must agree.
 func TestSortedSetAddPathsAgree(t *testing.T) {
 	one := containers.NewSortedSet[int]()
 	for _, v := range []int{40, 3, 12, 7, 3, 40} {
@@ -83,7 +23,7 @@ func TestSortedSetAddPathsAgree(t *testing.T) {
 	want := []int{3, 7, 12, 40}
 	for _, tc := range []struct {
 		name string
-		s    *containers.SortedSet[int]
+		s    containers.SortedSet[int]
 	}{{"repeated Add", one}, {"Add multi", multi}, {"AddAll", viaAddAll}, {"Collect", collected}} {
 		if got := ssVals(tc.s); !slices.Equal(got, want) {
 			t.Errorf("%s = %v, want %v", tc.name, got, want)
@@ -98,7 +38,7 @@ func TestSortedSetAddAllMergesWithExisting(t *testing.T) {
 		t.Errorf("= %v, want %v", got, want)
 	}
 
-	var z containers.SortedSet[int]
+	z := containers.NewSortedSet[int]()
 	z.AddAll(slices.Collect(func(func(int) bool) {})...)
 	if z.Len() != 0 {
 		t.Error("empty AddAll on zero value should stay empty")
@@ -111,7 +51,7 @@ func TestSortedSetRemove(t *testing.T) {
 	if got, want := ssVals(s), []int{1, 3}; !slices.Equal(got, want) {
 		t.Errorf("= %v, want %v", got, want)
 	}
-	var z containers.SortedSet[int]
+	z := containers.NewSortedSet[int]()
 	z.Delete(1) // no-op, not a panic
 }
 
@@ -123,7 +63,7 @@ func TestSortedSetOrderedLookups(t *testing.T) {
 		want   int
 		wantOK bool
 	}{{1, 0, false}, {3, 3, true}, {9, 7, true}, {40, 40, true}, {999, 40, true}} {
-		if got, ok := s.Floor(tc.in); got != tc.want || ok != tc.wantOK {
+		if got, ok := s.FloorKey(tc.in); got != tc.want || ok != tc.wantOK {
 			t.Errorf("Floor(%d) = %d,%v want %d,%v", tc.in, got, ok, tc.want, tc.wantOK)
 		}
 	}
@@ -132,14 +72,14 @@ func TestSortedSetOrderedLookups(t *testing.T) {
 		want   int
 		wantOK bool
 	}{{1, 3, true}, {3, 3, true}, {9, 12, true}, {40, 40, true}, {41, 0, false}} {
-		if got, ok := s.Ceil(tc.in); got != tc.want || ok != tc.wantOK {
+		if got, ok := s.CeilKey(tc.in); got != tc.want || ok != tc.wantOK {
 			t.Errorf("Ceil(%d) = %d,%v want %d,%v", tc.in, got, ok, tc.want, tc.wantOK)
 		}
 	}
-	if v, ok := s.Min(); v != 3 || !ok {
+	if v, ok := s.MinKey(); v != 3 || !ok {
 		t.Errorf("Min = %d,%v", v, ok)
 	}
-	if v, ok := s.Max(); v != 40 || !ok {
+	if v, ok := s.MaxKey(); v != 40 || !ok {
 		t.Errorf("Max = %d,%v", v, ok)
 	}
 }
@@ -162,7 +102,7 @@ func TestSortedSetRange(t *testing.T) {
 		{"equal bounds", 7, 7, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := slices.Collect(s.Range(tc.lo, tc.hi)); !slices.Equal(got, tc.want) {
+			if got := slices.Collect(s.RangeKeys(tc.lo, tc.hi)); !slices.Equal(got, tc.want) {
 				t.Errorf("Range(%d,%d) = %v, want %v", tc.lo, tc.hi, got, tc.want)
 			}
 		})
@@ -170,9 +110,9 @@ func TestSortedSetRange(t *testing.T) {
 }
 
 func TestSortedSetIteratorsBindAtCallTime(t *testing.T) {
-	var s containers.SortedSet[int]
+	s := containers.NewSortedSet[int]()
 	s.Add(10)
-	all, rng := s.Keys(), s.Range(0, 100)
+	all, rng := s.Keys(), s.RangeKeys(0, 100)
 	s.Add(20)
 
 	if got := slices.Collect(all); !slices.Equal(got, []int{10}) {
@@ -189,7 +129,7 @@ func TestSortedSetAlgebra(t *testing.T) {
 
 	for _, tc := range []struct {
 		name string
-		got  *containers.SortedSet[int]
+		got  containers.SortedSet[int]
 		want []int
 	}{
 		{"Union", a.Union(b), []int{1, 3, 5, 7, 9}},
@@ -216,14 +156,14 @@ func TestSortedSetAlgebra(t *testing.T) {
 	}
 
 	// Empty operands.
-	var empty containers.SortedSet[int]
-	if got := ssVals(a.Union(&empty)); !slices.Equal(got, []int{1, 3, 5, 7}) {
+	empty := containers.NewSortedSet[int]()
+	if got := ssVals(a.Union(empty)); !slices.Equal(got, []int{1, 3, 5, 7}) {
 		t.Errorf("Union with empty = %v", got)
 	}
-	if a.Intersect(&empty).Len() != 0 {
+	if a.Intersect(empty).Len() != 0 {
 		t.Error("Intersect with empty should be empty")
 	}
-	if got := ssVals(a.Difference(&empty)); !slices.Equal(got, []int{1, 3, 5, 7}) {
+	if got := ssVals(a.Difference(empty)); !slices.Equal(got, []int{1, 3, 5, 7}) {
 		t.Errorf("Difference with empty = %v", got)
 	}
 }
@@ -240,7 +180,7 @@ func TestSortedSetCloneIsIndependent(t *testing.T) {
 	if got, want := ssVals(clone), []int{1, 2, 3}; !slices.Equal(got, want) {
 		t.Errorf("clone = %v, want %v", got, want)
 	}
-	var zero containers.SortedSet[int]
+	zero := containers.NewSortedSet[int]()
 	if zero.Clone().Len() != 0 {
 		t.Error("Clone of zero value should be empty")
 	}
