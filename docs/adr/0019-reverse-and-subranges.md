@@ -1,7 +1,9 @@
 # 19. Reverse iteration and sub-ranges
 
 - **Status:** **Proposed.** Three solutions are specified and measured; none is
-  chosen yet.
+  chosen yet. One sub-question is settled within solution C: **spans carry
+  `Len`, at O(log n), with the complexity difference documented on the shape
+  interfaces.**
 - **Date:** 2026-09-11
 - **Evidence:** `experiments/reverse/` (`RESULTS.md`).
 - **Relates to:** ADR `0013` (which deferred "should `Range` return a view?"),
@@ -231,7 +233,7 @@ would have read as the natural one for *that* type too, and taken the slot.
 
 | method | `KeySpan[K]` | `KeyValueSpan[K, V]` | direction-dependent? |
 |---|---|---|---|
-| `Len() int` | ✓ | ✓ | no — but O(log n), not O(1); see below |
+| `Len() int` | ✓ | ✓ | no — **O(log n), not O(1)**; see below |
 | `Has(K) bool` | ✓ | ✓ | no |
 | `Get(K) (V, bool)` | — | ✓ | no |
 | `Keys() iter.Seq[K]` | ✓ | ✓ | **yes** |
@@ -283,17 +285,38 @@ deleted `CanLen` and the whole collector machinery with it. The reason for
 omitting `Len` went with it, exactly as ADR `0014`'s decisive argument went with
 `Elems2`.
 
-Weighed afresh, `Len` stays, for two reasons and against one:
+**Decided: `Len` stays, and the complexity difference is documented.** Two
+reasons for, one cost accepted:
 
 - **Without it a span satisfies nothing.** `Keys[K]` requires `Len`, so a span
   with no `Len` cannot be handed to generic read code — which was one of the
   main payoffs of this shape.
 - **10 ns is small where `Len` is actually used.** Its usual job is presizing a
   destination before an O(n) walk, and the walk dwarfs it.
-- **Against:** it is the one place in the library where a shape interface hides a
-  complexity difference. Every container's `Len` is O(1) and a span's is not, and
-  a caller holding a `Keys[K]` cannot tell which they have. That wants a doc line
-  on the interface, not a guard.
+- **Accepted cost:** this becomes **the first place in the library where a shape
+  interface hides a complexity difference.** Every container's `Len` is O(1); a
+  span's is O(log n); a caller holding a `Keys[K]` cannot tell which they have.
+  The answer is a doc line, not a guard — a guard would mean a second interface,
+  and splitting `Keys[K]` in two to record a constant factor is a worse trade
+  than stating it.
+
+**What ships with it.** The shape interfaces in `contracts.go` gain this, and
+each span type repeats the specific figure:
+
+```go
+// Len returns the number of elements.
+//
+// O(1) for every container. A SPAN is the exception: it holds key bounds
+// rather than resolved indices -- so that it stays correct when the container
+// changes (ADR 0017) -- and re-resolves them per call, making Len two binary
+// searches. Measured at ~43x a container's Len, and the same cost Keys() pays,
+// so it is cheap relative to iterating and dear relative to a field read.
+Len() int
+```
+
+The rule for a reader: **`Len` is O(1) unless you are holding a span.** That is
+the whole of the exception, and it is worth saying at the interface because the
+interface is where it becomes invisible.
 
 #### What is deliberately absent, and why
 
@@ -396,10 +419,7 @@ Two sub-questions, neither answered here:
 2. **`Vector`**, in two parts: whether it gets `Backward()` (affordable today,
    no stability assumption) and whether it gets a position-bounded span (which
    inherits ADR `0017`'s objection intact). Spelled out in the section above.
-3. **Whether `Len` belongs on a span**, given it is O(log n) where every
-   container's is O(1), and that ADR `0017` said no for a reason that no longer
-   applies. Keeping it is what lets a span satisfy the shape interfaces.
-4. **Whether dropping the ordered lookups from spans is the right trade.** The
+3. **Whether dropping the ordered lookups from spans is the right trade.** The
    alternative is two span types per shape — a forward one carrying `MinKey` and
    friends, and a read-only backward one — which the type system would enforce
    but which doubles the vocabulary.
