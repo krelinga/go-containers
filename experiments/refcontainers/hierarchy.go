@@ -16,7 +16,7 @@ import (
 
 // One pair type for keys AND positions. The second element is always a value;
 // only the first needed a name general enough to cover both.
-type hSlotValue[S, V any] struct {
+type hEntry[S, V any] struct {
 	Slot  S
 	Value V
 }
@@ -52,7 +52,7 @@ type hKeyValues[K, V any] interface {
 	hValues[V]
 	Get(K) (V, bool)
 	All() iter.Seq2[K, V]
-	AllSlice() []hSlotValue[K, V]
+	AllSlice() []hEntry[K, V]
 }
 
 // hPositions is the sequence analogue of hKeys, deliberately named differently
@@ -70,7 +70,7 @@ type hPositionValues[P, V any] interface {
 	hValues[V]
 	At(P) V
 	All() iter.Seq2[P, V]
-	AllSlice() []hSlotValue[P, V]
+	AllSlice() []hEntry[P, V]
 }
 
 // --- read bodies ---
@@ -84,26 +84,26 @@ func (hKeysBody[K]) KeySlice() []K      { return nil }
 
 type hKvBody[K, V any] struct{}
 
-func (hKvBody[K, V]) Len() int                     { return 0 }
-func (hKvBody[K, V]) Has(K) bool                   { return false }
-func (hKvBody[K, V]) hKeys() iter.Seq[K]           { return emptySeq[K] }
-func (hKvBody[K, V]) KeySlice() []K                { return nil }
-func (hKvBody[K, V]) hValues() iter.Seq[V]         { return emptySeq[V] }
-func (hKvBody[K, V]) ValueSlice() []V              { return nil }
-func (hKvBody[K, V]) Get(K) (V, bool)              { var z V; return z, false }
-func (hKvBody[K, V]) All() iter.Seq2[K, V]         { return nil }
-func (hKvBody[K, V]) AllSlice() []hSlotValue[K, V] { return nil }
+func (hKvBody[K, V]) Len() int                 { return 0 }
+func (hKvBody[K, V]) Has(K) bool               { return false }
+func (hKvBody[K, V]) hKeys() iter.Seq[K]       { return emptySeq[K] }
+func (hKvBody[K, V]) KeySlice() []K            { return nil }
+func (hKvBody[K, V]) hValues() iter.Seq[V]     { return emptySeq[V] }
+func (hKvBody[K, V]) ValueSlice() []V          { return nil }
+func (hKvBody[K, V]) Get(K) (V, bool)          { var z V; return z, false }
+func (hKvBody[K, V]) All() iter.Seq2[K, V]     { return nil }
+func (hKvBody[K, V]) AllSlice() []hEntry[K, V] { return nil }
 
 type hPosBody[P, V any] struct{}
 
-func (hPosBody[P, V]) Len() int                     { return 0 }
-func (hPosBody[P, V]) hPositions() iter.Seq[P]      { return emptySeq[P] }
-func (hPosBody[P, V]) PositionSlice() []P           { return nil }
-func (hPosBody[P, V]) hValues() iter.Seq[V]         { return emptySeq[V] }
-func (hPosBody[P, V]) ValueSlice() []V              { return nil }
-func (hPosBody[P, V]) At(P) V                       { var z V; return z }
-func (hPosBody[P, V]) All() iter.Seq2[P, V]         { return nil }
-func (hPosBody[P, V]) AllSlice() []hSlotValue[P, V] { return nil }
+func (hPosBody[P, V]) Len() int                 { return 0 }
+func (hPosBody[P, V]) hPositions() iter.Seq[P]  { return emptySeq[P] }
+func (hPosBody[P, V]) PositionSlice() []P       { return nil }
+func (hPosBody[P, V]) hValues() iter.Seq[V]     { return emptySeq[V] }
+func (hPosBody[P, V]) ValueSlice() []V          { return nil }
+func (hPosBody[P, V]) At(P) V                   { var z V; return z }
+func (hPosBody[P, V]) All() iter.Seq2[P, V]     { return nil }
+func (hPosBody[P, V]) AllSlice() []hEntry[P, V] { return nil }
 
 // --- ordered reads: these do NOT factor the same way ---
 
@@ -134,14 +134,14 @@ func (hKeysMut[K]) DeleteAll(...K) {}
 
 type hKvMut[K, V any] struct{}
 
-func (hKvMut[K, V]) Set(K, V)                   {}
-func (hKvMut[K, V]) SetAll(...hSlotValue[K, V]) {}
-func (hKvMut[K, V]) Delete(K)                   {}
-func (hKvMut[K, V]) DeleteAll(...K)             {}
+func (hKvMut[K, V]) Set(K, V)               {}
+func (hKvMut[K, V]) SetAll(...hEntry[K, V]) {}
+func (hKvMut[K, V]) Delete(K)               {}
+func (hKvMut[K, V]) DeleteAll(...K)         {}
 
 // --- containers ---
 
-type hHashSet[T comparable] struct {
+type hMapSet[T comparable] struct {
 	hKeysBody[T]
 	hKeysMut[T]
 }
@@ -157,7 +157,7 @@ type hMap[K comparable, V any] struct {
 	hKvMut[K, V]
 }
 
-type hSortedDict[K cmp.Ordered, V any] struct {
+type hSortedMap[K cmp.Ordered, V any] struct {
 	hKvBody[K, V]
 	hOrdKeys[K]     // MinKey MaxKey FloorKey CeilKey RangeKeys
 	hOrdPairs[K, V] // Min Max Floor Ceil Range
@@ -168,7 +168,7 @@ type hVector[T any] struct{ hPosBody[int, T] }
 
 // --- views ---
 
-type hHashSetView[NT any] struct{ hKeysBody[NT] }
+type hMapSetView[NT any] struct{ hKeysBody[NT] }
 
 type hSortedSetView[T cmp.Ordered] struct {
 	hKeysBody[T]
@@ -177,7 +177,7 @@ type hSortedSetView[T cmp.Ordered] struct {
 
 type hMapView[NK, NV any] struct{ hKvBody[NK, NV] }
 
-type hSortedDictView[K cmp.Ordered, NV any] struct {
+type hSortedMapView[K cmp.Ordered, NV any] struct {
 	hKvBody[K, NV]
 	hOrdKeys[K]
 	hOrdPairs[K, NV]
@@ -191,20 +191,20 @@ type hSliceView[NT any] struct{ hPosBody[int, NT] }
 // ---------------------------------------------------------------------------
 
 var (
-	_ hKeys[int] = hHashSet[int]{}
+	_ hKeys[int] = hMapSet[int]{}
 	_ hKeys[int] = hSortedSet[int]{}
-	_ hKeys[int] = hHashSetView[int]{}
+	_ hKeys[int] = hMapSetView[int]{}
 	_ hKeys[int] = hSortedSetView[int]{}
 
 	// A dict is a hKeys of its keys AND a hValues of its values.
 	_ hKeys[string]           = hMap[string, int]{}
 	_ hValues[int]            = hMap[string, int]{}
 	_ hKeyValues[string, int] = hMap[string, int]{}
-	_ hKeys[string]           = hSortedDict[string, int]{}
-	_ hValues[int]            = hSortedDict[string, int]{}
-	_ hKeyValues[string, int] = hSortedDict[string, int]{}
+	_ hKeys[string]           = hSortedMap[string, int]{}
+	_ hValues[int]            = hSortedMap[string, int]{}
+	_ hKeyValues[string, int] = hSortedMap[string, int]{}
 	_ hKeyValues[string, int] = hMapView[string, int]{}
-	_ hKeyValues[string, int] = hSortedDictView[string, int]{}
+	_ hKeyValues[string, int] = hSortedMapView[string, int]{}
 
 	// The payoff: sequences share hValues with dicts.
 	_ hValues[int]                 = hVector[int]{}
@@ -227,7 +227,7 @@ func hSum(vs hValues[int]) int {
 
 var (
 	_ = hSum(hMap[string, int]{})
-	_ = hSum(hSortedDict[string, int]{})
+	_ = hSum(hSortedMap[string, int]{})
 	_ = hSum(hVector[int]{})
 	_ = hSum(hVectorView[int]{})
 	_ = hSum(hSliceView[int]{})
@@ -243,7 +243,7 @@ func emptySeq2[K, V any](yield func(K, V) bool) {}
 // OrderedKeys is satisfied by sorted SETS and sorted DICTS alike, because the
 // key-only reads are spelled *Key and so do not collide with a dict's
 // pair-returning Min/Max/Floor/Ceil/Range.
-type hOrderedKeys[K any] interface {
+type hSortedKeys[K any] interface {
 	hKeys[K]
 	MinKey() (K, bool)
 	MaxKey() (K, bool)
@@ -254,9 +254,9 @@ type hOrderedKeys[K any] interface {
 
 // OrderedKeyValues adds the pair-returning reads on top, so a sorted dict
 // satisfies both tiers.
-type hOrderedKeyValues[K, V any] interface {
+type hSortedKeyValues[K, V any] interface {
 	hKeyValues[K, V]
-	hOrderedKeys[K]
+	hSortedKeys[K]
 	Min() (K, V, bool)
 	Max() (K, V, bool)
 	Floor(K) (K, V, bool)
@@ -279,20 +279,20 @@ type hMutableKeys[K any] interface {
 type hMutableKeyValues[K, V any] interface {
 	hKeyValues[K, V]
 	Set(K, V)
-	SetAll(...hSlotValue[K, V])
+	SetAll(...hEntry[K, V])
 	Delete(K)
 	DeleteAll(...K)
 }
 
 // The complete table, as assertions.
 var (
-	_ hOrderedKeys[int]              = hSortedSet[int]{}
-	_ hOrderedKeys[int]              = hSortedSetView[int]{}
-	_ hOrderedKeyValues[string, int] = hSortedDict[string, int]{}
-	_ hOrderedKeyValues[string, int] = hSortedDictView[string, int]{}
+	_ hSortedKeys[int]              = hSortedSet[int]{}
+	_ hSortedKeys[int]              = hSortedSetView[int]{}
+	_ hSortedKeyValues[string, int] = hSortedMap[string, int]{}
+	_ hSortedKeyValues[string, int] = hSortedMapView[string, int]{}
 
-	_ hMutableKeys[int]              = hHashSet[int]{}
+	_ hMutableKeys[int]              = hMapSet[int]{}
 	_ hMutableKeys[int]              = hSortedSet[int]{}
 	_ hMutableKeyValues[string, int] = hMap[string, int]{}
-	_ hMutableKeyValues[string, int] = hSortedDict[string, int]{}
+	_ hMutableKeyValues[string, int] = hSortedMap[string, int]{}
 )

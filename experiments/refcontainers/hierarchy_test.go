@@ -7,8 +7,8 @@ import "testing"
 // assertion inline.
 //
 //	var _ hKeys[int]              = hVector[int]{}          // missing method Has
-//	var _ hValues[string]         = hHashSet[string]{}      // missing method ValueSlice
-//	var _ hMutableKeys[string]    = hHashSetView[string]{}  // missing method Add
+//	var _ hValues[string]         = hMapSet[string]{}      // missing method ValueSlice
+//	var _ hMutableKeys[string]    = hMapSetView[string]{}  // missing method Add
 //
 // All three were run and all three fail with those messages.
 
@@ -18,7 +18,7 @@ func TestShapeVocabularyIsDisjoint(t *testing.T) {
 	var _ hValues[string] = hVector[string]{}
 
 	// A set is key-only: it has no value side.
-	var _ hKeys[string] = hHashSet[string]{}
+	var _ hKeys[string] = hMapSet[string]{}
 
 	// A dict is both, which is what lets one function read values out of a
 	// dict OR a sequence.
@@ -33,7 +33,7 @@ func TestShapeVocabularyIsDisjoint(t *testing.T) {
 func TestOneFunctionReadsValuesFromEverything(t *testing.T) {
 	got := []int{
 		hSum(hMap[string, int]{}),
-		hSum(hSortedDict[string, int]{}),
+		hSum(hSortedMap[string, int]{}),
 		hSum(hVector[int]{}),
 		hSum(hVectorView[int]{}),
 		hSum(hSliceView[int]{}),

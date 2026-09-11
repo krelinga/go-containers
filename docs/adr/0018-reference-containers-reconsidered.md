@@ -233,7 +233,7 @@ That is nil-map behaviour, and it is one sentence rather than a table of special
 cases:
 
 ```go
-var s HashSet[int]
+var s MapSet[int]
 s.Len()              // 0
 s.Has(1)             // false
 for range s.Keys() {}  // no iterations
@@ -312,7 +312,7 @@ currently conflates:
 
 ```go
 // Tier 1 -- a concrete struct per container. This is the GUARANTEE.
-type HashSetView[NT any]    struct{ st *hashSetViewState[…] }
+type MapSetView[NT any]    struct{ st *mapSetViewState[…] }
 type SortedSetView[T any]   struct{ st *sortedSetViewState[T] }
 type HashDictView[NK, NV any] struct{ … }
 // … one per container, named for it.
@@ -330,7 +330,7 @@ type PositionValues[P, V any] interface { Positions[P]; Values[V]; … }
 Two boundaries, two spellings, and the choice says what you mean:
 
 ```go
-func handOut() HashSetView[string]  // nothing can write through this
+func handOut() MapSetView[string]  // nothing can write through this
 func audit(k Keys[string])          // I need reads; container or view, I don't care
 ```
 
@@ -359,7 +359,7 @@ entirely and factors better:
 ```go
 // One pair type for keys AND positions. The second element is always a value;
 // only the first needed a name general enough to cover both.
-type SlotValue[S, V any] struct {
+type Entry[S, V any] struct {
 	Slot  S
 	Value V
 }
@@ -384,7 +384,7 @@ type KeyValues[K, V any] interface {
 	Values[V]
 	Get(K) (V, bool)
 	All() iter.Seq2[K, V]
-	AllSlice() []SlotValue[K, V]
+	AllSlice() []Entry[K, V]
 }
 
 // The sequence analogue of Keys, deliberately spelled differently because a
@@ -401,12 +401,12 @@ type PositionValues[P, V any] interface {
 	Values[V]
 	At(P) V
 	All() iter.Seq2[P, V]
-	AllSlice() []SlotValue[P, V]
+	AllSlice() []Entry[P, V]
 }
 ```
 
-**No name here collides with a container name**, so `HashSet`, `SortedSet`,
-`Map`, `SortedDict` and `Vector` keep theirs, and `Positions` leaves `LinkedList`
+**No name here collides with a container name**, so `MapSet`, `SortedSet`,
+`Map`, `SortedMap` and `Vector` keep theirs, and `Positions` leaves `LinkedList`
 free for ADR `0010`.
 
 **It buys something the container-kind naming could not express.** `Values[V]` is
@@ -416,7 +416,7 @@ shared between dicts and sequences, so one function reads values out of either:
 func sum(vs Values[int]) int { … }
 
 sum(myMap)         // Map[string, int]
-sum(mySortedDict)  // SortedDict[string, int]
+sum(mySortedMap)   // SortedMap[string, int]
 sum(myVector)      // Vector[int]
 sum(myVectorView)  // VectorView[int]
 sum(mySliceView)   // SliceView[int]
@@ -430,8 +430,8 @@ differently.** Verified as failures, since Go cannot assert a negative inline:
 
 ```
 Vector[int]     does not implement Keys[int]      (missing method Has)
-HashSet[string] does not implement Values[string] (missing method ValueSlice)
-HashSetView[…]  does not implement MutableKeys[…] (missing method Add)
+MapSet[string] does not implement Values[string] (missing method ValueSlice)
+MapSetView[…]  does not implement MutableKeys[…] (missing method Add)
 ```
 
 A sequence is not a set of its indices; a set has no value side; a view is never
@@ -452,7 +452,7 @@ and be satisfied by both. **Naming the key-only reads `*Key` removes the clash
 rather than choosing between them:**
 
 ```go
-type OrderedKeys[K any] interface {
+type SortedKeys[K any] interface {
 	Keys[K]
 	MinKey() (K, bool)
 	MaxKey() (K, bool)
@@ -461,9 +461,9 @@ type OrderedKeys[K any] interface {
 	RangeKeys(lo, hi K) iter.Seq[K]
 }
 
-type OrderedKeyValues[K, V any] interface {
+type SortedKeyValues[K, V any] interface {
 	KeyValues[K, V]
-	OrderedKeys[K]                    // the *Key reads come along
+	SortedKeys[K]                    // the *Key reads come along
 	Min() (K, V, bool)                // and the pair reads sit beside them
 	Max() (K, V, bool)
 	Floor(K) (K, V, bool)
@@ -472,8 +472,8 @@ type OrderedKeyValues[K, V any] interface {
 }
 ```
 
-**One `OrderedKeys[K]` now covers `SortedSet`, `SortedSetView`, `SortedDict` and
-`SortedDictView`** — verified. A sorted dict carries both sets of reads, and
+**One `SortedKeys[K]` now covers `SortedSet`, `SortedSetView`, `SortedMap` and
+`SortedMapView`** — verified. A sorted dict carries both sets of reads, and
 nothing is ambiguous because they have different names.
 
 What changes on each side:
@@ -496,7 +496,36 @@ is the same argument applied to a sub-range: today a caller wanting the keys in
 key-only walk avoids that, and would be worth having even if no interface needed
 it.
 
-**`KeyValue` becomes `SlotValue`, and that reaches shipped code.** ADR `0017`
+##### The renames, and what they do to ADR 0008's convention
+
+Five renames land with this design, and together they change the rule ADR `0008`
+set for implementation names:
+
+| today | option (b) | why |
+|---|---|---|
+| `KeyValue[K, V]` | **`Entry[S, V]`** | one pair type for keys and positions, with `Slot` as the generic first field |
+| `HashSet[T]` | **`MapSet[T]`** | named for its backing, like its sibling |
+| `HashDict[K, V]` | **deleted** | `Map` is the hash dict once ADR `0007`'s asymmetry is gone |
+| `SortedDict[K, V]` | **`SortedMap[K, V]`** | the key/value concept is spelled `Map` throughout |
+| *(new)* | `SortedKeys`, `SortedKeyValues` | the ordered read contracts, matching the container adjective |
+
+**ADR `0008` said implementations are `<Ordering><Concept>` — `HashSet`,
+`SortedDict` — with `Map` as the one exception "because it is a thin naming of
+the builtin".** Under option (b) that inverts: the concept for a key/value
+container *is* `Map`, and the prefix names the **backing**:
+
+```
+             set          key/value
+map-backed   MapSet       Map
+sorted       SortedSet    SortedMap
+```
+
+`Map` stops being an exception and becomes the centre of the scheme — which it
+can only do because option (b) is what makes it a first-class container rather
+than an adapter. **This supersedes ADR `0008` section 3's naming rule**, and
+should be recorded there if option (b) is ever adopted.
+
+**`KeyValue` becomes `Entry`, and that reaches shipped code.** ADR `0017`
 returns `[]KeyValue[int, T]` from `Vector.AllSlice` and takes `...KeyValue[K, V]`
 in every `SetAll` — so today's library already uses one pair type for keys and
 positions, and the rename makes the first field honest about covering both
@@ -513,12 +542,12 @@ their tests; it should land in its own commit, separately from anything else.**
 Measured behaviour, not speculation (`TestCapabilityInterfaceIsAssertable`):
 
 ```go
-var s Keys[string] = myHashSet         // a CONTAINER
-back, _ := s.(*HashSet[string])        // succeeds
+var s Keys[string] = myMapSet          // a CONTAINER
+back, _ := s.(*MapSet[string])        // succeeds
 back.Add("smuggled")                   // write access recovered
 
-var v Keys[string] = myHashSetView     // a VIEW
-_, ok := v.(*HashSet[string])          // fails -- nothing writable to recover
+var v Keys[string] = myMapSetView      // a VIEW
+_, ok := v.(*MapSet[string])          // fails -- nothing writable to recover
 ```
 
 **So the capability interfaces are a convenience, not a guarantee**, and the guarantee lives in
@@ -563,7 +592,7 @@ interface tier puts one back, because a *nil interface* has no dynamic type:
 | | `k == nil` | `k.Len()` |
 |---|---|---|
 | `var k Set[int]` | true | **panics** |
-| `k = HashSetView[int]{}` (zero view) | false | 0 |
+| `k = MapSetView[int]{}` (zero view) | false | 0 |
 | `k = populated view` | false | n |
 
 Note this is *not* Go's typed-nil trap in its dangerous form: state 2 is a
@@ -590,7 +619,7 @@ Three ways out, in increasing order of surface:
 
 - **Accept the loss.** Such boundaries take `Keys[T]` and rely on the caller not
   smuggling a container in to write through later. Honest, and weaker than today.
-- **Keep a sealed middle tier**: `HashSetView[T]` (concrete) satisfies
+- **Keep a sealed middle tier**: `MapSetView[T]` (concrete) satisfies
   `SetView[T]` (sealed, views only) satisfies `Keys[T]` (unsealed, containers
   too). Every combination expressible, at three names per concept.
 - **Seal by construction instead.** A concrete view whose only field is
@@ -598,15 +627,17 @@ Three ways out, in increasing order of surface:
   becomes unnecessary — but that seals *tier 1*, not tier 2, and does not help.
 
 The middle option is the complete one and is what a full design would likely
-take; the cost is that the vocabulary grows to `HashSetView` / `SetView` / `Set`
+take; the cost is that the vocabulary grows to `MapSetView` / `SetView` / `Set`
 for a single idea.
 
 ##### Wart 5: naming, and what collides
 
-- **The container-name collision is solved** by naming the interfaces for shape
-  rather than kind, above. What survives is narrower: the *ordered* reads still
-  want an adjective, and `OrderedKeys` is the least-bad one.
-- **Concrete views do not substitute for one another.** `HashSetView[T]` and
+- **The container-name collision is solved**, and so is the adjective mismatch.
+  Naming the interfaces for shape rather than kind removes the collisions, and
+  renaming the ordered contracts to `SortedKeys`/`SortedKeyValues` means both
+  tiers say `Sorted` for the same idea. The first sketch had containers saying
+  `Sorted` and contracts saying `Ordered`; that is gone.
+- **Concrete views do not substitute for one another.** `MapSetView[T]` and
   `SortedSetView[T]` are unrelated structs; anything wanting either takes the
   interface. That is the intended rule and worth stating, because it makes tier 1
   useful only at boundaries you fully control.
@@ -621,52 +652,53 @@ Every row below is a compile-time assertion in
 `experiments/refcontainers/hierarchy.go`, and the negatives are recorded in
 `hierarchy_test.go`. **`HashDict` is absent**: option (b) dissolves ADR `0007`'s
 value/pointer asymmetry, which was its only remaining justification, so `Map`
-becomes the hash dict.
+becomes the map-backed key/value container outright. `HashSet` and `SortedDict`
+are renamed `MapSet` and `SortedMap` so the backing and the concept read the
+same way across the four — see the rename table above.
 
-**Concrete types — six containers' worth of state, eleven exported names:**
+**Concrete types.** Plus one pair type, `Entry[S, V]{Slot, Value}`:
 
 | container | backing | its view | the view converts |
 |---|---|---|---|
-| `HashSet[T comparable]` | map | `HashSetView[NT]` | keys, both ways |
+| `MapSet[T comparable]` | map | `MapSetView[NT]` | keys, both ways |
 | `SortedSet[T cmp.Ordered]` | sorted slice | `SortedSetView[T]` | **nothing** |
 | `Map[K comparable, V]` | defined `map[K]V` | `MapView[NK, NV]` | keys + values |
-| `SortedDict[K cmp.Ordered, V]` | sorted slice | `SortedDictView[K, NV]` | values only |
+| `SortedMap[K cmp.Ordered, V]` | sorted slice | `SortedMapView[K, NV]` | values only |
 | `Vector[T]` | slice | `VectorView[NT]` | values only |
 | *(a plain `[]T`, not a type)* | — | `SliceView[NT]` | values only |
 
 **Shape interfaces:**
 
 ```
-        Keys[K]                Values[V]              Positions[P]
-           |                    |     |                    |
-           |     +--------------+     +----------+         |
-           |     |                               |         |
-           +--> KeyValues[K,V]            PositionValues[P,V] <--+
-           |         |
-OrderedKeys[K]       |
-     |     \         |
-     |      +--> OrderedKeyValues[K,V]     (embeds BOTH: a sorted dict has
-     |                   |                  the *Key reads and the pair reads)
-MutableKeys[K]   MutableKeyValues[K,V]      (mutation tiers DEFERRED)
+    Keys[K]              Values[V]             Positions[P]
+       |                  |      |                   |
+       |    +-------------+      +---------+         |
+       +-> KeyValues[K,V]            PositionValues[P,V]
+       |        |
+SortedKeys[K]   |
+   |      \     |
+   |       +-> SortedKeyValues[K,V]   (embeds BOTH: a SortedMap has the
+   |               |                   *Key reads AND the pair reads)
+MutableKeys[K]  MutableKeyValues[K,V]  (mutation tiers DEFERRED)
 ```
 
 Read the arrows as "embeds". `KeyValues` embeds `Keys` and `Values`;
-`PositionValues` embeds `Positions` and `Values`; `OrderedKeyValues` embeds
-`KeyValues` **and** `OrderedKeys`.
+`PositionValues` embeds `Positions` and `Values`; `SortedKeyValues` embeds
+`KeyValues` **and** `SortedKeys`.
 
 **What implements what:**
 
-| type | `Values` | `Keys` | `KeyValues` | `OrderedKeys` | `OrderedKeyValues` | `Positions` | `PositionValues` | mutable |
+| type | `Values` | `Keys` | `KeyValues` | `SortedKeys` | `SortedKeyValues` | `Positions` | `PositionValues` | mutable |
 |---|---|---|---|---|---|---|---|---|
-| `HashSet[T]` | | ✓ | | | | | | ✓ |
+| `MapSet[T]` | | ✓ | | | | | | ✓ |
 | `SortedSet[T]` | | ✓ | | ✓ | | | | ✓ |
 | `Map[K,V]` | ✓ | ✓ | ✓ | | | | | ✓ |
-| `SortedDict[K,V]` | ✓ | ✓ | ✓ | ✓ | ✓ | | | ✓ |
+| `SortedMap[K,V]` | ✓ | ✓ | ✓ | ✓ | ✓ | | | ✓ |
 | `Vector[T]` | ✓ | | | | | ✓ | ✓ | — |
-| `HashSetView[NT]` | | ✓ | | | | | | |
+| `MapSetView[NT]` | | ✓ | | | | | | |
 | `SortedSetView[T]` | | ✓ | | ✓ | | | | |
 | `MapView[NK,NV]` | ✓ | ✓ | ✓ | | | | | |
-| `SortedDictView[K,NV]` | ✓ | ✓ | ✓ | ✓ | ✓ | | | |
+| `SortedMapView[K,NV]` | ✓ | ✓ | ✓ | ✓ | ✓ | | | |
 | `VectorView[NT]` | ✓ | | | | | ✓ | ✓ | |
 | `SliceView[NT]` | ✓ | | | | | ✓ | ✓ | |
 
@@ -676,17 +708,17 @@ decision:
 - **No view satisfies a mutation tier.** That is the read-only guarantee, and it
   holds structurally rather than by convention.
 - **Sets have no `Values` column.** A set's element is its key (ADR `0017`), so
-  `Values[V]` is undefined for one and `HashSet` fails to satisfy it — *missing
+  `Values[V]` is undefined for one and `MapSet` fails to satisfy it — *missing
   method ValueSlice*.
 - **Sequences have no `Keys` column.** A position is not a key (ADR `0016`), so
   `Vector` fails `Keys[int]` — *missing method Has*. The two vocabularies do not
   overlap by accident.
-- **`OrderedKeys` spans sets and dicts**, because the key-only reads are spelled
+- **`SortedKeys` spans sets and dicts**, because the key-only reads are spelled
   `MinKey`/`MaxKey`/`FloorKey`/`CeilKey`/`RangeKeys` and so do not collide with
   a dict's pair-returning `Min`/`Max`/`Floor`/`Ceil`/`Range`. A sorted dict
   satisfies both ordered tiers.
 - **`Values[V]` is the only column shared between dicts and sequences**, and it
-  is what lets one function read values out of a `Map`, a `SortedDict`, a
+  is what lets one function read values out of a `Map`, a `SortedMap`, a
   `Vector`, a `VectorView` or a `SliceView`. The status quo cannot express that
   at all.
 
@@ -727,7 +759,7 @@ and the doc comment on each type says copies share. This is the same contract
 
 | | status quo | complete option (b) |
 |---|---|---|
-| container handle | `*HashSet[T]` (pointer) | `HashSet[T]` (one-word value) |
+| container handle | `*MapSet[T]` (pointer) | `MapSet[T]` (one-word value) |
 | view handle | `SetView[T]` (interface) | `SetView[T]` (one-word value) |
 | representation at the boundary | **changes** | same |
 | copying a container | forbidden, `go vet` enforced | defined; copies share |
@@ -738,7 +770,7 @@ and the doc comment on each type says copies share. This is the same contract
 | "is it empty" | `Len() == 0` | `Len() == 0` |
 | "was it constructed" | `== nil` | `IsZero()` |
 | ordered → base view | implicit (embedding) | implicit, via the interface tier |
-| read-only guarantee | sealed `SetView[T]` | concrete `HashSetView[T]` |
+| read-only guarantee | sealed `SetView[T]` | concrete `MapSetView[T]` |
 | generic over backing | sealed `SetView[T]` | the shape interfaces |
 | generic over backing **and** read-only | `SetView[T]` | **needs a third tier** |
 | a function that reads either a container or a view | **impossible** | `Keys[T]` / `Values[V]` |
@@ -769,15 +801,15 @@ Ordered by how much judgement each needs, not by size:
    load-bearing and easy to violate: a converting view holds its viewer behind a
    pointer, never inline.
 5. **Add the shape interfaces** — `Values`, `Keys`, `KeyValues`, `Positions`,
-   `PositionValues`, plus `OrderedKeys` and `OrderedKeyValues` — unsealed,
+   `PositionValues`, plus `SortedKeys` and `SortedKeyValues` — unsealed,
    satisfied by containers and views alike, and decide whether a sealed middle
    tier is kept for boundaries that need read-only *across* backings. Defer the
    mutation tiers.
-6. **Rename `KeyValue` to `SlotValue`**, in its own commit.
+6. **Rename `KeyValue` to `Entry`**, in its own commit.
 7. **Delete `noCopy`, `container_layout_test.go`, and the copylocks note in
    `CLAUDE.md`.** Replace with a documented copies-share contract per type.
-8. **Rewrite `contracts.go`'s assertions** from `(*HashSet[int])(nil)` to
-   `HashSet[int]{}`.
+8. **Rewrite `contracts.go`'s assertions** from `(*MapSet[int])(nil)` to
+   `MapSet[int]{}`.
 
 #### The honest summary
 
