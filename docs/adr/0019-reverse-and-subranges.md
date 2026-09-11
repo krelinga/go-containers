@@ -153,11 +153,11 @@ put a direction except in a wrapper.
 
 ```go
 type KeySpan[K any]      struct{ … }  // over a set, or a map's keys
-type EntrySpan[K, V any] struct{ … }  // over a map's entries
+type KeyValueSpan[K, V any] struct{ … }  // over a map's entries
 
-func (m SortedMap[K, V]) Range(lo, hi K) EntrySpan[K, V]
-func (sp EntrySpan[K, V]) Backward() EntrySpan[K, V]
-func (sp EntrySpan[K, V]) All() iter.Seq2[K, V]
+func (m SortedMap[K, V]) Range(lo, hi K) KeyValueSpan[K, V]
+func (sp KeyValueSpan[K, V]) Backward() KeyValueSpan[K, V]
+func (sp KeyValueSpan[K, V]) All() iter.Seq2[K, V]
 ```
 
 **A span may hold an interface internally, and still be free.** This ADR first
@@ -206,7 +206,7 @@ and C, and it is worth 2-3 allocations on every windowed walk.
 **What it costs in surface:** new exported types — but fewer than first
 estimated. Because a span may hold an interface, one `KeySpan[K]` can window a
 set, a map's keys, or a view over either; it need not be one type per container.
-Spans still do not substitute for views (`EntrySpan` and `SortedMapView` are
+Spans still do not substitute for views (`KeyValueSpan` and `SortedMapView` are
 unrelated types), but both satisfy the ADR `0018` shape interfaces, so generic
 read code takes either.
 
@@ -219,11 +219,17 @@ interface plus bounds plus a direction **field** — that field is what makes
 reversal free, and it is the whole difference from solution B.
 
 ```go
-type KeySpan[K cmp.Ordered]        struct{ … }  // a window of keys
-type EntrySpan[K cmp.Ordered, V any] struct{ … }  // a window of entries
+type KeySpan[K cmp.Ordered]             struct{ … }  // a window of keys
+type KeyValueSpan[K cmp.Ordered, V any] struct{ … }  // a window of entries
 ```
 
-| method | `KeySpan[K]` | `EntrySpan[K, V]` | direction-dependent? |
+**The names mirror the shape interfaces**, which is what leaves room for the
+positional side: `KeySpan` is to `Keys[K]` as `KeyValueSpan` is to
+`KeyValues[K, V]`, and a future window over a sequence would be
+`PositionValueSpan[P, V]`, to `PositionValues[P, V]`. A name like `EntrySpan`
+would have read as the natural one for *that* type too, and taken the slot.
+
+| method | `KeySpan[K]` | `KeyValueSpan[K, V]` | direction-dependent? |
 |---|---|---|---|
 | `Len() int` | ✓ | ✓ | no |
 | `Has(K) bool` | ✓ | ✓ | no |
@@ -237,7 +243,7 @@ type EntrySpan[K cmp.Ordered, V any] struct{ … }  // a window of entries
 | `Backward() Self` | ✓ | ✓ | — |
 | `Range(lo, hi K) Self` | ✓ | ✓ | no |
 
-Verified: `KeySpan[K]` satisfies `Keys[K]`, and `EntrySpan[K, V]` satisfies
+Verified: `KeySpan[K]` satisfies `Keys[K]`, and `KeyValueSpan[K, V]` satisfies
 `Keys[K]`, `Values[V]` **and** `KeyValues[K, V]`. So generic read code takes a
 span, a container or a view indifferently — which is the payoff of ADR `0018`'s
 shape interfaces, applied here for free.
@@ -297,8 +303,8 @@ it is `Range` over the full bounds with the flag set.
 |---|---|---|
 | `SortedSet[T]` | `KeySpan[T]` | sorted slice; walk it downwards |
 | `SortedSetView[T]` | `KeySpan[T]` | holds a `SortedSet`; same walk |
-| `SortedMap[K, V]` | `EntrySpan[K, V]` | sorted slice of entries |
-| `SortedMapView[K, NV]` | `EntrySpan[K, NV]` | copies the interface it holds; conversion applies per element as it walks |
+| `SortedMap[K, V]` | `KeyValueSpan[K, V]` | sorted slice of entries |
+| `SortedMapView[K, NV]` | `KeyValueSpan[K, NV]` | copies the interface it holds; conversion applies per element as it walks |
 | `Vector[T]` | **open — see below** | slice-backed, but see the position question |
 | `VectorView[NT]` | **open** | same, including the `ViewSlice` case |
 | `MapSet[T]` | **nothing** | no order to reverse |
