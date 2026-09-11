@@ -131,11 +131,11 @@ stated backwards. Containers become one-word structs wrapping shared state, with
 value receivers; views become one-word structs wrapping the sealed interface.
 
 ```go
-type HashSet[T comparable] struct{ st *hashSetState[T] }
-type SetView[NT any]       struct{ impl setViewImpl[NT] }
+type MapSet[T comparable] struct{ st *mapSetState[T] }
+type MapSetView[NT any]   struct{ st *mapSetViewState[NT] }
 
-func (s HashSet[T]) IsZero() bool { return s.st == nil }
-func (v SetView[NT]) IsZero() bool { return v.impl == nil }
+func (s MapSet[T]) IsZero() bool     { return s.st == nil }
+func (v MapSetView[NT]) IsZero() bool { return v.st == nil }
 ```
 
 **What it actually buys — and it is not the nil story.**
@@ -194,7 +194,7 @@ cost**, which is precisely what has changed since `0014`: it used to carry a
   nothing to dispatch to. Making them agree means nil-checking every method on
   the view side as well — roughly double the boilerplate of the container-only
   design, spread across every method of every container and every view.
-- **ADR `0002`'s usable zero value reverses.** `var s HashSet[int]; s.Add(1)`
+- **ADR `0002`'s usable zero value reverses.** `var s MapSet[int]; s.Add(1)`
   works today via addressability and would panic. That is a deliberate trade —
   the zero value becomes "the empty container you may read but not write", which
   is the semantics a reader already has for maps — but it is a reversal of an
@@ -210,7 +210,7 @@ cost**, which is precisely what has changed since `0014`: it used to carry a
 **One thing gets simpler, and is worth noting.** A struct whose only field is
 unexported cannot be built populated outside the package, so `sealedView()`
 becomes unnecessary — the seal is structural rather than a method — and
-`v.(*HashDict[K, V])` stops compiling because `v` is not an interface at all.
+`v.(Map[K, V])` stops compiling because `v` is not an interface at all.
 
 **A refinement option (b) contributed regardless of its fate.** ADR `0014`
 established that a nil check must sit *inside* the closure a method returns.
@@ -312,9 +312,10 @@ currently conflates:
 
 ```go
 // Tier 1 -- a concrete struct per container. This is the GUARANTEE.
-type MapSetView[NT any]    struct{ st *mapSetViewState[…] }
-type SortedSetView[T any]   struct{ st *sortedSetViewState[T] }
-type HashDictView[NK, NV any] struct{ … }
+type MapSetView[NT any]        struct{ st *mapSetViewState[…] }
+type SortedSetView[T any]      struct{ st *sortedSetViewState[T] }
+type MapView[NK, NV any]       struct{ … }
+type SortedMapView[K, NV any]  struct{ … }
 // … one per container, named for it.
 
 // Tier 2 -- capability interfaces. This is the GENERALITY.
@@ -331,7 +332,7 @@ Two boundaries, two spellings, and the choice says what you mean:
 
 ```go
 func handOut() MapSetView[string]  // nothing can write through this
-func audit(k Keys[string])          // I need reads; container or view, I don't care
+func audit(k Keys[string])         // I need reads; container or view, I don't care
 ```
 
 **What it recovers, verified.** `TestInterfaceHierarchySurvives`: the ordered
@@ -429,9 +430,9 @@ no way to say this: `Vector` and `HashDict` share no contract at all.
 differently.** Verified as failures, since Go cannot assert a negative inline:
 
 ```
-Vector[int]     does not implement Keys[int]      (missing method Has)
-MapSet[string] does not implement Values[string] (missing method ValueSlice)
-MapSetView[…]  does not implement MutableKeys[…] (missing method Add)
+Vector[int]      does not implement Keys[int]      (missing method Has)
+MapSet[string]   does not implement Values[string] (missing method ValueSlice)
+MapSetView[...]  does not implement MutableKeys[...] (missing method Add)
 ```
 
 A sequence is not a set of its indices; a set has no value side; a view is never
@@ -463,8 +464,8 @@ type SortedKeys[K any] interface {
 
 type SortedKeyValues[K, V any] interface {
 	KeyValues[K, V]
-	SortedKeys[K]                    // the *Key reads come along
-	Min() (K, V, bool)                // and the pair reads sit beside them
+	SortedKeys[K]              // the *Key reads come along
+	Min() (K, V, bool)         // and the pair reads sit beside them
 	Max() (K, V, bool)
 	Floor(K) (K, V, bool)
 	Ceil(K) (K, V, bool)
@@ -473,7 +474,7 @@ type SortedKeyValues[K, V any] interface {
 ```
 
 **One `SortedKeys[K]` now covers `SortedSet`, `SortedSetView`, `SortedMap` and
-`SortedMapView`** — verified. A sorted dict carries both sets of reads, and
+`SortedMapView`** — verified. A `SortedMap` carries both sets of reads, and
 nothing is ambiguous because they have different names.
 
 What changes on each side:
@@ -483,7 +484,7 @@ What changes on each side:
   `0017` already settled, which is that **a set's element is its key**. The same
   reasoning that made `SortedSet.All` into `SortedSet.Keys` makes `Min` into
   `MinKey`.
-- **A sorted dict gains the `*Key` forms and keeps its pair-returning ones
+- **A `SortedMap` gains the `*Key` forms and keeps its pair-returning ones
   unchanged.** `Min` still answers "the smallest entry"; `MinKey` answers "the
   smallest key".
 
@@ -492,7 +493,7 @@ What changes on each side:
 costs the discarded half — 14.9x at 1 KiB values — which is why `HoldsKeys`
 required a *native* `Keys()` rather than one derived from `All()`. `RangeKeys`
 is the same argument applied to a sub-range: today a caller wanting the keys in
-`[lo, hi)` from a sorted dict has to walk `Range` and drop every value. A native
+`[lo, hi)` from a `SortedMap` has to walk `Range` and drop every value. A native
 key-only walk avoids that, and would be worth having even if no interface needed
 it.
 
@@ -505,7 +506,7 @@ set for implementation names:
 |---|---|---|
 | `KeyValue[K, V]` | **`Entry[S, V]`** | one pair type for keys and positions, with `Slot` as the generic first field |
 | `HashSet[T]` | **`MapSet[T]`** | named for its backing, like its sibling |
-| `HashDict[K, V]` | **deleted** | `Map` is the hash dict once ADR `0007`'s asymmetry is gone |
+| `HashDict[K, V]` | **deleted** | `Map` is the map-backed key/value container once ADR `0007`'s asymmetry is gone |
 | `SortedDict[K, V]` | **`SortedMap[K, V]`** | the key/value concept is spelled `Map` throughout |
 | *(new)* | `SortedKeys`, `SortedKeyValues` | the ordered read contracts, matching the container adjective |
 
@@ -542,13 +543,17 @@ their tests; it should land in its own commit, separately from anything else.**
 Measured behaviour, not speculation (`TestCapabilityInterfaceIsAssertable`):
 
 ```go
-var s Keys[string] = myMapSet          // a CONTAINER
-back, _ := s.(*MapSet[string])        // succeeds
-back.Add("smuggled")                   // write access recovered
+var s Keys[string] = myMapSet       // a CONTAINER (a value struct, under (b))
+back, _ := s.(MapSet[string])       // succeeds
+back.Add("smuggled")                // the copy shares state: the write lands
 
-var v Keys[string] = myMapSetView      // a VIEW
-_, ok := v.(*MapSet[string])          // fails -- nothing writable to recover
+var v Keys[string] = myMapSetView   // a VIEW
+_, ok := v.(MapSet[string])         // fails -- nothing writable to recover
 ```
+
+The asserted container is a *copy* of a one-word struct, which changes nothing:
+it shares the state pointer, so the write reaches the original
+(`TestValueContainerAssertsBackAndWrites`).
 
 **So the capability interfaces are a convenience, not a guarantee**, and the guarantee lives in
 tier 1. This is a direct answer to why ADR `0013` deleted `Set` and `Dict`: they
@@ -564,7 +569,7 @@ This is the hard constraint, and it is measured. Passing a concrete view into a
 capability-interface parameter — the boundary the whole design exists to make
 cheap:
 
-| | | allocs |
+| passing into a capability interface | | allocs |
 |---|---|---|
 | container | 0.7549 ns | 0 |
 | identity view, one word | 0.8772 ns | **0** |
@@ -591,7 +596,7 @@ interface tier puts one back, because a *nil interface* has no dynamic type:
 
 | | `k == nil` | `k.Len()` |
 |---|---|---|
-| `var k Set[int]` | true | **panics** |
+| `var k Keys[int]` | true | **panics** |
 | `k = MapSetView[int]{}` (zero view) | false | 0 |
 | `k = populated view` | false | n |
 
@@ -627,8 +632,8 @@ Three ways out, in increasing order of surface:
   becomes unnecessary — but that seals *tier 1*, not tier 2, and does not help.
 
 The middle option is the complete one and is what a full design would likely
-take; the cost is that the vocabulary grows to `MapSetView` / `SetView` / `Set`
-for a single idea.
+take; the cost is that the vocabulary grows to `MapSetView` / `SetView` /
+`Keys` for a single idea.
 
 ##### Wart 5: naming, and what collides
 

@@ -61,3 +61,27 @@ func TestCapabilityInterfaceIsAssertable(t *testing.T) {
 	}
 	t.Log("a VIEW in Set[T] cannot be asserted back to anything writable")
 }
+
+// Option (b)'s containers are VALUE structs, not pointers, so the assertion
+// wart has to be restated for a value: does asserting a value container out of
+// a read interface still recover write access? A copy of the struct shares the
+// state pointer, so it should.
+func TestValueContainerAssertsBackAndWrites(t *testing.T) {
+	c := newOBSet("a")
+
+	var k Set[string] = obSetAdapter{c}
+	back, ok := k.(obSetAdapter)
+	if !ok {
+		t.Fatal("a value container should assert back out of a read interface")
+	}
+	back.obSet.Add("smuggled") // a COPY of the struct -- but it shares the state
+	if !c.Has("smuggled") {
+		t.Error("the write through the asserted copy did not reach the original")
+	}
+	t.Log("a value container asserts back and the copy still shares state: the wart holds")
+}
+
+// obSetAdapter gives obSet the Set[T] method set without changing obSet itself.
+type obSetAdapter struct{ obSet[string] }
+
+func (a obSetAdapter) Has(s string) bool { return a.obSet.Has(s) }
