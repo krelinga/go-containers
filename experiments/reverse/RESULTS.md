@@ -82,6 +82,25 @@ That also removes a cost this ADR charged the span shape: it need **not** be one
 type per container. A span holding an interface can window a set, a map's keys
 or a view alike, so the three-types-per-shape estimate was too pessimistic.
 
+## 5. `Len` on a span is O(log n), and the cost is inherent
+
+A span must hold KEY bounds, not indices (ADR `0017`: index bounds are 14x
+dearer to construct and silently wrong after a mutation). So its window is
+re-resolved per operation:
+
+| | | |
+|---|---|---|
+| container `Len` | 0.2322 ns | O(1) |
+| key-bounded span `Len` | 9.982 ns | **43x** |
+| index-bounded span `Len` | 0.1935 ns | O(1), stale-prone |
+| construct, key-bounded | 0.4546 ns | |
+| construct, index-bounded | 10.17 ns | |
+
+The cost moves rather than vanishing: key bounds are ~22x cheaper to build and
+pay per operation. And `Len` is not what introduces it — `Keys()` pays the same
+two searches — so the choice is about whether a shape interface should hide the
+difference, not about whether to compute it.
+
 ## Durable / perishable
 
 **Durable.** Materialising to reverse costs ~1.9x and memory linear in the
@@ -91,6 +110,9 @@ type is pointer-shaped (or already boxed) and direction is a field rather than a
 wrapper. Expressing reversal by wrapping always costs an allocation. Bare-iterator methods
 avoid allocation only while the closure inlines, which a computed window
 defeats.
+
+A key-bounded window is cheap to construct and O(log n) to measure; an
+index-bounded one inverts both and is incorrect after a mutation.
 
 **Perishable.** Every absolute number, and the exact allocation counts, which
 track the compiler's inlining decisions.

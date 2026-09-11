@@ -295,3 +295,43 @@ func BenchmarkSpanBoxing(b *testing.B) {
 	})
 	_ = sink
 }
+
+// 7. What Len costs on a key-bounded span, which is the only correct kind.
+func BenchmarkSpanLen(b *testing.B) {
+	s := fixture()
+	const lo, hi = 500, 564
+	kb := s.F_KeyBounded(lo, hi)
+	ib := s.F_IndexBounded(lo, hi)
+
+	b.Run("container/Len", func(b *testing.B) {
+		for b.Loop() {
+			sinkInt = len(s.st.es)
+		}
+	})
+	b.Run("span/Len(key-bounded)", func(b *testing.B) {
+		for b.Loop() {
+			sinkInt = kb.Len()
+		}
+	})
+	b.Run("span/Len(index-bounded, stale-prone)", func(b *testing.B) {
+		for b.Loop() {
+			sinkInt = ib.Len()
+		}
+	})
+	b.Run("construct/key-bounded", func(b *testing.B) {
+		b.ReportAllocs()
+		var sink keyBoundedSpan[int]
+		for b.Loop() {
+			sink = s.F_KeyBounded(lo, hi)
+		}
+		_ = sink
+	})
+	b.Run("construct/index-bounded", func(b *testing.B) {
+		b.ReportAllocs()
+		var sink indexBoundedSpan[int]
+		for b.Loop() {
+			sink = s.F_IndexBounded(lo, hi)
+		}
+		_ = sink
+	})
+}

@@ -231,7 +231,7 @@ would have read as the natural one for *that* type too, and taken the slot.
 
 | method | `KeySpan[K]` | `KeyValueSpan[K, V]` | direction-dependent? |
 |---|---|---|---|
-| `Len() int` | ✓ | ✓ | no |
+| `Len() int` | ✓ | ✓ | no — but O(log n), not O(1); see below |
 | `Has(K) bool` | ✓ | ✓ | no |
 | `Get(K) (V, bool)` | — | ✓ | no |
 | `Keys() iter.Seq[K]` | ✓ | ✓ | **yes** |
@@ -247,6 +247,53 @@ Verified: `KeySpan[K]` satisfies `Keys[K]`, and `KeyValueSpan[K, V]` satisfies
 `Keys[K]`, `Values[V]` **and** `KeyValues[K, V]`. So generic read code takes a
 span, a container or a view indifferently — which is the payoff of ADR `0018`'s
 shape interfaces, applied here for free.
+
+#### `Len` is not free on a span, and that is inherent
+
+A span holds **key** bounds, not resolved indices. ADR `0017` settled that and
+the reasoning is unchanged: index bounds go *silently wrong* the moment the
+container changes — inserting a key inside the window makes it miss an element,
+inserting one before it slides the whole window — and they cost 14x more to
+construct.
+
+The consequence lands on `Len`. Measured over 1024 elements:
+
+| | | |
+|---|---|---|
+| a container's `Len` | 0.2322 ns | O(1) |
+| a **key-bounded** span's `Len` | 9.982 ns | **43x** — two binary searches |
+| an index-bounded span's `Len` | 0.1935 ns | O(1), and stale-prone |
+| constructing a key-bounded span | 0.4546 ns | |
+| constructing an index-bounded span | 10.17 ns | |
+
+**The cost does not disappear, it moves.** Key bounds are ~22x cheaper to
+construct and pay at every operation; index bounds pay once and are wrong
+afterwards. Correctness picks key bounds, so `Len` on a span is O(log n).
+
+**But it is not a cost `Len` introduces.** A key-bounded span re-resolves its
+window on *every* operation, so `Keys()` pays the same two searches that `Len()`
+does. `Len` is no more expensive than iterating; it simply is not the O(1)
+subtraction every container's `Len` is.
+
+**So should spans have `Len` at all?** ADR `0017` said no — "a sub-range holds
+its bounds as keys, not indices, and simply has no `Len`". **That conclusion is
+orphaned.** It was in service of `CanLen`, the optional size-hint interface that
+`0017`'s *proposal A* used to presize a destination; the accepted proposal D
+deleted `CanLen` and the whole collector machinery with it. The reason for
+omitting `Len` went with it, exactly as ADR `0014`'s decisive argument went with
+`Elems2`.
+
+Weighed afresh, `Len` stays, for two reasons and against one:
+
+- **Without it a span satisfies nothing.** `Keys[K]` requires `Len`, so a span
+  with no `Len` cannot be handed to generic read code — which was one of the
+  main payoffs of this shape.
+- **10 ns is small where `Len` is actually used.** Its usual job is presizing a
+  destination before an O(n) walk, and the walk dwarfs it.
+- **Against:** it is the one place in the library where a shape interface hides a
+  complexity difference. Every container's `Len` is O(1) and a span's is not, and
+  a caller holding a `Keys[K]` cannot tell which they have. That wants a doc line
+  on the interface, not a guard.
 
 #### What is deliberately absent, and why
 
@@ -349,7 +396,10 @@ Two sub-questions, neither answered here:
 2. **`Vector`**, in two parts: whether it gets `Backward()` (affordable today,
    no stability assumption) and whether it gets a position-bounded span (which
    inherits ADR `0017`'s objection intact). Spelled out in the section above.
-3. **Whether dropping the ordered lookups from spans is the right trade.** The
+3. **Whether `Len` belongs on a span**, given it is O(log n) where every
+   container's is O(1), and that ADR `0017` said no for a reason that no longer
+   applies. Keeping it is what lets a span satisfy the shape interfaces.
+4. **Whether dropping the ordered lookups from spans is the right trade.** The
    alternative is two span types per shape — a forward one carrying `MinKey` and
    friends, and a read-only backward one — which the type system would enforce
    but which doubles the vocabulary.

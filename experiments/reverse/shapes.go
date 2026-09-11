@@ -270,3 +270,55 @@ func (s sortedSet[T]) E_RangePtr(lo, hi T) ifaceSpan[T] {
 	}
 	return ifaceSpan[T]{impl: ptrWindowed[T]{s.st}, i: i, j: j}
 }
+
+// Len on a key-bounded span. ADR 0017 established that a sub-range must hold
+// KEY bounds, not indices: index bounds are 14x dearer to construct and go
+// silently wrong when the container changes. The consequence is that Len is not
+// a subtraction -- it is two binary searches.
+
+type keyBoundedSpan[T ~int] struct {
+	st     *state[T]
+	lo, hi T
+	rev    bool
+}
+
+func (sp keyBoundedSpan[T]) bounds() (int, int) {
+	i, _ := slices.BinarySearch(sp.st.es, sp.lo)
+	j, _ := slices.BinarySearch(sp.st.es, sp.hi)
+	if j < i {
+		j = i
+	}
+	return i, j
+}
+
+func (sp keyBoundedSpan[T]) Len() int { i, j := sp.bounds(); return j - i }
+
+func (sp keyBoundedSpan[T]) Keys() iter.Seq[T] {
+	i, j := sp.bounds()
+	if sp.rev {
+		return backward(sp.st.es[i:j])
+	}
+	return forward(sp.st.es[i:j])
+}
+
+func (s sortedSet[T]) F_KeyBounded(lo, hi T) keyBoundedSpan[T] {
+	return keyBoundedSpan[T]{st: s.st, lo: lo, hi: hi}
+}
+
+// indexBoundedSpan resolves once, so Len is a subtraction -- and the window
+// goes stale the moment the container changes.
+type indexBoundedSpan[T ~int] struct {
+	st   *state[T]
+	i, j int
+}
+
+func (sp indexBoundedSpan[T]) Len() int { return sp.j - sp.i }
+
+func (s sortedSet[T]) F_IndexBounded(lo, hi T) indexBoundedSpan[T] {
+	i, _ := slices.BinarySearch(s.st.es, lo)
+	j, _ := slices.BinarySearch(s.st.es, hi)
+	if j < i {
+		j = i
+	}
+	return indexBoundedSpan[T]{st: s.st, i: i, j: j}
+}
