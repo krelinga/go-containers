@@ -46,12 +46,49 @@ need to be: it is always a window over a slice, whoever owns the slice.
 A needs no new type, and costs a `Backward` twin on every read method: ten
 methods on a sorted map, six on a vector.
 
+## 4. Where a span's allocation actually comes from
+
+The first cut of this harness concluded that a span is free *because it holds a
+concrete slice rather than an interface*. That is wrong, and the correction
+matters because a **view** cannot hand out a concrete slice: it holds an
+interface, and a converting view's underlying elements are not even the type it
+presents.
+
+| constructing a span | | allocs |
+|---|---|---|
+| boxing a **3-word** impl (a slice header) into the interface | 22.27 ns | **1** |
+| boxing a **pointer-shaped** impl (one word) | 10.42 ns | **0** |
+| **copying an interface a view already holds** | **0.8407 ns** | **0** |
+| copying it, then reversing | 6.601 ns | **0** |
+
+**A span may hold an interface and still be free to construct.** Two conditions,
+and ADR `0018`'s library satisfies both:
+
+- **The boxed dynamic type must be pointer-shaped.** Every container under ADR
+  `0018` is exactly one word, so boxing one costs nothing. The 1-allocation row
+  above came from boxing a bare slice header, which is an artifact of how that
+  constructor was written, not of the design.
+- **Direction must be a FIELD, not a wrapper.** Reversing by setting a flag on a
+  copied struct is free; reversing by wrapping the implementation in a
+  `reverseWrapper` re-boxes and costs an allocation — 2 against 1 in the earlier
+  table.
+
+So the real distinction between the view-returning shape and the span shape is
+**not** "interface versus concrete". It is **wrapper versus field**. A view
+expresses reversal by wrapping, because a view is only an interface and has
+nowhere to put a flag; a span has a struct to put it in.
+
+That also removes a cost this ADR charged the span shape: it need **not** be one
+type per container. A span holding an interface can window a set, a map's keys
+or a view alike, so the three-types-per-shape estimate was too pessimistic.
+
 ## Durable / perishable
 
 **Durable.** Materialising to reverse costs ~1.9x and memory linear in the
-range; every in-place shape beats it. A concrete window value is free to
-construct and free to reverse. An interface-wrapped one is not, and the wrapper
-needed to express reversal costs a second allocation. Bare-iterator methods
+range; every in-place shape beats it. A window value is free to construct and
+free to reverse **whether or not it holds an interface**, provided the boxed
+type is pointer-shaped (or already boxed) and direction is a field rather than a
+wrapper. Expressing reversal by wrapping always costs an allocation. Bare-iterator methods
 avoid allocation only while the closure inlines, which a computed window
 defeats.
 

@@ -200,3 +200,98 @@ func BenchmarkConstructOnly(b *testing.B) {
 		}
 	})
 }
+
+// 5. The case the first cut missed: a span that must hold an interface, because
+// a VIEW produced it. Does it still construct for free?
+func BenchmarkIfaceSpan(b *testing.B) {
+	s := fixture()
+	const lo, hi = 500, 564
+	var sinkIS ifaceSpan[int]
+	var sinkWS wrapSpan[int]
+
+	b.Run("construct/concrete-span", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkSpn = s.C_Range(lo, hi)
+		}
+	})
+	b.Run("construct/iface-span", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkIS = s.D_IfaceSpan(lo, hi)
+		}
+	})
+	b.Run("reverse/concrete-span", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkSpn = s.C_Range(lo, hi).Backward()
+		}
+	})
+	b.Run("reverse/iface-span(flag)", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkIS = s.D_IfaceSpan(lo, hi).Backward()
+		}
+	})
+	b.Run("reverse/iface-span(wrapper)", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkWS = s.D_WrapSpan(lo, hi).Backward()
+		}
+	})
+	b.Run("walk/concrete-span", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			c := 0
+			for range s.C_Range(lo, hi).Backward().Keys() {
+				c++
+			}
+			sinkInt = c
+		}
+	})
+	b.Run("walk/iface-span", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			c := 0
+			for range s.D_IfaceSpan(lo, hi).Backward().Keys() {
+				c++
+			}
+			sinkInt = c
+		}
+	})
+	_, _ = sinkIS, sinkWS
+}
+
+// 6. Where the interface-span allocation actually comes from.
+func BenchmarkSpanBoxing(b *testing.B) {
+	s := fixture()
+	v := s.E_View()
+	const lo, hi = 500, 564
+	var sink ifaceSpan[int]
+
+	b.Run("box-a-wide-impl(3 words)", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sink = s.D_IfaceSpan(lo, hi)
+		}
+	})
+	b.Run("box-a-pointer-impl(1 word)", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sink = s.E_RangePtr(lo, hi)
+		}
+	})
+	b.Run("copy-an-existing-iface(from a view)", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sink = v.E_Range(500, 564)
+		}
+	})
+	b.Run("copy-then-reverse", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sink = v.E_Range(500, 564).Backward()
+		}
+	})
+	_ = sink
+}

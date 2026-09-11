@@ -145,20 +145,42 @@ and iterating one costs **5 allocations** against solution C's 2. Reversal has
 to be expressed by wrapping the inner implementation, and the wrapper is the
 second allocation.
 
-## Solution C: `Range` returns a concrete span
+## Solution C: `Range` returns a span
 
-Solution B's ergonomics without its dispatch. A span is a concrete value holding
-its window directly — a slice and a direction — rather than an interface.
+Solution B's ergonomics without its allocations. A span is a **struct** holding
+a window and a direction — where B is only an interface, and so has nowhere to
+put a direction except in a wrapper.
 
 ```go
-type KeySpan[K any]        struct{ … }  // over a set, or a map's keys
-type EntrySpan[K, V any]   struct{ … }  // over a map's entries
-type ValueSpan[V any]      struct{ … }  // over a vector
+type KeySpan[K any]      struct{ … }  // over a set, or a map's keys
+type EntrySpan[K, V any] struct{ … }  // over a map's entries
 
 func (m SortedMap[K, V]) Range(lo, hi K) EntrySpan[K, V]
 func (sp EntrySpan[K, V]) Backward() EntrySpan[K, V]
 func (sp EntrySpan[K, V]) All() iter.Seq2[K, V]
 ```
+
+**A span may hold an interface internally, and still be free.** This ADR first
+claimed the opposite — that a span is cheap *because* it holds a concrete slice
+— and that was wrong in a way that mattered, because a **view** cannot hand out
+a concrete slice: it holds an interface, and a converting view's underlying
+elements are not even the type it presents. If spans required concreteness, a
+view could not produce one without materialising, which the constraint forbids.
+
+Measured, the freedom has two conditions and ADR `0018` satisfies both:
+
+| | | allocs |
+|---|---|---|
+| boxing a 3-word impl into the span's interface | 22.27 ns | 1 |
+| boxing a **pointer-shaped** impl — every container is one word | 10.42 ns | **0** |
+| **copying the interface a view already holds** | **0.8407 ns** | **0** |
+| copying it, then reversing | 6.601 ns | **0** |
+
+So the real difference between B and C is **not interface versus concrete**. It
+is **wrapper versus field**: a view has nowhere to record a direction, so it must
+wrap its implementation and re-box; a span has a struct field. That is the whole
+of B's extra cost, and it is why C works uniformly for spans produced by
+containers and by views.
 
 **Caller code — identical to B:**
 
@@ -181,15 +203,18 @@ inlined full walk.
 because there is no interface to wrap. That is the whole difference between B
 and C, and it is worth 2-3 allocations on every windowed walk.
 
-**What it costs in surface:** three new exported types, and they do not
-substitute for views — `EntrySpan` and `SortedMapView` are unrelated. They would
-both satisfy the ADR `0018` shape interfaces, so generic read code still takes
-either.
+**What it costs in surface:** new exported types — but fewer than first
+estimated. Because a span may hold an interface, one `KeySpan[K]` can window a
+set, a map's keys, or a view over either; it need not be one type per container.
+Spans still do not substitute for views (`EntrySpan` and `SortedMapView` are
+unrelated types), but both satisfy the ADR `0018` shape interfaces, so generic
+read code takes either.
 
 ## What to decide
 
 1. **Which shape.** C is fastest and composes; A is smallest and is fastest only
-   on the un-windowed walk; B is C's ergonomics at a worse price.
+   on the un-windowed walk; B is C's ergonomics at a worse price, and the price
+   is specifically that an interface has nowhere to record a direction.
 2. **Whether `Vector` gets a sub-range at all.** ADR `0017` left it out because
    index stability is "an artifact of an incomplete surface" — nothing in
    `Vector` shifts an index today, but a `Remove` would, silently. That argument

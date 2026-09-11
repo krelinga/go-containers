@@ -147,3 +147,126 @@ func (s sortedSet[T]) Naive_RangeBackward(lo, hi T) iter.Seq[T] {
 	slices.Reverse(c)
 	return forward(c)
 }
+
+// ---------------------------------------------------------------------------
+// The case the first cut did not model: a span produced by a VIEW.
+//
+// A container can hand out a concrete span, because it owns the slice. A view
+// holds an interface -- and a CONVERTING view's underlying elements have a
+// different type from the ones it presents -- so it cannot reach a concrete
+// slice without materialising, which the constraint forbids.
+//
+// So a view-produced span must hold the interface. The question is whether that
+// costs an allocation to construct, and the answer turns on HOW direction is
+// expressed: as a wrapper type (which re-boxes) or as a field (which does not).
+// ---------------------------------------------------------------------------
+
+type windowed[T any] interface {
+	Len() int
+	// walk yields the half-open window [i, j), in the given direction.
+	walk(i, j int, rev bool) iter.Seq[T]
+}
+
+// ifaceSpan holds an interface plus bounds plus a direction FIELD. Reversal
+// flips the flag; nothing is wrapped, so nothing is re-boxed.
+type ifaceSpan[T any] struct {
+	impl windowed[T]
+	i, j int
+	rev  bool
+}
+
+func (sp ifaceSpan[T]) Len() int { return sp.j - sp.i }
+
+func (sp ifaceSpan[T]) Backward() ifaceSpan[T] {
+	sp.rev = !sp.rev // a copy, with a flag flipped -- no allocation
+	return sp
+}
+
+func (sp ifaceSpan[T]) Keys() iter.Seq[T] { return sp.impl.walk(sp.i, sp.j, sp.rev) }
+
+// wrapSpan is the same thing expressing direction as a WRAPPER, which is what
+// solution B does, to isolate where B's allocations actually come from.
+type wrapSpan[T any] struct {
+	impl windowed[T]
+	i, j int
+}
+
+func (sp wrapSpan[T]) Backward() wrapSpan[T] {
+	return wrapSpan[T]{impl: reverseWrapper[T]{sp.impl}, i: sp.i, j: sp.j}
+}
+
+func (sp wrapSpan[T]) Keys() iter.Seq[T] { return sp.impl.walk(sp.i, sp.j, false) }
+
+type reverseWrapper[T any] struct{ inner windowed[T] }
+
+func (r reverseWrapper[T]) Len() int { return r.inner.Len() }
+func (r reverseWrapper[T]) walk(i, j int, rev bool) iter.Seq[T] {
+	return r.inner.walk(i, j, !rev)
+}
+
+// sliceWindowed is what a container's own state looks like behind that
+// interface.
+type sliceWindowed[T any] struct{ es []T }
+
+func (s sliceWindowed[T]) Len() int { return len(s.es) }
+func (s sliceWindowed[T]) walk(i, j int, rev bool) iter.Seq[T] {
+	if rev {
+		return backward(s.es[i:j])
+	}
+	return forward(s.es[i:j])
+}
+
+func (s sortedSet[T]) D_IfaceSpan(lo, hi T) ifaceSpan[T] {
+	i, _ := slices.BinarySearch(s.st.es, lo)
+	j, _ := slices.BinarySearch(s.st.es, hi)
+	if j < i {
+		j = i
+	}
+	return ifaceSpan[T]{impl: sliceWindowed[T]{s.st.es}, i: i, j: j}
+}
+
+func (s sortedSet[T]) D_WrapSpan(lo, hi T) wrapSpan[T] {
+	i, _ := slices.BinarySearch(s.st.es, lo)
+	j, _ := slices.BinarySearch(s.st.es, hi)
+	if j < i {
+		j = i
+	}
+	return wrapSpan[T]{impl: sliceWindowed[T]{s.st.es}, i: i, j: j}
+}
+
+// Is the allocation inherent to holding an interface, or is it the BOXING of a
+// wide value into one? sliceWindowed is 3 words (a slice header), so boxing it
+// allocates. A view has already paid that once, at view construction -- so a
+// span produced by a VIEW copies an existing interface value rather than
+// boxing a new one.
+
+type ptrWindowed[T ~int] struct{ st *state[T] } // one word: pointer-shaped
+
+func (p ptrWindowed[T]) Len() int { return len(p.st.es) }
+func (p ptrWindowed[T]) walk(i, j int, rev bool) iter.Seq[T] {
+	if rev {
+		return backward(p.st.es[i:j])
+	}
+	return forward(p.st.es[i:j])
+}
+
+// view models what ADR 0018 ships: a struct holding an already-boxed interface.
+type view[T ~int] struct{ impl windowed[T] }
+
+func (s sortedSet[T]) E_View() view[T] { return view[T]{impl: ptrWindowed[T]{s.st}} }
+
+// Range on a VIEW: copies the interface it already holds. No boxing.
+func (v view[T]) E_Range(i, j int) ifaceSpan[T] {
+	return ifaceSpan[T]{impl: v.impl, i: i, j: j}
+}
+
+// And the same on a container, boxing a POINTER-shaped impl rather than a wide
+// one.
+func (s sortedSet[T]) E_RangePtr(lo, hi T) ifaceSpan[T] {
+	i, _ := slices.BinarySearch(s.st.es, lo)
+	j, _ := slices.BinarySearch(s.st.es, hi)
+	if j < i {
+		j = i
+	}
+	return ifaceSpan[T]{impl: ptrWindowed[T]{s.st}, i: i, j: j}
+}
