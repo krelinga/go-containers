@@ -1,9 +1,10 @@
 # 19. Reverse iteration and sub-ranges
 
 - **Status:** **Proposed.** Three solutions are specified and measured; none is
-  chosen yet. One sub-question is settled within solution C: **spans carry
-  `Len`, at O(log n), with the complexity difference documented on the shape
-  interfaces.**
+  chosen yet. Two sub-questions are settled within solution C: **spans carry
+  `Len`**, at O(log n), with the complexity difference documented on the shape
+  interfaces; and **spans carry the ordered lookups**, under the rule that
+  anything outside the window is absent.
 - **Date:** 2026-09-11
 - **Evidence:** `experiments/reverse/` (`RESULTS.md`).
 - **Relates to:** ADR `0013` (which deferred "should `Range` return a view?"),
@@ -242,8 +243,14 @@ would have read as the natural one for *that* type too, and taken the slot.
 | `KeySlice() []K` | ✓ | ✓ | **yes** |
 | `ValueSlice() []V` | — | ✓ | **yes** |
 | `AllSlice() []Entry[K, V]` | — | ✓ | **yes** |
-| `Backward() Self` | ✓ | ✓ | — |
+| `MinKey() (K, bool)` | ✓ | ✓ | no |
+| `MaxKey() (K, bool)` | ✓ | ✓ | no |
+| `FloorKey(K) (K, bool)` | ✓ | ✓ | no |
+| `CeilKey(K) (K, bool)` | ✓ | ✓ | no |
+| `Min`/`Max`/`Floor`/`Ceil` → `(K, V, bool)` | — | ✓ | no |
+| `RangeKeys(lo, hi K) iter.Seq[K]` | ✓ | ✓ | **yes** |
 | `Range(lo, hi K) Self` | ✓ | ✓ | no |
+| `Backward() Self` | ✓ | ✓ | — |
 | `IsZero() bool` | ✓ | ✓ | no |
 
 **`IsZero` is there for the same reason every container and view has one**
@@ -252,6 +259,18 @@ must be total rather than panicking. `var sp KeySpan[int]` has `Len() == 0`,
 iterates zero times, and materialises as nil — and `IsZero` is what distinguishes
 that from a window that is merely empty. It is free: a nil check on the
 implementation field, with none of `Len`'s bound-resolution.
+
+**With the ordered lookups, a span satisfies the *sorted* tiers too** — verified:
+`KeySpan[K]` satisfies `Keys[K]` **and `SortedKeys[K]`**, and
+`KeyValueSpan[K, V]` satisfies `Keys[K]`, `Values[V]`, `KeyValues[K, V]` **and
+`SortedKeyValues[K, V]`**. That is a strictly better outcome than the draft that
+omitted them, where a span satisfied only the unordered tiers.
+
+It does cost one method the draft did not have. `SortedKeys[K]` declares
+`RangeKeys(lo, hi) iter.Seq[K]`, and a span's `Range` returns a *span*, so a span
+needs **both**: `Range` for narrowing and `RangeKeys` as the iterator shorthand
+(`sp.Range(lo, hi).Keys()`). Same for `Range`/`All` on the pair side. That is the
+price of the interfaces keeping their current signatures.
 
 Verified: `KeySpan[K]` satisfies `Keys[K]`, and `KeyValueSpan[K, V]` satisfies
 `Keys[K]`, `Values[V]` **and** `KeyValues[K, V]`. So generic read code takes a
@@ -326,22 +345,40 @@ The rule for a reader: **`Len` is O(1) unless you are holding a span.** That is
 the whole of the exception, and it is worth saying at the interface because the
 interface is where it becomes invisible.
 
-#### What is deliberately absent, and why
+#### The ordered lookups ARE on spans, under one rule
 
-**`MinKey`, `MaxKey`, `FloorKey`, `CeilKey` are not on spans.** These are the
-methods whose meaning goes soft once a window can be reversed: on a backward
-span, "the minimum" and "the first thing yielded" stop coinciding, and a reader
-has no way to tell which one a method named `MinKey` means. Rather than split
-the type in two — a forward span with lookups and a read-only backward one —
-the ordered lookups simply stay on the **container**, which owns the whole
-ordered structure and has no direction to confuse them with.
+An earlier draft of this ADR dropped `MinKey`, `MaxKey`, `FloorKey` and `CeilKey`
+from spans, on the grounds that "the minimum" and "the first thing yielded" stop
+coinciding once a window can be reversed. **That reasoning was inconsistent and
+is withdrawn**: it kept `Range` because key bounds are direction-independent,
+and dropped `MinKey` for being direction-dependent — when `MinKey` is
+direction-independent for exactly the same reason. The smallest key in a window
+is the smallest key in that window whichever way you walk it.
 
-The loss is real and small: a caller wanting the floor within a window calls
-`m.FloorKey(x)` and checks the result is in range. A span's own minimum and
-maximum are its first and last elements, which iteration already gives.
+**The rule is one sentence: anything in the owning container but outside the
+span is absent.** A span behaves as the container it would be if it held only
+its window:
 
-**`Backward` is therefore the only direction-bearing operation**, and every
-method above is either direction-free or an ordered read that honours it.
+```go
+m := NewSortedMap(…)              // keys 10, 20, 30, 40
+sp := m.Range(20, 40)             // window: 20, 30
+
+sp.MinKey()      // 20, true
+sp.MaxKey()      // 30, true
+sp.FloorKey(25)  // 20, true
+sp.FloorKey(15)  // zero, FALSE  -- 10 is in the container, not in the span
+sp.CeilKey(35)   // zero, FALSE  -- 40 is in the container, not in the span
+sp.Has(10)       // false
+```
+
+**This is not a new rule — it is the one `Has`, `Get` and `Len` already follow.**
+A span whose `Has(10)` returned true would not be a window at all. Extending the
+same treatment to the ordered lookups is consistency, not an addition, and the
+draft that omitted them was the inconsistent version.
+
+Direction remains irrelevant to every one of them, as it is to `Has`, `Get`,
+`Len` and `Range`. **`Backward` is still the only direction-bearing operation**;
+what changed is that fewer methods were wrongly suspected of being another one.
 
 #### Sub-spans: yes
 
@@ -427,7 +464,12 @@ Two sub-questions, neither answered here:
 2. **`Vector`**, in two parts: whether it gets `Backward()` (affordable today,
    no stability assumption) and whether it gets a position-bounded span (which
    inherits ADR `0017`'s objection intact). Spelled out in the section above.
-3. **Whether dropping the ordered lookups from spans is the right trade.** The
+3. **Whether the shape interfaces should change their `Range` signatures.**
+   A span carries both `Range` (narrowing, returns a span) and `RangeKeys`
+   (iterating, returns an `iter.Seq`) only because `SortedKeys[K]` declares the
+   latter. Redeclaring the interfaces in terms of spans would remove the
+   duplication and make `Range` mean one thing everywhere — at the cost of
+   changing an accepted ADR `0018` interface. The
    alternative is two span types per shape — a forward one carrying `MinKey` and
    friends, and a read-only backward one — which the type system would enforce
    but which doubles the vocabulary.
