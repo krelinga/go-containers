@@ -445,25 +445,56 @@ nothing until a position is something more interesting than an `int` — a
 `LinkedList` cursor, where validity is a real question. Left out until ADR
 `0010` lands.
 
-**The ordered reads do not factor, and this is the one wart the naming does not
-fix.** A sorted set's `Min` returns `(K, bool)`; a sorted dict's returns
-`(K, V, bool)`. So one `OrderedKeys[K]` cannot cover both:
+**The ordered reads factor once the key-only forms are spelled differently.**
+The obstacle was a signature clash: a sorted set's `Min` returns `(K, bool)` and
+a sorted dict's returns `(K, V, bool)`, so one interface could not name `Min`
+and be satisfied by both. **Naming the key-only reads `*Key` removes the clash
+rather than choosing between them:**
 
+```go
+type OrderedKeys[K any] interface {
+	Keys[K]
+	MinKey() (K, bool)
+	MaxKey() (K, bool)
+	FloorKey(K) (K, bool)
+	CeilKey(K) (K, bool)
+	RangeKeys(lo, hi K) iter.Seq[K]
+}
+
+type OrderedKeyValues[K, V any] interface {
+	KeyValues[K, V]
+	OrderedKeys[K]                    // the *Key reads come along
+	Min() (K, V, bool)                // and the pair reads sit beside them
+	Max() (K, V, bool)
+	Floor(K) (K, V, bool)
+	Ceil(K) (K, V, bool)
+	Range(lo, hi K) iter.Seq2[K, V]
+}
 ```
-SortedDict does not implement OrderedKeys[string] (wrong type for method Ceil)
-        have Ceil(string) (string, int, bool)
-        want Ceil(string) (string, bool)
-```
 
-Two ways out, neither free:
+**One `OrderedKeys[K]` now covers `SortedSet`, `SortedSetView`, `SortedDict` and
+`SortedDictView`** — verified. A sorted dict carries both sets of reads, and
+nothing is ambiguous because they have different names.
 
-- **Two interfaces** — `OrderedKeys[K]` for sets, `OrderedKeyValues[K, V]` for
-  dicts. No change to shipped behaviour; one more name, and generic code over
-  "anything ordered" has to pick one.
-- **Make a sorted dict's ordered reads yield keys only**, recovering the value
-  with `Get`. Verified: a single `OrderedKeys[K]` then covers both. More
-  consistent with the scheme — `Keys` is about keys — but it changes shipped
-  behaviour and costs a lookup wherever the caller wanted the pair.
+What changes on each side:
+
+- **A sorted set renames `Min`/`Max`/`Floor`/`Ceil`/`Range` to the `*Key`
+  forms.** That is not a concession to the interface — it is the naming ADR
+  `0017` already settled, which is that **a set's element is its key**. The same
+  reasoning that made `SortedSet.All` into `SortedSet.Keys` makes `Min` into
+  `MinKey`.
+- **A sorted dict gains the `*Key` forms and keeps its pair-returning ones
+  unchanged.** `Min` still answers "the smallest entry"; `MinKey` answers "the
+  smallest key".
+
+**The `*Key` forms pay for themselves independently of the interface.** ADR
+`0017`'s problem 1 established that deriving one half of a pair from the other
+costs the discarded half — 14.9x at 1 KiB values — which is why `HoldsKeys`
+required a *native* `Keys()` rather than one derived from `All()`. `RangeKeys`
+is the same argument applied to a sub-range: today a caller wanting the keys in
+`[lo, hi)` from a sorted dict has to walk `Range` and drop every value. A native
+key-only walk avoids that, and would be worth having even if no interface needed
+it.
 
 **`KeyValue` becomes `SlotValue`, and that reaches shipped code.** ADR `0017`
 returns `[]KeyValue[int, T]` from `Vector.AllSlice` and takes `...KeyValue[K, V]`
@@ -623,12 +654,12 @@ MutableKeys[K]  MutableKeyValues[K,V]        (mutation tiers DEFERRED)
 | `HashSet[T]` | | ✓ | | | | | | ✓ |
 | `SortedSet[T]` | | ✓ | | ✓ | | | | ✓ |
 | `Map[K,V]` | ✓ | ✓ | ✓ | | | | | ✓ |
-| `SortedDict[K,V]` | ✓ | ✓ | ✓ | | ✓ | | | ✓ |
+| `SortedDict[K,V]` | ✓ | ✓ | ✓ | ✓ | ✓ | | | ✓ |
 | `Vector[T]` | ✓ | | | | | ✓ | ✓ | — |
 | `HashSetView[NT]` | | ✓ | | | | | | |
 | `SortedSetView[T]` | | ✓ | | ✓ | | | | |
 | `MapView[NK,NV]` | ✓ | ✓ | ✓ | | | | | |
-| `SortedDictView[K,NV]` | ✓ | ✓ | ✓ | | ✓ | | | |
+| `SortedDictView[K,NV]` | ✓ | ✓ | ✓ | ✓ | ✓ | | | |
 | `VectorView[NT]` | ✓ | | | | | ✓ | ✓ | |
 | `SliceView[NT]` | ✓ | | | | | ✓ | ✓ | |
 
@@ -643,6 +674,10 @@ decision:
 - **Sequences have no `Keys` column.** A position is not a key (ADR `0016`), so
   `Vector` fails `Keys[int]` — *missing method Has*. The two vocabularies do not
   overlap by accident.
+- **`OrderedKeys` spans sets and dicts**, because the key-only reads are spelled
+  `MinKey`/`MaxKey`/`FloorKey`/`CeilKey`/`RangeKeys` and so do not collide with
+  a dict's pair-returning `Min`/`Max`/`Floor`/`Ceil`/`Range`. A sorted dict
+  satisfies both ordered tiers.
 - **`Values[V]` is the only column shared between dicts and sequences**, and it
   is what lets one function read values out of a `Map`, a `SortedDict`, a
   `Vector`, a `VectorView` or a `SliceView`. The status quo cannot express that

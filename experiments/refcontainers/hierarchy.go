@@ -109,11 +109,11 @@ func (hPosBody[P, V]) AllSlice() []hSlotValue[P, V] { return nil }
 
 type hOrdKeys[K any] struct{}
 
-func (hOrdKeys[K]) Min() (K, bool)           { var z K; return z, false }
-func (hOrdKeys[K]) Max() (K, bool)           { var z K; return z, false }
-func (hOrdKeys[K]) Floor(K) (K, bool)        { var z K; return z, false }
-func (hOrdKeys[K]) Ceil(K) (K, bool)         { var z K; return z, false }
-func (hOrdKeys[K]) Range(a, b K) iter.Seq[K] { return nil }
+func (hOrdKeys[K]) MinKey() (K, bool)            { var z K; return z, false }
+func (hOrdKeys[K]) MaxKey() (K, bool)            { var z K; return z, false }
+func (hOrdKeys[K]) FloorKey(K) (K, bool)         { var z K; return z, false }
+func (hOrdKeys[K]) CeilKey(K) (K, bool)          { var z K; return z, false }
+func (hOrdKeys[K]) RangeKeys(a, b K) iter.Seq[K] { return emptySeq[K] }
 
 type hOrdPairs[K, V any] struct{}
 
@@ -159,7 +159,8 @@ type hMap[K comparable, V any] struct {
 
 type hSortedDict[K cmp.Ordered, V any] struct {
 	hKvBody[K, V]
-	hOrdPairs[K, V]
+	hOrdKeys[K]     // MinKey MaxKey FloorKey CeilKey RangeKeys
+	hOrdPairs[K, V] // Min Max Floor Ceil Range
 	hKvMut[K, V]
 }
 
@@ -178,6 +179,7 @@ type hMapView[NK, NV any] struct{ hKvBody[NK, NV] }
 
 type hSortedDictView[K cmp.Ordered, NV any] struct {
 	hKvBody[K, NV]
+	hOrdKeys[K]
 	hOrdPairs[K, NV]
 }
 
@@ -238,17 +240,23 @@ func emptySeq2[K, V any](yield func(K, V) bool) {}
 // Min returns (K, bool) and a sorted dict's returns (K, V, bool). Two
 // interfaces is the option that changes no shipped behaviour.
 
+// OrderedKeys is satisfied by sorted SETS and sorted DICTS alike, because the
+// key-only reads are spelled *Key and so do not collide with a dict's
+// pair-returning Min/Max/Floor/Ceil/Range.
 type hOrderedKeys[K any] interface {
 	hKeys[K]
-	Min() (K, bool)
-	Max() (K, bool)
-	Floor(K) (K, bool)
-	Ceil(K) (K, bool)
-	Range(lo, hi K) iter.Seq[K]
+	MinKey() (K, bool)
+	MaxKey() (K, bool)
+	FloorKey(K) (K, bool)
+	CeilKey(K) (K, bool)
+	RangeKeys(lo, hi K) iter.Seq[K]
 }
 
+// OrderedKeyValues adds the pair-returning reads on top, so a sorted dict
+// satisfies both tiers.
 type hOrderedKeyValues[K, V any] interface {
 	hKeyValues[K, V]
+	hOrderedKeys[K]
 	Min() (K, V, bool)
 	Max() (K, V, bool)
 	Floor(K) (K, V, bool)
