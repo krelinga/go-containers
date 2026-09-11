@@ -210,17 +210,140 @@ Spans still do not substitute for views (`EntrySpan` and `SortedMapView` are
 unrelated types), but both satisfy the ADR `0018` shape interfaces, so generic
 read code takes either.
 
+### Solution C, specified
+
+#### The span types
+
+Two, matching the shapes ADR `0018` already uses. Both hold an implementation
+interface plus bounds plus a direction **field** — that field is what makes
+reversal free, and it is the whole difference from solution B.
+
+```go
+type KeySpan[K cmp.Ordered]        struct{ … }  // a window of keys
+type EntrySpan[K cmp.Ordered, V any] struct{ … }  // a window of entries
+```
+
+| method | `KeySpan[K]` | `EntrySpan[K, V]` | direction-dependent? |
+|---|---|---|---|
+| `Len() int` | ✓ | ✓ | no |
+| `Has(K) bool` | ✓ | ✓ | no |
+| `Get(K) (V, bool)` | — | ✓ | no |
+| `Keys() iter.Seq[K]` | ✓ | ✓ | **yes** |
+| `Values() iter.Seq[V]` | — | ✓ | **yes** |
+| `All() iter.Seq2[K, V]` | — | ✓ | **yes** |
+| `KeySlice() []K` | ✓ | ✓ | **yes** |
+| `ValueSlice() []V` | — | ✓ | **yes** |
+| `AllSlice() []Entry[K, V]` | — | ✓ | **yes** |
+| `Backward() Self` | ✓ | ✓ | — |
+| `Range(lo, hi K) Self` | ✓ | ✓ | no |
+
+Verified: `KeySpan[K]` satisfies `Keys[K]`, and `EntrySpan[K, V]` satisfies
+`Keys[K]`, `Values[V]` **and** `KeyValues[K, V]`. So generic read code takes a
+span, a container or a view indifferently — which is the payoff of ADR `0018`'s
+shape interfaces, applied here for free.
+
+#### What is deliberately absent, and why
+
+**`MinKey`, `MaxKey`, `FloorKey`, `CeilKey` are not on spans.** These are the
+methods whose meaning goes soft once a window can be reversed: on a backward
+span, "the minimum" and "the first thing yielded" stop coinciding, and a reader
+has no way to tell which one a method named `MinKey` means. Rather than split
+the type in two — a forward span with lookups and a read-only backward one —
+the ordered lookups simply stay on the **container**, which owns the whole
+ordered structure and has no direction to confuse them with.
+
+The loss is real and small: a caller wanting the floor within a window calls
+`m.FloorKey(x)` and checks the result is in range. A span's own minimum and
+maximum are its first and last elements, which iteration already gives.
+
+**`Backward` is therefore the only direction-bearing operation**, and every
+method above is either direction-free or an ordered read that honours it.
+
+#### Sub-spans: yes
+
+`Range` narrows a window, and it composes:
+
+```go
+recent := m.Range(0, 100).Range(50, 60)     // a window of a window
+```
+
+**Bounds are on keys, not positions, so they are independent of direction** — a
+narrowing is well defined on a backward span and keeps the receiver's direction:
+
+```go
+m.Range(0, 100).Backward().Range(50, 60)    // 59, 58, … 50
+m.Range(0, 100).Range(50, 60).Backward()    // the same window, same order
+```
+
+That is the reason `Range` survives on spans where `MinKey` does not: a key
+bound means the same thing whichever way you walk.
+
+#### Double reversal: allowed
+
+`sp.Backward().Backward()` is forward again, costs nothing, and makes `Backward`
+an involution — the easiest rule to hold in your head. ADR `0017` deliberately
+made double reversal a **compile error**, but that was for a *source*, which had
+no state to flip; a span has a field, and a type to forbid it would buy nothing.
+A caller who writes it has a bug, and it is not worth a second type to catch.
+
+#### `Backward` on every container and view that can afford it
+
+The rule: **a container or view gets `Backward` exactly when it is slice-backed**,
+because that is when reversal is a decrementing loop rather than a
+materialisation. `Backward()` returns the whole contents as a reversed span, so
+it is `Range` over the full bounds with the flag set.
+
+| type | `Backward()` returns | why |
+|---|---|---|
+| `SortedSet[T]` | `KeySpan[T]` | sorted slice; walk it downwards |
+| `SortedSetView[T]` | `KeySpan[T]` | holds a `SortedSet`; same walk |
+| `SortedMap[K, V]` | `EntrySpan[K, V]` | sorted slice of entries |
+| `SortedMapView[K, NV]` | `EntrySpan[K, NV]` | copies the interface it holds; conversion applies per element as it walks |
+| `Vector[T]` | **open — see below** | slice-backed, but see the position question |
+| `VectorView[NT]` | **open** | same, including the `ViewSlice` case |
+| `MapSet[T]` | **nothing** | no order to reverse |
+| `MapSetView[NT]` | **nothing** | — |
+| `Map[K, V]` | **nothing** | — |
+| `MapView[NK, NV]` | **nothing** | — |
+
+**The map-backed containers get no `Backward` at all**, and that asymmetry is
+the point rather than an oversight: a hash container has no order, so a
+`Backward` on one could only mean "materialise, reverse, walk" — which is
+exactly the shape this ADR forbids. The absence is the constraint being
+honoured.
+
+**A converting view costs nothing extra.** `SortedMapView.Backward()` copies the
+interface the view already holds into the span — measured at **0.8407 ns and no
+allocation** — and the viewer is applied per element during the walk, exactly as
+it is for a forward walk. Direction does not interact with conversion.
+
+#### The one thing still open: `Vector`
+
+A `Vector` is slice-backed, so reversal is efficient and `Backward()` is
+obviously affordable. A **sub-span** is the problem, and it is ADR `0017`'s
+unchanged objection: a `Vector` window would be bounded by **position**, and
+position stability is "an artifact of an incomplete surface" — nothing in
+`Vector` shifts an index today, but a `Remove` would, silently invalidating
+every outstanding span.
+
+Two sub-questions, neither answered here:
+
+- **Does `Vector` get `Backward()` without `Range`?** Reversing the whole thing
+  needs no bounds, so it is affordable today with no stability assumption.
+- **If a `Vector` span exists, do its positions renumber?** A window over
+  `[3, 7)` could present positions `0..3` or `3..6`. Keeping the original
+  numbering is the only choice that makes `At(p)` mean the same thing on the
+  span and the parent, but it means `PositionSlice()` does not start at zero.
+
 ## What to decide
 
 1. **Which shape.** C is fastest and composes; A is smallest and is fastest only
    on the un-windowed walk; B is C's ergonomics at a worse price, and the price
    is specifically that an interface has nowhere to record a direction.
-2. **Whether `Vector` gets a sub-range at all.** ADR `0017` left it out because
-   index stability is "an artifact of an incomplete surface" — nothing in
-   `Vector` shifts an index today, but a `Remove` would, silently. That argument
-   is unchanged. A position-bounded span would be correct only as long as that
-   stays true.
-3. **Whether a span can be reversed twice.** `sp.Backward().Backward()` is
-   forward again and costs nothing to allow; ADR `0017`'s `Backward` deliberately
-   made double-reversal a compile error. The reasoning there was about a
-   *source*, and may not transfer.
+2. **`Vector`**, in two parts: whether it gets `Backward()` (affordable today,
+   no stability assumption) and whether it gets a position-bounded span (which
+   inherits ADR `0017`'s objection intact). Spelled out in the section above.
+3. **Whether dropping the ordered lookups from spans is the right trade.** The
+   alternative is two span types per shape — a forward one carrying `MinKey` and
+   friends, and a read-only backward one — which the type system would enforce
+   but which doubles the vocabulary.
