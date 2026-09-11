@@ -637,15 +637,22 @@ becomes the hash dict.
 **Shape interfaces:**
 
 ```
-Values[V]                                  Positions[P]
-   ▲                                          ▲
-   ├──────────────┐                           │
-Keys[K]      KeyValues[K,V] ◄─────────┐   PositionValues[P,V] ◄── also Values[V]
-   ▲              ▲                   │
-OrderedKeys[K]  OrderedKeyValues[K,V] ─┘
-   ▲              ▲
-MutableKeys[K]  MutableKeyValues[K,V]        (mutation tiers DEFERRED)
+        Keys[K]                Values[V]              Positions[P]
+           |                    |     |                    |
+           |     +--------------+     +----------+         |
+           |     |                               |         |
+           +--> KeyValues[K,V]            PositionValues[P,V] <--+
+           |         |
+OrderedKeys[K]       |
+     |     \         |
+     |      +--> OrderedKeyValues[K,V]     (embeds BOTH: a sorted dict has
+     |                   |                  the *Key reads and the pair reads)
+MutableKeys[K]   MutableKeyValues[K,V]      (mutation tiers DEFERRED)
 ```
+
+Read the arrows as "embeds". `KeyValues` embeds `Keys` and `Values`;
+`PositionValues` embeds `Positions` and `Values`; `OrderedKeyValues` embeds
+`KeyValues` **and** `OrderedKeys`.
 
 **What implements what:**
 
@@ -663,7 +670,7 @@ MutableKeys[K]  MutableKeyValues[K,V]        (mutation tiers DEFERRED)
 | `VectorView[NT]` | ✓ | | | | | ✓ | ✓ | |
 | `SliceView[NT]` | ✓ | | | | | ✓ | ✓ | |
 
-Four things the table is asserting, each of which is the point of some earlier
+Five things the table is asserting, each of which is the point of some earlier
 decision:
 
 - **No view satisfies a mutation tier.** That is the read-only guarantee, and it
