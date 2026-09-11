@@ -244,6 +244,14 @@ would have read as the natural one for *that* type too, and taken the slot.
 | `AllSlice() []Entry[K, V]` | — | ✓ | **yes** |
 | `Backward() Self` | ✓ | ✓ | — |
 | `Range(lo, hi K) Self` | ✓ | ✓ | no |
+| `IsZero() bool` | ✓ | ✓ | no |
+
+**`IsZero` is there for the same reason every container and view has one**
+(ADR `0018`): a span's zero value is reachable by declaration, and reads on it
+must be total rather than panicking. `var sp KeySpan[int]` has `Len() == 0`,
+iterates zero times, and materialises as nil — and `IsZero` is what distinguishes
+that from a window that is merely empty. It is free: a nil check on the
+implementation field, with none of `Len`'s bound-resolution.
 
 Verified: `KeySpan[K]` satisfies `Keys[K]`, and `KeyValueSpan[K, V]` satisfies
 `Keys[K]`, `Values[V]` **and** `KeyValues[K, V]`. So generic read code takes a
