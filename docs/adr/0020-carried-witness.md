@@ -320,10 +320,52 @@ sit next to the container and cost nothing that is not inherent. On the witness,
 they cost the same bytes, plus a self-referential constraint, plus four methods
 on every viewer, plus the loss of the free-boxing case.
 
+### Form 3: `Range` belongs wholly to the witness
+
+Both forms above fail because **narrowing re-parameterizes the view**. Giving
+the windowing job entirely to the witness avoids that — nothing ever changes
+type — and it splits into two readings, one of which is the best version of this
+idea.
+
+**3a — the window is chosen at construction, and there is no `Range` at all.**
+
+```go
+plain  := containers.ViewSortedMap(m, Unbounded[V]{})      // 8 B, boxes free
+window := containers.ViewSortedMap(m, Window(lo, hi))      // bounds only when asked
+```
+
+This compiles, and it **restores what Form 2 lost: bounds are optional again.**
+The witness type is fixed once, so an unbounded view keeps the zero-size witness
+and stays one word. No cycle, no mandatory bounds, no four-method constraint.
+
+Its cost is functional rather than structural: **a view can no longer be
+narrowed or reversed.** To window, you construct a new view *from the
+container* — and a caller holding only a view cannot, because a view is the
+read-only boundary and does not expose what it wraps. That is precisely the
+caller ADR `0019` is for. Composition — `m.Range(0, 100).Backward()` — goes
+entirely.
+
+**3b — `Range` is a free function that wraps the witness.** A method could not
+(instantiation cycle); a function can, verified. But the wrapping is real:
+
+| narrowings | width | witness type |
+|---|---|---|
+| 0 | 8 B | `Unbounded` |
+| 1 | 40 B | `Bounded[…, Unbounded]` |
+| 2 | 72 B | `Bounded[…, Bounded[…, Unbounded]]` |
+| 3 | **104 B** | …and so on |
+
+**+32 B and one type layer per narrowing, without bound** — and every layer
+keeps bounds the inner layer already subsumes, so the growth is carrying dead
+information. The type name grows with it, which an alias cannot fix because the
+depth is a property of the call chain rather than of the declaration.
+
 ### So: keep them separate
 
-**Spans stay the separate types ADR `0019` specifies, and witnesses stay about
-conversion.** The two do meet, but at a smaller joint than this: a span produced
+Three forms, three failures of different kinds: Form 1 is rejected by the
+language, Form 2 makes bounds mandatory for every sorted view, Form 3a gives up
+windowing from a view, and Form 3b grows without bound. **Spans stay the
+separate types ADR `0019` specifies, and witnesses stay about conversion.** The two do meet, but at a smaller joint than this: a span produced
 by a *view* must carry that view's witness so the conversion survives into the
 window — which is a type parameter on the span, not bounds on the witness.
 
