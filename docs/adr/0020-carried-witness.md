@@ -251,15 +251,97 @@ view cost the same because both hold an interface.
   time has to work out what `var conv C` is doing."* Less true of the carried
   form, where the field is visible, but still true of the type parameter.
 
+## Could spans be expressed through the witness?
+
+ADR `0019`'s spans and this ADR's witnesses both ride along with a view, so an
+obvious economy suggests itself: **expand the `CanView*` constraints for sorted
+containers with a bounds question, and let the concrete witness hold the start
+and limit keys.** A span then *is* a view, with no new types at all.
+
+It was tried. The first form does not compile, and the form that does costs more
+than it saves.
+
+### Form 1: narrowing wraps the witness — rejected by the language
+
+`Range` must have a single return type per instantiation, so narrowing has to
+wrap the existing witness in a bounding one:
+
+```go
+func (v SortedMapView[K, V, NV, VW]) Range(lo, hi K) SortedMapView[K, V, NV, bounded[K, V, NV, VW]]
+```
+
+Go rejects it outright:
+
+```
+instantiation cycle:
+    VW instantiated as bounded[K, V, NV, VW]
+```
+
+**This is a hard limit, not a preference.** And it is exactly the operation
+ADR `0019` requires: sub-spans, `m.Range(0, 100).Range(50, 60)`, which under
+this shape would need `bounded[bounded[VW]]`.
+
+### Form 2: the witness re-bounds itself — compiles, and costs
+
+The repair is a self-referential constraint: the witness names the concrete type
+it returns, so narrowing replaces the witness rather than wrapping it.
+
+```go
+type CanWindow[K cmp.Ordered, V, NV any, Self any] interface {
+	ValueViewer[V, NV]
+	Bounds() (K, K, bool)
+	Reversed() bool
+	WithBounds(lo, hi K) Self
+	WithReversed(bool) Self
+}
+```
+
+Verified: this compiles, and `v.Range("a","z").Range("b","y").Backward()` chains
+with no nesting. Three costs follow, and together they are decisive.
+
+**Every sorted view becomes a span, and pays for it.** Bounds cannot be optional:
+an unbounded witness and a bounded one would be different types, which is Form 1
+again. So a *plain* sorted view carries `lo`, `hi` and a direction whether or not
+anyone wanted a window — **48 B with string keys, against 8 B for the
+zero-size-witness view this ADR's main proposal gives.** That forfeits the
+pointer-shapedness that makes a stateless view box for free, on the whole sorted
+half of the library, to serve the windowed case.
+
+**The constraint stops describing a conversion.** `CanViewSortedMap` would
+declare four methods, two of which have nothing to do with viewing, and **every
+custom viewer would have to implement them** — including viewers written by
+callers who only ever wanted to project a value type. The name `CanView…` would
+be wrong, and so would the concept: viewing converts *element types*, windowing
+bounds an *extent*. They are different axes and this makes them one parameter.
+
+**It is ADR `0019`'s span, with the fields moved somewhere worse.** A span has to
+hold bounds and a direction; the question is only where. On a span struct, they
+sit next to the container and cost nothing that is not inherent. On the witness,
+they cost the same bytes, plus a self-referential constraint, plus four methods
+on every viewer, plus the loss of the free-boxing case.
+
+### So: keep them separate
+
+**Spans stay the separate types ADR `0019` specifies, and witnesses stay about
+conversion.** The two do meet, but at a smaller joint than this: a span produced
+by a *view* must carry that view's witness so the conversion survives into the
+window — which is a type parameter on the span, not bounds on the witness.
+
+That is the interaction to settle when `0019` resumes, and it is recorded there
+as an open question rather than here.
+
 ## What to decide
 
 1. **Whether the shape interfaces survive this.** They exist partly to abstract
    over view types; a witness makes view types *more* numerous, which argues
    they matter more — but boxing a stateful view into one costs the allocation
    the witness just removed. These two questions are the same question.
-2. **Whether ADR `0019`'s spans inherit the witness.** A span produced by a view
-   would carry the same `VW`, or erase it and pay the dispatch the span shape
-   exists to avoid. `0019` is paused; this should be settled before it resumes.
+2. **Whether ADR `0019`'s spans inherit the witness** as a type parameter. A
+   span produced by a view must carry that view's `VW` so the conversion
+   survives into the window, or erase it and pay the dispatch the span shape
+   exists to avoid. That is the *small* joint between the two ADRs; the large
+   one — expressing spans through the witness itself — is examined above and
+   rejected. `0019` is paused; this should be settled before it resumes.
 3. **Whether `CanViewSortedMap`, `CanViewVector` and `CanViewSlice` collapse
    into `ValueViewer`.** They are the same interface under three names. Distinct
    names document each container's requirement; one name removes a redundancy
