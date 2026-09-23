@@ -147,6 +147,90 @@ func handOut() ItemNameView
    the return type, so a caller writing the type writes all three parameters, or
    an alias.
 
+## The viewer interfaces, per container
+
+The viewer interfaces themselves do not change — `viewers.go` already declares
+exactly the set a witness needs, because a witness is constrained by an
+interface rather than holding one. What changes is that the viewer becomes a
+**named type parameter** on the view, so its identity is visible in every
+signature that spells the view out.
+
+| container | viewer constraint | converts | view type parameters |
+|---|---|---|---|
+| `MapSet[T]` | `CanViewMapSet[T, NT]` | keys, both ways | `[T, NT, VW]` — 3 |
+| `SortedSet[T]` | **none** | nothing | `[T]` — 1 |
+| `Map[K, V]` | `CanViewMap[K, NK, V, NV]` | keys **and** values | `[K, NK, V, NV, VW]` — **5** |
+| `SortedMap[K, V]` | `CanViewSortedMap[V, NV]` | values only | `[K, V, NV, VW]` — 4 |
+| `Vector[T]` | `CanViewVector[T, NT]` | values only | `[T, NT, VW]` — 3 |
+| `[]T` | `CanViewSlice[T, NT]` | values only | `[T, NT, VW]` — 3 |
+
+And the two primitives they are built from, unchanged:
+
+```go
+type KeyViewer[K, NK any] interface {
+	ToKeyView(K) NK            // outbound
+	FromKeyView(NK) (K, bool)  // inbound; a failed conversion reads as a miss
+}
+
+type ValueViewer[V, NV any] interface {
+	ToValueView(V) NV
+}
+```
+
+### Four things the table says
+
+**`SortedSet` needs no viewer at all**, so it takes no witness and keeps its
+single type parameter. Its keys are `cmp.Ordered`, which admits only immutable
+value types, so there is nothing to protect (ADR `0012`). It is the one view
+that is *simpler* under this design than the others, and the one whose spelling
+does not change.
+
+**`Map` is the expensive case: five type parameters.** A witness view must name
+its *source* types as well as its presented ones — `K, V` for the container,
+`NK, NV` for what it shows, `VW` for the converter. Today `MapView[NK, NV]` is
+two. This is the concrete shape of the verbosity cost, and it lands hardest on
+the container most likely to be projected.
+
+**Inference still works at construction**, verified: `ViewMap(m, vw)` resolves
+all five, because `K, V` come from the container argument and `NK, NV, VW` from
+the viewer argument. The parameters have to be written only where the *type* is
+written — a field, a return type, a variable declaration — which is what an
+alias exists for:
+
+```go
+type ItemNameView = containers.MapView[*item, string, *item, itemView, itemViewer]
+
+v := containers.ViewMap(m, itemViewer{known: registry})  // inferred
+func handOut() ItemNameView                              // aliased
+```
+
+**Three of the six constraints are the same interface.**
+`CanViewSortedMap[V, NV]`, `CanViewVector[T, NT]` and `CanViewSlice[T, NT]` all
+declare exactly `ValueViewer`, with nothing added. They are three names for one
+shape, kept distinct so each container documents what it requires rather than
+pointing at a shared name. That was defensible when a viewer was an ordinary
+argument; under a witness the constraint is part of the view's *type*, so the
+redundancy becomes visible in the API rather than only in the declaration —
+`MapSetView[…, VW CanViewVector[…]]` would compile just as happily as the right
+one. Whether to collapse them into `ValueViewer` is an open question below.
+
+### Identity viewers
+
+Both existing identity viewers are `struct{}` — **zero-size**, which is what the
+design needs: a stateless witness declared as the view's first field makes the
+view one word, and a one-word view boxes into a shape interface for free
+(0.3105 ns and no allocation, against 12.27 ns and one).
+
+```go
+type IdentityViewer[K, V any] struct{}      // both halves
+type IdentityValueViewer[V any] struct{}    // the value half only
+```
+
+So `ViewMapSetIdentity(s)` becomes `ViewMapSet(s, IdentityViewer[T, T]{})` under
+the covers, and the identity path is the *cheapest* one rather than a special
+case — which reverses today's position, where an identity view and a converting
+view cost the same because both hold an interface.
+
 ## What it costs
 
 - **The type carries three parameters instead of one.** ADR `0011` already
@@ -176,7 +260,11 @@ func handOut() ItemNameView
 2. **Whether ADR `0019`'s spans inherit the witness.** A span produced by a view
    would carry the same `VW`, or erase it and pay the dispatch the span shape
    exists to avoid. `0019` is paused; this should be settled before it resumes.
-3. **Whether identity views keep a separate spelling.** With a zero-size
+3. **Whether `CanViewSortedMap`, `CanViewVector` and `CanViewSlice` collapse
+   into `ValueViewer`.** They are the same interface under three names. Distinct
+   names document each container's requirement; one name removes a redundancy
+   that a witness makes visible in the type rather than only in the declaration.
+4. **Whether identity views keep a separate spelling.** With a zero-size
    identity viewer the general form is already optimal, so
    `ViewMapSetIdentity(s)` could become a thin wrapper — or stay, since it is
    what most callers want and it hides two type parameters.
