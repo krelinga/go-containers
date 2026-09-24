@@ -141,29 +141,29 @@ hot loop):
 
 | n | container (no view) | view, `range Keys()` | view, `Each` |
 |---|---|---|---|
-| 0 | 3.26 ns / 0 | 75.8 ns / **6** | **3.92 ns / 0** |
-| 1 | 24.3 ns / 0 | 99.5 ns / **6** | **24.8 ns / 0** |
-| 8 | 35.2 ns / 0 | 128.0 ns / **6** | **43.1 ns / 0** |
-| 64 | 319 ns / 0 | 564 ns / **6** | **396 ns / 0** |
-| 1024 | 5.73 µs / 0 | 8.00 µs / **6** | **6.76 µs / 0** |
+| 0 | 3.3 ns / 0 | 75.2 ns / **6** | **3.9 ns / 0** |
+| 1 | 23.4 ns / 0 | 98.5 ns / **6** | **25.2 ns / 0** |
+| 8 | 35.1 ns / 0 | 127.0 ns / **6** | **42.7 ns / 0** |
+| 64 | 333 ns / 0 | 568 ns / **6** | **416 ns / 0** |
+| 1024 | 5.72 µs / 0 | 7.86 µs / **6** | **6.50 µs / 0** |
 
-**The fixed per-call overhead goes from ~72 ns to ~0.7 ns — two orders of
+**The fixed per-call overhead goes from ~72 ns to ~0.6 ns — two orders of
 magnitude — and the allocations go to zero.** On the parameterised container
-(finding 5) the same hatch takes 3 allocations to 0 and ~33 ns to ~1 ns.
+(finding 5) the same hatch takes 3 allocations to 0 and ~32 ns to ~1.3 ns.
 
 What remains at larger n is per-element, not per-call: the view's `Keys` yields
 through a nested chain (`convertedKeys` yielding over the container's own
 `iter.Seq`), and each link costs a state check per element. `Each` collapses the
-chain into ordinary inlined calls. That is why the gap at n=1024 (15%) exceeds
+chain into ordinary inlined calls. That is why the gap at n=1024 (21%) exceeds
 the fixed cost.
 
 ### The caller's own closure is the only thing left that allocates
 
 | view, n=64 | | allocs |
 |---|---|---|
-| `Each`, callback literal written at the call site | 423 ns | **2** |
-| `Each`, same callback hoisted out of the loop | 395 ns | **0** |
-| `Each`, package-level func value | 396 ns | **0** |
+| `Each`, callback literal written at the call site | 432 ns | **2** |
+| `Each`, same callback hoisted out of the loop | 411 ns | **0** |
+| `Each`, package-level func value | 416 ns | **0** |
 
 A callback literal capturing a local costs two allocations — the closure and the
 captured variable — because passing it through a dynamic call makes it escape.
@@ -171,16 +171,90 @@ That is the **caller's** allocation, not the container's, and hoisting the
 closure removes it. Worth a doc line: the hatch is only a hatch if the callback
 does not allocate.
 
+### How far the callback has to move: one level, not global scope
+
+Every form below iterates the same 64-element view. What changes is only where
+the callback is written.
+
+| | n=64 | allocs | |
+|---|---|---|---|
+| A. literal at the call site | 419 ns | **2** | closure + captured local both escape |
+| B. same closure, same capture, **one level out** | 396 ns | **0** | |
+| C. closure over a pointer to a local accumulator | 399 ns | **0** | |
+| D. method value `acc.add`, taken at the call site | 410 ns | **1** | a method value *is* a closure |
+| E. same method value, bound one level out | 399 ns | **0** | |
+| F. package-level func over package-level state | 406 ns | **0** | |
+| — `range Keys()`, for comparison | 553 ns | 6 | |
+
+**B is the answer: move the func value out of the hot loop and stop.** It still
+captures a local, and the local still escapes — once, not per call, which is
+what `allocs/op` is measuring. Package scope (F) buys nothing over B, and costs
+the caller shared mutable state. The accumulator can stay a local; only the
+**binding** has to be hoisted.
+
+D is the one that surprises: `acc.add` is not a free reference to a method, it
+is a closure over `&acc` built at the point the method value is taken — so it
+allocates at the call site and is free one level out, exactly like a literal.
+
+**The trap is a helper function.** Hoisting one level is enough only when the
+loop is right there:
+
+```go
+func countVia(v View) int {
+	n := 0
+	v.Each(func(string) bool { n++; return true })   // rebuilt per CALL
+	return n
+}
+```
+
+That is 429 ns and **2 allocations per call to `countVia`**, no matter how far
+outside `countVia` the loop sits. Taking the callback as a parameter and letting
+the caller own it gives 409 ns and **0**. So the rule is not "one lexical level"
+but *"outside whatever loop is hot"* — and a function called in a hot loop is a
+hot loop.
+
+### How much the caller's closure actually costs
+
+Two allocations regardless of n, and a fixed ~16-20 ns of time:
+
+| n | literal at call site | hoisted one level |
+|---|---|---|
+| 0 | 20.1 ns / 2 | **4.1 ns / 0** |
+| 1 | 42.8 ns / 2 | **25.0 ns / 0** |
+| 8 | 64.1 ns / 2 | **44.1 ns / 0** |
+| 64 | 429 ns / 2 | **390 ns / 0** |
+| 1024 | 6.57 µs / 2 | 6.68 µs / 0 |
+
+So hoisting matters exactly where the hatch itself matters, and nowhere else:
+**4.9x on an empty container**, ~10% at n=64, and **nothing at n=1024** — there
+the two sample ranges overlap completely (6418-6847 ns against 6540-6817 ns), so
+the row showing the hoisted form *slower* is noise, not a result. The literal is
+also consistently the noisier of the two at n=64 (417-441 ns against 387-391 ns),
+which is the allocator showing through.
+
+**And the naive un-hoisted form still beats range-over-func by 3.7x at n=0**
+(20.1 ns / 2 allocs against 75.2 ns / 6) — hoisting collects the remainder, it is
+not the price of entry.
+
+### On a concrete container none of this applies
+
+A literal written at the call site of `set.Each` costs **0 allocations** (318 ns,
+against 396 ns for the best view form):
+escape analysis can see the callee, proves the closure does not outlive the
+call, and keeps it on the stack. Only the **dynamic** call forces it to the
+heap — the same cause as the three-to-six allocations the hatch exists to avoid,
+reappearing one level up in the caller's own code.
+
 ### It beats both hatches callers already have
 
 At n=64, through a view:
 
 | | | allocs | bytes |
 |---|---|---|---|
-| `range Keys()`, per call | 567 ns | 6 | 192 B |
-| `range Keys()`, `Seq` **hoisted** out of the loop | 554 ns | **5** | 144 B |
-| `KeySlice()`, then range the slice | 499 ns | 1 | **1152 B** |
-| `Each` | **407 ns** | **0** | **0 B** |
+| `range Keys()`, per call | 551 ns | 6 | 192 B |
+| `range Keys()`, `Seq` **hoisted** out of the loop | 534 ns | **5** | 144 B |
+| `KeySlice()`, then range the slice | 506 ns | 1 | **1152 B** |
+| `Each` | **399 ns** | **0** | **0 B** |
 
 Two things that are easy to assume and are false:
 
@@ -190,7 +264,8 @@ Two things that are easy to assume and are false:
   the six every time. The zero-API-cost workaround does not work.
 - **Materialising is not a cheap out.** `KeySlice` trades six fixed allocations
   for one sized by n: 1152 B at n=64 and 18 KiB at n=1024, and it is slower than
-  `Each` at every size measured, because it copies every element.
+  `Each` at every size measured (7.82 µs against 6.66 µs at n=1024), because it
+  copies every element.
 
 ### Early exit is where it is worth the most
 
@@ -198,10 +273,10 @@ Breaking out after the first of 1024 elements, through a view:
 
 | | | allocs |
 |---|---|---|
-| `range Keys()` + `break` | 102.8 ns | 6 |
-| `Each` + `return false` | **22.7 ns** | **0** |
+| `range Keys()` + `break` | 99.9 ns | 6 |
+| `Each` + `return false` | **22.9 ns** | **0** |
 
-**4.5x.** The fixed cost is the whole cost when the walk stops immediately, so a
+**4.4x.** The fixed cost is the whole cost when the walk stops immediately, so a
 short-circuiting search — `Any`, `Find`, `First` — is the profile that gains
 most, and it is a common one.
 
@@ -235,7 +310,12 @@ dynamic call, independent of view shape. The range machinery is per range
 *statement*, not per iterator call, so hoisting an `iter.Seq` out of a loop
 saves only the constructor's own allocation. A callback literal that captures a
 local escapes through a dynamic call and allocates twice; hoisting the closure
-removes that. Callback iteration cannot `break`, `continue`, `return` or `defer`
+removes that -- and hoisting means "out of whatever loop is hot", which is one
+lexical level when the loop is adjacent and further when the call sits inside a
+helper; package scope is never required. A method value on a pointer receiver is
+itself a closure, so it obeys the same rule as a literal. Under a concrete
+(non-dynamic) call the literal never escapes at all, so none of this applies.
+Callback iteration cannot `break`, `continue`, `return` or `defer`
 through its caller's frame, and does not compose with the stdlib's `iter.Seq`
 consumers — the cost that makes it a hatch rather than a default.
 
