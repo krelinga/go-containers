@@ -41,11 +41,12 @@ type; nothing can assert one back to anything writable.
 
 `callsites_test.go` holds every stdlib-vs-container comparison. Alongside:
 `docs/adr/` (design decisions) and `experiments/` (measurement harnesses, each
-its own module). **Check an ADR's status before treating it as binding** — most
-are Accepted, `0010` is Proposed, `0014` is **Rejected and superseded by `0018`**,
-and `0017` is Accepted **as proposal D** while containing three rejected
-proposals in full. `0018` is Accepted **as option (b)** and likewise keeps its
-rejected options.
+its own module). **Check an ADR's status before treating it as binding.** `0014`
+is **Rejected and superseded by `0018`**; `0010`, `0019`, `0020` and `0021` are
+**Proposed** and describe nothing that exists in code; the rest are Accepted.
+`0017` is Accepted **as proposal D** while containing three rejected proposals in
+full, and `0018` is Accepted **as option (b)** and likewise keeps its rejected
+options.
 
 Intent, per the module path `github.com/krelinga/go-containers`: a generic
 (type-parameterized) container library.

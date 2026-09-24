@@ -21,10 +21,18 @@
 //
 //	Each(f func(T) bool)   // container drives; false stops. sync.Map.Range's shape
 //
-// against the Go iteration paradigm, and against the two workarounds callers
-// already have: hoisting the iter.Seq out of the loop, and materialising with
-// KeySlice.
+// against the Go iteration paradigm, and against every workaround a caller has
+// unaided: hoisting the iter.Seq out of the loop, invoking the sequence by hand
+// (Keys()(f) -- an iter.Seq IS a push function), iter.Pull, and materialising
+// with KeySlice. hoist_test.go asks how far a callback must move to cost
+// nothing; span_each_test.go asks whether ADR 0019's spans can supply the
+// range-shaped hatch for free.
 //
-// The harness is bench_test.go, each_test.go and alt_test.go; the findings are
-// RESULTS.md.
+// WARNING for anyone extending this harness: an interface with ONE visible
+// implementation assigned to a local is devirtualized, and every
+// dynamic-dispatch measurement through it reads as free. span_each_test.go uses
+// two implementations behind a runtime-selected branch to prevent that.
+//
+// The harness is bench_test.go, each_test.go, alt_test.go, hoist_test.go,
+// push_test.go and span_each_test.go; the findings are RESULTS.md.
 package witness
