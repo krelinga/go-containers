@@ -73,6 +73,62 @@ boxes free — better than today on every axis. A **stateful** one is two words
 and boxes exactly as today does. Declare the fields in the wrong order and the
 first row is what you get, silently.
 
+## 5. The parameterised container: half the erratum, and a span merge
+
+Putting the witness on the CONTAINER and keeping the view as an interface:
+
+| iterating 64 elements | | allocs |
+|---|---|---|
+| view holds an interface (today) | 552.6 ns | **6** |
+| witness on the container, view is an interface | **440.3 ns** | **3** |
+| carried witness, concrete view | 408.4 ns | **0** |
+| the same container used concretely | 399.1 ns | **0** |
+| boxing the container into the view interface | 0.3154 ns | **0** |
+
+Today has two dynamic hops; this shape makes the per-element conversion static
+and leaves one. Half the allocations, not none — one dynamic call is enough to
+defeat the fusion described below.
+
+## 6. Where the three allocations are, and when they matter
+
+| | allocs |
+|---|---|
+| obtain the iterator only, through the interface | **1** |
+| obtain the iterator only, concretely | 1 |
+| obtain and range, through the interface | **3** |
+| obtain and range, concretely | **0** |
+| range a pre-obtained iterator | **2** |
+
+One is the iterator closure; two are the range machinery — escape analysis names
+the loop variable, the range-over-func state, and the yield closure.
+
+**The concrete pair is the instructive one.** Obtaining a closure concretely also
+costs one allocation alone, yet the full concrete loop costs zero: ranged
+immediately, the compiler inlines the method, proves the closure never outlives
+the loop, and fuses both into a plain loop. Through an interface it cannot know
+which method will run, so nothing fuses.
+
+**Scaling.** The overhead is a flat ~34.4 ns; the walk is ~6.81 ns per element.
+
+| n | concrete | via view | overhead |
+|---|---|---|---|
+| 0 | 3.3 ns | 35.9 ns | **990%** |
+| 8 | 43.5 ns | 75.9 ns | 74% |
+| 32 | 220 ns | 256 ns | 16% |
+| 64 | 435 ns | 458 ns | 5.4% |
+| 128 | 816 ns | 831 ns | 1.8% |
+| 1024 | 6.90 µs | 6.76 µs | −2.1% |
+| 4096 | 27.6 µs | 26.0 µs | −5.6% |
+
+Below 10% at n≈50, below 5% at n≈100, below 1% at n≈500; negative past a few
+hundred, which is jitter rather than signal. The cost is per call, not per
+element, and the **empty container is the worst case** at 990%.
+
+For scale, on the same machine: a map lookup is 2.7 ns, an uncontended mutex
+pair 7.7 ns, a 64 B allocation 14.1 ns, `fmt.Sprintf("%d")` 27.0 ns,
+`time.Now()` 35.3 ns, `json.Marshal` of two fields 58.6 ns, a goroutine spawn
+222 ns, `os.Stat` 617 ns. **The overhead is one `time.Now()`.**
+
 ## Durable / perishable
 
 **Durable.** A static conversion removes the per-call allocations that a
@@ -81,6 +137,11 @@ state. A carried witness dispatches statically *and* carries state; only the
 pure form is constrained to stateless viewers. A zero-size struct field is free
 at the front of a struct and padded at the back, which decides pointer-shapedness
 and therefore whether boxing allocates.
+
+A dynamic call defeats the compiler's fusion of an iterator constructor with the
+range statement that consumes it, which is what makes the three allocations
+appear; the fixed cost is per call rather than per element, so it is dominated
+by call frequency and not by container size.
 
 **Perishable.** Every absolute number, and the ~60 ns conversion overhead, which
 tracks the viewer's own cost.

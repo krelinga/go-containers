@@ -1,7 +1,10 @@
 # 20. Views by carried witness
 
-- **Status:** **Proposed.** The shape is measured and specified; it is not
-  chosen, and two of its consequences want deciding first.
+- **Status:** **Proposed**, and now covering two shapes. The carried witness is
+  specified and measured; a second shape — **parameterise the container and keep
+  views as interfaces** — is measured alongside it and is currently the
+  favoured one, because it merges spans with views and so dissolves the
+  instantiation cycle that defeats every other attempt at that merge.
 - **Date:** 2026-09-23
 - **Evidence:** `experiments/witness/` (`RESULTS.md`), with history in
   `experiments/views/` (ADR `0011`'s harness).
@@ -371,6 +374,163 @@ window — which is a type parameter on the span, not bounds on the witness.
 
 That is the interaction to settle when `0019` resumes, and it is recorded there
 as an open question rather than here.
+
+## Alternative: parameterise the container, keep views as interfaces
+
+A different placement of the same witness, and — measured — a better trade than
+the carried view for this library.
+
+**The container carries the witness as a type parameter; `View()` returns an
+interface.**
+
+```go
+type Map[K comparable, V, NK, NV any, VW CanViewMap[K, NK, V, NV]] map[K]V
+
+type MapView[NK, NV any] interface {   // an INTERFACE again -- few parameters
+	Len() int
+	Keys() iter.Seq[NK]
+	// …
+}
+
+func (m Map[K, V, NK, NV, VW]) View() MapView[NK, NV] { return m }
+```
+
+Verified to compile: a defined map type does carry type parameters absent from
+its underlying type, and stays **8 B**, so `View()` boxes it for **free**
+(0.3154 ns, 0 allocations).
+
+### What it fixes that the carried witness does not
+
+**It merges spans with views** — and this is the decisive property, because it
+dissolves the instantiation cycle rather than working around it.
+
+When the view is an interface, a **span is simply another implementation of it**.
+`Range` returns the interface, so narrowing never re-parameterizes anything:
+
+```go
+func (m SortedMap[…]) Range(lo, hi K) SortedView[K, NV]   // returns a span
+func (s span[…])      Range(lo, hi K) SortedView[K, NV]   // returns itself, re-bounded
+```
+
+Verified: `m.Range("a","z").Range("b","y").Backward().Range("c","x")` compiles
+and is still `SortedView[K, NV]` at every depth. **No cycle, no nesting, no
+32 B per narrowing, no growing type name** — the interface erases the concrete
+type, which is exactly what the four rejected forms in the section above were
+each failing to do a different way.
+
+**It also solves the verbosity**, from the caller's side: `MapView[NK, NV]`
+rather than `MapView[K, NK, V, NV, VW]`.
+
+### What it costs
+
+**The type parameters move to the container rather than disappearing.** A method
+cannot introduce type parameters, so `View()` must name its projected types from
+the receiver — `Map[K, V, NK, NV, VW]`, five on the type every caller writes,
+against two today. That is the real price, and it is paid at every signature
+mentioning a container, not only at ones mentioning a view.
+
+**The witness must be stateless.** A defined map type has nowhere to store a
+value. That is ADR `0012`'s original objection, now accepted deliberately rather
+than worked around: `ValueViewer` is naturally stateless, but
+`FromKeyView(NK) (K, bool)` is not — turning `"alpha"` back into the `*item` it
+names needs a registry. **Inbound key conversion therefore stops working for
+anything but a pure computation**, and `Has(nk)`/`Get(nk)` on a key-converting
+view are the casualties. The library's own `views_test.go` viewer holds such a
+registry today.
+
+**And it keeps half of ADR `0013`'s erratum.**
+
+| iterating 64 elements | | allocs |
+|---|---|---|
+| view holds an interface (today) | 552.6 ns | **6** |
+| **this shape** | **440.3 ns** | **3** |
+| carried witness, concrete view | 408.4 ns | **0** |
+| this shape used concretely, no `View()` | 399.1 ns | **0** |
+
+Today has two dynamic hops — the view's `impl` call, then a per-element viewer
+call. This shape makes the conversion **static** (the witness is concrete on the
+container) and leaves only the outer `Keys()` dynamic. That halves it. It does
+not remove it, because one dynamic call is enough.
+
+## What three allocations actually are, and when they matter
+
+Worth pinning down, because the whole choice turns on whether they are
+affordable.
+
+**Where they come from**, attributed by measurement rather than inspection:
+
+| | allocs |
+|---|---|
+| obtain the iterator only, **through the interface** | **1** |
+| obtain the iterator only, **concretely** | 1 |
+| obtain **and** range, through the interface | **3** |
+| obtain **and** range, concretely | **0** |
+| range a **pre-obtained** iterator | **2** |
+
+One is the iterator closure; two are the range machinery — escape analysis names
+them as the loop variable, the compiler's range-over-func state, and the yield
+closure the loop body becomes.
+
+**The instructive pair is the concrete rows.** Obtaining a closure concretely
+also costs one allocation in isolation, yet the full concrete loop costs
+**zero**: when the call is ranged immediately, the compiler inlines `Keys`,
+proves the closure never outlives the loop, and fuses both into an ordinary
+loop. Through an interface it cannot see which `Keys` will run, so nothing
+fuses and all three become real.
+
+**How big the container must be before it stops mattering.** The overhead is a
+flat **~34.4 ns**, independent of size; the walk costs **~6.81 ns** per element.
+
+| n | concrete | via view | overhead |
+|---|---|---|---|
+| 0 | 3.3 ns | 35.9 ns | **990%** |
+| 8 | 43.5 ns | 75.9 ns | 74% |
+| 32 | 220 ns | 256 ns | 16% |
+| 64 | 435 ns | 458 ns | 5.4% |
+| 128 | 816 ns | 831 ns | 1.8% |
+| 1024 | 6.90 µs | 6.76 µs | **−2.1%** |
+| 4096 | 27.6 µs | 26.0 µs | **−5.6%** |
+
+| overhead drops below | at roughly |
+|---|---|
+| 10% | n ≈ 50 |
+| 5% | n ≈ 100 |
+| 2% | n ≈ 250 |
+| 1% | n ≈ 500 |
+
+Past a few hundred elements the difference goes **negative** in places, which is
+the signature of reading jitter rather than signal.
+
+Two consequences. **The empty container is the worst case by far** — 990%,
+because a concrete walk over nothing compiles to almost nothing while the view
+still pays all three. A hot loop over views that are usually empty is the
+pathological pattern, and it is a plausible one. And **the cost is per `Keys()`
+call, not per element**: ten thousand walks of five elements costs 340 µs of
+overhead; one walk of fifty thousand costs 34 ns.
+
+**What 34 ns is, in company.** Measured on the same machine:
+
+| | |
+|---|---|
+| interface method call | 1.8 ns |
+| map lookup (3 entries) | 2.7 ns |
+| map lookup (65k) | 4.5 ns |
+| mutex lock+unlock, uncontended | 7.7 ns |
+| allocate 64 B | 14.1 ns |
+| buffered channel send+recv | 24.8 ns |
+| `fmt.Sprintf("%d")` | 27.0 ns |
+| **the view overhead** | **34.4 ns** |
+| `time.Now()` | 35.3 ns |
+| `json.Marshal`, two fields | 58.6 ns |
+| goroutine spawn + join | 222 ns |
+| allocate 4 KiB | 507 ns |
+| `os.Stat` | 617 ns |
+
+**It is one `time.Now()`.** Any path that formats a string, logs a line,
+marshals JSON, touches a channel or allocates a page cannot measure it. It is
+~19x an interface call and ~14x a map lookup, so the one place it is real is a
+tight in-memory loop that does nothing else — which is the profile ADR `0015`
+already tells callers to use a plain `[]T` for rather than a container.
 
 ## What to decide
 

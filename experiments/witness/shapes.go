@@ -159,3 +159,39 @@ func (v carriedFront[T, NT, VW]) Keys() iter.Seq[NT] {
 func viewCarriedFront[T comparable, NT any, VW toKeyView[T, NT]](s set[T], vw VW) carriedFront[T, NT, VW] {
 	return carriedFront[T, NT, VW]{vw: vw, s: s}
 }
+
+// ---------------------------------------------------------------------------
+// PARAMETERISED CONTAINER: the container itself carries the witness as a type
+// parameter, and View() boxes it into a view INTERFACE.
+//
+// The witness must be STATELESS -- a defined map type has nowhere to store one.
+// The conversion is still static (VW is concrete on the container); only the
+// outer call through the view interface is dynamic.
+// ---------------------------------------------------------------------------
+
+type paramSet[T comparable, NT any, VW toKeyView[T, NT]] struct{ m map[T]struct{} }
+
+func (s paramSet[T, NT, VW]) Len() int { return len(s.m) }
+
+func (s paramSet[T, NT, VW]) Keys() iter.Seq[NT] {
+	var vw VW // stateless
+	m := s.m
+	return func(yield func(NT) bool) {
+		for t := range m {
+			if !yield(vw.ToKeyView(t)) {
+				return
+			}
+		}
+	}
+}
+
+// View boxes the one-word container into the interface.
+func (s paramSet[T, NT, VW]) View() Keys[NT] { return s }
+
+func newParamSet[T comparable, NT any, VW toKeyView[T, NT]](vs ...T) paramSet[T, NT, VW] {
+	s := paramSet[T, NT, VW]{m: make(map[T]struct{}, len(vs))}
+	for _, v := range vs {
+		s.m[v] = struct{}{}
+	}
+	return s
+}

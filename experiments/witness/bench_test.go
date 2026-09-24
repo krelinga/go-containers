@@ -189,3 +189,65 @@ func BenchmarkNoOp(b *testing.B) {
 		sinkInt++
 	}
 }
+
+// 4. The parameterised-container shape: witness on the container, view as an
+// interface. How does boxing-then-iterating compare to the other two?
+func BenchmarkParameterisedContainer(b *testing.B) {
+	s, sv := fixture()
+	iv := viewIface[*item, string](s, sv)
+	cw := viewCarried[*item, string](s, statelessViewer{})
+
+	items := make([]*item, 0, n)
+	for t := range s.Keys() {
+		items = append(items, t)
+	}
+	ps := newParamSet[*item, string, statelessViewer](items...)
+	pv := ps.View()
+
+	b.Run("iterate/view-holds-iface(today)", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			c := 0
+			for range iv.Keys() {
+				c++
+			}
+			sinkInt = c
+		}
+	})
+	b.Run("iterate/carried-witness(concrete view)", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			c := 0
+			for range cw.Keys() {
+				c++
+			}
+			sinkInt = c
+		}
+	})
+	b.Run("iterate/param-container(view is iface)", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			c := 0
+			for range pv.Keys() {
+				c++
+			}
+			sinkInt = c
+		}
+	})
+	b.Run("iterate/param-container(concrete, no View)", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			c := 0
+			for range ps.Keys() {
+				c++
+			}
+			sinkInt = c
+		}
+	})
+	b.Run("box/container-into-view-iface", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			sinkKeys = ps.View()
+		}
+	})
+}
