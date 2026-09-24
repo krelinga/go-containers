@@ -129,6 +129,92 @@ pair 7.7 ns, a 64 B allocation 14.1 ns, `fmt.Sprintf("%d")` 27.0 ns,
 `time.Now()` 35.3 ns, `json.Marshal` of two fields 58.6 ns, a goroutine spawn
 222 ns, `os.Stat` 617 ns. **The overhead is one `time.Now()`.**
 
+## 7. An `Each` escape hatch removes the overhead entirely
+
+`Each(f func(T) bool)` — the container drives the loop and calls `f` per
+element, `false` stops it, the same contract as `sync.Map.Range`. No `iter.Seq`
+is returned, so there is no closure to hand back and nothing for a range
+statement to bind.
+
+Iterating a converting view, callback **not capturing** (or hoisted out of the
+hot loop):
+
+| n | container (no view) | view, `range Keys()` | view, `Each` |
+|---|---|---|---|
+| 0 | 3.26 ns / 0 | 75.8 ns / **6** | **3.92 ns / 0** |
+| 1 | 24.3 ns / 0 | 99.5 ns / **6** | **24.8 ns / 0** |
+| 8 | 35.2 ns / 0 | 128.0 ns / **6** | **43.1 ns / 0** |
+| 64 | 319 ns / 0 | 564 ns / **6** | **396 ns / 0** |
+| 1024 | 5.73 µs / 0 | 8.00 µs / **6** | **6.76 µs / 0** |
+
+**The fixed per-call overhead goes from ~72 ns to ~0.7 ns — two orders of
+magnitude — and the allocations go to zero.** On the parameterised container
+(finding 5) the same hatch takes 3 allocations to 0 and ~33 ns to ~1 ns.
+
+What remains at larger n is per-element, not per-call: the view's `Keys` yields
+through a nested chain (`convertedKeys` yielding over the container's own
+`iter.Seq`), and each link costs a state check per element. `Each` collapses the
+chain into ordinary inlined calls. That is why the gap at n=1024 (15%) exceeds
+the fixed cost.
+
+### The caller's own closure is the only thing left that allocates
+
+| view, n=64 | | allocs |
+|---|---|---|
+| `Each`, callback literal written at the call site | 423 ns | **2** |
+| `Each`, same callback hoisted out of the loop | 395 ns | **0** |
+| `Each`, package-level func value | 396 ns | **0** |
+
+A callback literal capturing a local costs two allocations — the closure and the
+captured variable — because passing it through a dynamic call makes it escape.
+That is the **caller's** allocation, not the container's, and hoisting the
+closure removes it. Worth a doc line: the hatch is only a hatch if the callback
+does not allocate.
+
+### It beats both hatches callers already have
+
+At n=64, through a view:
+
+| | | allocs | bytes |
+|---|---|---|---|
+| `range Keys()`, per call | 567 ns | 6 | 192 B |
+| `range Keys()`, `Seq` **hoisted** out of the loop | 554 ns | **5** | 144 B |
+| `KeySlice()`, then range the slice | 499 ns | 1 | **1152 B** |
+| `Each` | **407 ns** | **0** | **0 B** |
+
+Two things that are easy to assume and are false:
+
+- **Hoisting the `iter.Seq` out of the loop saves one allocation of six.** The
+  range machinery — loop state, loop variable, yield closure — is per *range
+  statement*, not per `Keys()` call, so re-ranging a hoisted `Seq` pays five of
+  the six every time. The zero-API-cost workaround does not work.
+- **Materialising is not a cheap out.** `KeySlice` trades six fixed allocations
+  for one sized by n: 1152 B at n=64 and 18 KiB at n=1024, and it is slower than
+  `Each` at every size measured, because it copies every element.
+
+### Early exit is where it is worth the most
+
+Breaking out after the first of 1024 elements, through a view:
+
+| | | allocs |
+|---|---|---|
+| `range Keys()` + `break` | 102.8 ns | 6 |
+| `Each` + `return false` | **22.7 ns** | **0** |
+
+**4.5x.** The fixed cost is the whole cost when the walk stops immediately, so a
+short-circuiting search — `Any`, `Find`, `First` — is the profile that gains
+most, and it is a common one.
+
+### What it costs
+
+Not measurable, but real: `Each` gives up what range-over-func was introduced to
+provide. A callback cannot `break` to a label, `continue` an outer loop,
+`return` from the enclosing function, or `defer` into its frame; stopping early
+means threading a sentinel back through the `bool`. It also does not compose
+with `slices.Collect`, `maps.Insert` or anything else in the stdlib that
+consumes an `iter.Seq`. It is an escape hatch and reads like one — which is the
+argument for having it *alongside* `Keys`, and against it replacing anything.
+
 ## Durable / perishable
 
 **Durable.** A static conversion removes the per-call allocations that a
@@ -142,6 +228,16 @@ A dynamic call defeats the compiler's fusion of an iterator constructor with the
 range statement that consumes it, which is what makes the three allocations
 appear; the fixed cost is per call rather than per element, so it is dominated
 by call frequency and not by container size.
+
+A callback-driven `Each` sidesteps the whole mechanism, because nothing is
+returned for a range statement to bind — so it costs zero allocations through a
+dynamic call, independent of view shape. The range machinery is per range
+*statement*, not per iterator call, so hoisting an `iter.Seq` out of a loop
+saves only the constructor's own allocation. A callback literal that captures a
+local escapes through a dynamic call and allocates twice; hoisting the closure
+removes that. Callback iteration cannot `break`, `continue`, `return` or `defer`
+through its caller's frame, and does not compose with the stdlib's `iter.Seq`
+consumers — the cost that makes it a hatch rather than a default.
 
 **Perishable.** Every absolute number, and the ~60 ns conversion overhead, which
 tracks the viewer's own cost.

@@ -195,3 +195,79 @@ func newParamSet[T comparable, NT any, VW toKeyView[T, NT]](vs ...T) paramSet[T,
 	}
 	return s
 }
+
+// ---------------------------------------------------------------------------
+// EACH: the escape hatch. The container drives the loop and calls f once per
+// element; f returns false to stop. Same semantics as a range-over-func body,
+// but the caller never receives an iter.Seq, so there is no closure to return
+// and nothing for the range statement to bind.
+// ---------------------------------------------------------------------------
+
+func (s set[T]) Each(f func(T) bool) {
+	for t := range s.m {
+		if !f(t) {
+			return
+		}
+	}
+}
+
+type eachIface[NT any] interface {
+	Len() int
+	Keys() iter.Seq[NT]
+	Each(func(NT) bool)
+}
+
+// Each delegates to the container's Each exactly as Keys delegates to the
+// container's Keys, so the pair differs only in the iteration protocol.
+func (c convertedKeys[T, NT]) Each(f func(NT) bool) {
+	c.s.Each(func(t T) bool { return f(c.vw.ToKeyView(t)) })
+}
+
+// eachView is today's two-word view, widened with the escape hatch.
+type eachView[NT any] struct{ impl eachIface[NT] }
+
+func (v eachView[NT]) Len() int             { return v.impl.Len() }
+func (v eachView[NT]) Keys() iter.Seq[NT]   { return v.impl.Keys() }
+func (v eachView[NT]) Each(f func(NT) bool) { v.impl.Each(f) }
+
+func viewEach[T comparable, NT any](s set[T], vw interface{ ToKeyView(T) NT }) eachView[NT] {
+	return eachView[NT]{impl: convertedKeys[T, NT]{s, vw}}
+}
+
+// The parameterised container gets one too, so the favoured shape in ADR 0020
+// can be priced with and without the hatch.
+func (s paramSet[T, NT, VW]) Each(f func(NT) bool) {
+	var vw VW
+	for t := range s.m {
+		if !f(vw.ToKeyView(t)) {
+			return
+		}
+	}
+}
+
+// EachKeys is the view interface the parameterised container boxes into when
+// the hatch is part of the contract.
+type EachKeys[NT any] interface {
+	Len() int
+	Keys() iter.Seq[NT]
+	Each(func(NT) bool)
+}
+
+func (s paramSet[T, NT, VW]) ViewEach() EachKeys[NT] { return s }
+
+// KeySlice is the escape hatch the library ALREADY has: materialise, then walk
+// a plain slice. One allocation, sized by n rather than fixed.
+func (c convertedKeys[T, NT]) KeySlice() []NT {
+	out := make([]NT, 0, len(c.s.m))
+	for t := range c.s.m {
+		out = append(out, c.vw.ToKeyView(t))
+	}
+	return out
+}
+
+type eachIfaceSlice[NT any] interface {
+	eachIface[NT]
+	KeySlice() []NT
+}
+
+func (v eachView[NT]) KeySlice() []NT { return v.impl.(eachIfaceSlice[NT]).KeySlice() }

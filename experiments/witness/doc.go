@@ -15,5 +15,16 @@
 //	carried  struct{ c C; vw VW } with VW a CONCRETE type parameter
 //	         static dispatch AND stateful viewers; width is 1 + sizeof(VW)
 //
-// The harness is bench_test.go; the findings are RESULTS.md.
+// A later question joined it: if iterating through an interface costs a fixed
+// ~34 ns and three-to-six allocations, is there an ESCAPE HATCH a caller can
+// reach for where that matters? each_test.go and alt_test.go price
+//
+//	Each(f func(T) bool)   // container drives; false stops. sync.Map.Range's shape
+//
+// against the Go iteration paradigm, and against the two workarounds callers
+// already have: hoisting the iter.Seq out of the loop, and materialising with
+// KeySlice.
+//
+// The harness is bench_test.go, each_test.go and alt_test.go; the findings are
+// RESULTS.md.
 package witness
