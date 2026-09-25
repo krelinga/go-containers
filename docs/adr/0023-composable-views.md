@@ -169,8 +169,9 @@ type Slice[T any] []T
 ```
 
 A defined slice type, modelled on `Map[K, V]` being a defined `map[K]V` (ADR
-`0009`). Value receivers, the position-keyed reads, `Set` for in-place element
-writes, and **no `Append`**.
+`0009`). Value receivers, the position-keyed reads, `Set(i int, e T)` for in-place
+element writes, **no `Append` method**, and **no constructor** — `make` and a
+composite literal both work on it natively.
 
 Measured rather than assumed: a defined `[]T` satisfies the whole of
 `innerPositionValues[int, T]` — `Len`, `At`, `Positions`, `PositionSlice`,
@@ -186,10 +187,14 @@ this needs to answer it directly rather than quietly reverse it.
 
 **What still stands, unchanged:**
 
-- **A `Slice[T]` cannot have `Append`.** A slice's length lives in its header,
-  which *is* the value, so a value receiver cannot grow it and a pointer receiver
-  would forfeit the assignability that makes an adapter an adapter. `Slice[T]`
-  reads, and writes elements in place, and cannot change its own length.
+- **A `Slice[T]` cannot have an `Append` *method*.** A slice's length lives in its
+  header, which *is* the value, so a value receiver cannot grow it and a pointer
+  receiver would forfeit the assignability that makes an adapter an adapter.
+  **Growth itself is not lost** — `s = append(s, x)` works on a `Slice[T]`
+  variable exactly as on a `[]T`, verified — so what the type lacks is the
+  *method*, not the capability. That is a smaller gap than ADR `0016`'s framing
+  suggests, but it is still a real asymmetry with `Vector`, whose `Append` is a
+  method precisely because its state is behind a pointer.
 - **It fixes no slice hazard.** Naming a slice type changes no slice semantics.
   Every hazard ADR `0015` records survives — in particular, appends off a shared
   `Slice[T]` still alias. **`Vector` remains the answer where growth must be
@@ -414,6 +419,28 @@ All three belong in `callsites_test.go` as a stdlib-baseline-first diff.
 5. **`SliceView[NT]` is distinct from `VectorView[NT]`**, and `ViewSliceWith` from
    `ViewVectorWith`.
 6. **No viewer composition** in the library.
+7. **`Slice[T]` carries `Set(i int, e T)`**, spelled exactly as `Vector.Set` is, so
+   the two sequence types share a mutator vocabulary as far as they can. An
+   element write goes through the shared backing array and sticks. On the zero
+   value it panics with an index error rather than a nil error — which is what
+   `var s []T; s[0] = e` does, so the rule in CLAUDE.md holds even though the
+   panic's text differs from the map-backed containers'.
+8. **`Slice[T]` gets no constructor**, and needs none. Unlike every other
+   container, its state *is* its underlying type, so the caller already has both
+   spellings natively:
+
+   ```go
+   containers.Slice[int]{1, 2, 3}       // composite literal
+   make(containers.Slice[int], 0, 64)   // sized construction, no API required
+   ```
+
+   That second line matters more than the first: ADR `0006`'s size hint is worth
+   2.7x–3.7x for the map-backed containers and needs a `New*` to carry it, whereas
+   `Slice` gets it from `make` for free. A constructor would add a name and buy
+   nothing. Left open as a future change if a reason appears.
+9. **`SliceView` and `VectorView` keep `PositionValues[P, V]`** rather than a
+   narrower shared interface. Two satisfiers is not yet evidence that the
+   contract is wrong.
 
 ## Implementation order
 
@@ -424,7 +451,8 @@ All three belong in `callsites_test.go` as a stdlib-baseline-first diff.
    exist until step 3. The `Vector` fix falls out of this step —
    `convertedElems` stops holding `v.ValueSlice()` — so land its regression test
    here.
-2. Add `Slice[T]`, its reads, `Set`, and the inner-tier assertions. No `Append`.
+2. Add `Slice[T]`, its reads, `Set(i int, e T)`, and the inner-tier assertions. No
+   `Append` method and no constructor (decisions 7 and 8).
 3. Add `SliceView[NT]` and `ViewSliceWith`, sharing `rawSlice` and the converting
    impl with `VectorView`.
 4. Add `CastSlice` and `CastMap`.
@@ -435,12 +463,12 @@ All three belong in `callsites_test.go` as a stdlib-baseline-first diff.
 
 ## Open
 
-- **Whether `Slice[T]` carries `Set`.** It can — an element write goes through the
-  shared backing array — but `Vector` has no mutation contract at all (ADR `0015`
-  punted one), so `Slice` inherits that gap rather than closing it. The mutation
-  tripwire in `contracts.go` is key-shaped and does not fit either.
-- **Whether `Slice[T]` should be sized-constructed.** ADR `0006`'s size hint is
-  worth 2.7x–3.7x for the map-backed containers; a slice adapter has no
-  constructor at all, since `CastSlice` wraps one the caller already made.
-- **Whether `SliceView` and `VectorView` should share a shape interface** narrower
-  than `PositionValues[P, V]`, now that two view types satisfy it.
+- **A `Slice[T]` constructor**, if a reason ever appears. Decision 8 records why
+  there is none today: `make` and a composite literal both work natively, so there
+  is nothing a `New*` would carry.
+- **`Slice[T]` has no mutation contract**, and neither does `Vector` — ADR `0015`
+  punted one until there was a second mutable sequence, and `Slice` is now that
+  second sequence. So the question `0015` deferred is live again, but it is a
+  question about the *setter* vocabulary across both, which is wider than this ADR
+  and should not be answered inside it. The mutation tripwire in `contracts.go`
+  (`mutatesKeys`/`mutatesKeyValues`, ADR `0022`) is key-shaped and fits neither.
