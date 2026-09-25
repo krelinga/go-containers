@@ -1,11 +1,12 @@
 # 22. Delete the mutation tiers; seal the read tiers
 
-- **Status:** **Proposed.** Do not implement without review. Four of the five
-  open questions are now **settled** (see *What to decide*): the guarantee is
-  worth the plumbing, the token is named `callViewFirst`, `View()` lands with
-  this ADR, and `SortedSetView`'s internal exception stands because it does not
-  reach the exported API. The fifth — a replacement tripwire for the mutator
-  vocabulary — has a recommendation awaiting a ruling.
+- **Status:** **Proposed**, with **all five open questions settled** (see *What
+  to decide*): the guarantee is worth the plumbing, the token is named
+  `callViewFirst`, `View()` lands with this ADR, `SortedSetView`'s internal
+  exception stands because it does not reach the exported API, and the mutator
+  vocabulary keeps a tripwire in unexported form. **Not yet accepted — awaiting a
+  read-through of this ADR before implementation.** *Implementation order* at the
+  end is the plan it would be implemented from.
 - **Date:** 2026-09-25
 - **Evidence:** `experiments/sealing/` (`RESULTS.md`), which also asserts in
   `run.sh` that the sealed assertion still fails to compile.
@@ -287,7 +288,7 @@ rather than a doc comment that does neither.
    why the aliasing warning belongs in a hazard call site rather than a name.
    `View<Container>Identity` is superseded by it.
 4. **Whether a replacement tripwire is wanted** for the mutator vocabulary.
-   **OPEN — recommendation: yes.**
+   **SETTLED: yes, in unexported form.**
 
    Today four assertions at the bottom of `contracts.go` make `go build` fail if a
    container drifts from ADR `0017`'s vocabulary (`Add`/`AddAll`, `Set`/`SetAll`,
@@ -316,7 +317,10 @@ rather than a doc comment that does neither.
 
    The counter-argument is that it re-adds what this ADR deletes. The answer is
    that both properties that made `Mutable*` a problem — exported, and embedding
-   `Keys[K]` — are absent here.
+   `Keys[K]` — are absent here. **Name the pair `mutatesKeys`/`mutatesKeyValues`,
+   not `mutableKeys`/`mutableKeyValues`:** the lowercase near-homographs of the
+   deleted public tiers would read as a rename rather than a deliberately
+   narrowed replacement, and the distinction is the whole point.
 5. **Whether `SortedSetView` is an exception worth keeping.** **SETTLED: keep it,
    because it is invisible.** It holds its container concretely
    (`views.go:135`) rather than through an interface, since its keys never
@@ -332,7 +336,9 @@ rather than a doc comment that does neither.
    to declare the two methods they use; rewrite the `views_test.go` guard as an
    ad-hoc mutator assertion; delete `TestContractSatisfaction` and
    `TestMutableSetSatisfaction`.
-2. Add the unexported tripwire (pending question 4).
+2. Add the unexported `mutatesKeys`/`mutatesKeyValues` tripwire and its four
+   assertions, with a comment stating both invariants it depends on: unexported,
+   and never embedding a read tier.
 3. Add the mirror hierarchy and repoint the view structs' `impl` fields at it.
 4. Seal the read tiers with `callViewFirst`; implement it on the five view types;
    drop the container-side read assertions.
