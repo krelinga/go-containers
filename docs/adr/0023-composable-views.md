@@ -1,7 +1,7 @@
 # 23. Composable views
 
-- **Status:** **Proposed.**
-- **Date:** 2026-09-25
+- **Status:** **Accepted** and **implemented** (2026-09-25).
+- **Date:** 2026-09-25 (accepted and implemented the same day)
 - **Evidence:** `experiments/sealing/` (`RESULTS.md` §3).
 - **Relates to:** ADR `0011` and `0012`, which both recorded *views that compose*
   as an open follow-up; `0012` decision 5 (the constructor shape this changes);

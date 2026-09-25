@@ -14,7 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `map.go` | `Map[K comparable, V any]` | a defined `map[K]V` | `MapView[NK, NV]` |
 | `sortedmap.go` | `SortedMap[K cmp.Ordered, V any]` | sorted slice | `SortedMapView[K, NV]` |
 | `vector.go` | `Vector[T any]` | slice, insertion-ordered (ADR `0015`) | `VectorView[NT]` |
-| — | *(no `Slice` type)* | a plain `[]T` | `VectorView[NT]`, via `ViewSlice` |
+| — | *(no `Slice` type)* — ADR `0016`, reaffirmed by `0023` | a plain `[]T` | `VectorView[NT]`, via `ViewSliceIdentity` / `ViewSliceWith` |
 | `entry.go` | `Entry[S, V]` | the pair type bulk operations carry | — |
 | `contracts.go` | the shape interfaces below, sealed (ADR `0022`) | — | — |
 | `views.go` | the view structs and their constructors | — | — |
@@ -63,8 +63,8 @@ would reopen the hole completely.
 its own module). **Check an ADR's status before treating it as binding.** `0014`
 is **Rejected and superseded by `0018`**; `0020` is **Abandoned** (its problem was
 solved by `0021`, its solutions cost the zero-value rule for no measured gain);
-`0010`, `0019`, `0021` and `0023` are **Proposed** and describe nothing that
-exists in code. The rest are Accepted, `0022` most recently. `0017` is Accepted **as proposal D** while
+`0010`, `0019` and `0021` are **Proposed** and describe nothing that exists in
+code. The rest are Accepted, `0023` most recently. `0017` is Accepted **as proposal D** while
 containing three rejected proposals in full, and `0018` is Accepted **as option
 (b)** and likewise keeps its rejected options.
 
@@ -140,9 +140,17 @@ These are first because they are the ones that get re-derived wrongly.
   assertions at the bottom of `contracts.go` are how you find out. Views satisfy
   the read tiers and must **never** satisfy a mutation tier.
 - **Every container has a view, and a new one is not finished without it.** Build
-  one with `c.View()` for the identity view, or `View<Container>(c, viewer)` when a
-  viewer converts. The `View<Container>Identity` constructors are gone (ADR
+  one with `c.View()` for the identity view, or `View<Container>With(v, viewer)`
+  when a viewer converts. The `View<Container>Identity` constructors are gone (ADR
   `0022`); `ViewSliceIdentity` survives because a `[]T` has no receiver.
+- **A converting constructor takes a VIEW, which is what makes views compose**
+  (ADR `0023`). `ViewVectorWith(v.View(), viewer)` converts a container;
+  `ViewVectorWith(existingView, viewer)` narrows a view its holder cannot trace
+  back to the container. Each layer costs ~160 ns and 3 allocations **per
+  iteration call and nothing per element**, so depth is cheap to walk; `Each` (ADR
+  `0021`) removes the per-layer allocations. `ViewSliceWith` is the one with a
+  `[]T` source, because a builtin has no `View()` to call — the language, not an
+  exception.
 - **A view is two words: `struct{ impl <inner tier> }`** — 16 B, measured, for
   four of the five. `SortedSetView` is the exception at 8 B: it holds its
   `SortedSet` directly, because `cmp.Ordered` keys never convert so there is no
@@ -156,15 +164,27 @@ These are first because they are the ones that get re-derived wrongly.
   `VectorView.At`, which panics, because an index is out of range for anything
   empty.
 - **A plain `[]T` has a view too, and it views a *value*** (ADR `0016`).
-  `ViewSlice(s)` takes a slice, not `*[]T`: an element write shows through and an
-  **append does not**, because the append made a different slice. Reach for
-  `Vector` when growth must be visible to every holder.
+  `ViewSliceIdentity(s)` takes a slice, not `*[]T`: an element write shows through
+  and an **append does not**, because the append made a different slice. Nor does a
+  reslice, **in either direction** — after `s = s[:1]` the view still reads the old
+  length, so it can be longer than its source. **This is the only view that can go
+  stale**: every other holds a map header or a `*state` pointer and re-reads.
+  `TestSliceViewObservesTheHeaderNotTheVariable` and
+  `TestContainerViewsTrackTheirSource` assert both halves. A `*[]T` source would
+  fix it and was rejected (ADR `0023`): it follows the *variable*, so it would
+  track wholesale reassignment, which no other view does. Reach for `Vector` when
+  growth must be visible to every holder.
 - **`c.View()` is the identity view; a conversion is named** (ADR `0022`,
   revisiting `0012`). `View()` is free — the container is one word, so it boxes
   into the view's interface field without allocating — and it replaced the
   `View<Container>Identity` constructors. `ViewSliceIdentity` is the one that
   stayed a function: a plain `[]T` has no methods to hang one on. A *converting*
-  view still names its conversion: `ViewMapSet(s, viewer)`.
+  view still names its conversion, and now says so: `ViewMapSetWith(s.View(),
+  viewer)` (ADR `0023`).
+- **`AsMap(m)` converts a `map[K]V` with its type arguments inferred** (ADR
+  `0023`). A *conversion* cannot infer them — `Map[string, int](m)` spells both,
+  always — and a function call can. Free, and it is the same map, not a copy. Named
+  `As` rather than `Cast` because Go calls these conversions.
 - **A view is read-only in STRUCTURE, never in contents.** Through a sealed,
   un-castable view over a container of pointers, the pointed-to values stay
   mutable. Go cannot express "contains no pointers" as a constraint — not with

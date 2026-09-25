@@ -114,3 +114,17 @@ func (m Map[K, V]) AllSlice() []Entry[K, V] {
 
 // Clone returns an independent copy.
 func (m Map[K, V]) Clone() Map[K, V] { return maps.Clone(m) }
+
+// AsMap converts a map[K]V to a Map[K, V] with its type arguments inferred.
+//
+// The conversion itself is free -- a defined map type has the same
+// representation as its underlying type -- and the call inlines away. It exists
+// because a CONVERSION cannot infer its type arguments and a function call can:
+//
+//	containers.Map[string, int](m)   // both arguments, always
+//	containers.AsMap(m)              // inferred
+//
+// Named As rather than Cast because Go's spec calls these conversions, and
+// "cast" carries an unchecked-reinterpretation connotation that does not apply
+// (ADR 0023).
+func AsMap[K comparable, V any](m map[K]V) Map[K, V] { return Map[K, V](m) }

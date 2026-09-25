@@ -60,9 +60,13 @@ import (
 // MapSetView is a read-only view of a MapSet, with keys converted by a viewer.
 type MapSetView[NT any] struct{ impl innerKeys[NT] }
 
-// ViewMapSet returns a view of s whose keys are converted by viewer.
-func ViewMapSet[T comparable, NT any](s MapSet[T], viewer CanViewMapSet[T, NT]) MapSetView[NT] {
-	return MapSetView[NT]{impl: convertedKeys[T, NT]{s, viewer}}
+// ViewMapSetWith returns a view of v whose keys are converted by viewer.
+//
+// The source is a view, so views compose: pass s.View() to convert a container,
+// or an existing MapSetView to narrow one further (ADR 0023). Each layer costs
+// ~160 ns and 3 allocations per iteration call, and nothing per element.
+func ViewMapSetWith[T, NT any](v MapSetView[T], viewer CanViewMapSet[T, NT]) MapSetView[NT] {
+	return MapSetView[NT]{impl: convertedKeys[T, NT]{v, viewer}}
 }
 
 // View returns a read-only view of s that converts nothing.
@@ -112,24 +116,29 @@ func (v MapSetView[NT]) KeySlice() []NT {
 	return v.impl.KeySlice()
 }
 
-// convertedKeys adapts a MapSet through a key viewer. It satisfies Keys[NT]
-// and lives behind the view's single pointer.
-type convertedKeys[T comparable, NT any] struct {
-	s      MapSet[T]
+// convertedKeys adapts a MapSetView through a key viewer (ADR 0023).
+//
+// The source is a VIEW, not the container: that is what makes views composable,
+// and it costs nothing per element -- the extra hop is one inlinable static call
+// when the iterator is obtained, not a range-over-func layer. T is `any` rather
+// than `comparable` for the same reason: membership goes through the view's Has
+// rather than a map lookup here.
+type convertedKeys[T, NT any] struct {
+	src    MapSetView[T]
 	viewer CanViewMapSet[T, NT]
 }
 
-func (c convertedKeys[T, NT]) Len() int { return c.s.Len() }
+func (c convertedKeys[T, NT]) Len() int { return c.src.Len() }
 
 func (c convertedKeys[T, NT]) Has(nt NT) bool {
 	t, ok := c.viewer.FromKeyView(nt)
-	return ok && c.s.Has(t)
+	return ok && c.src.Has(t)
 }
 
 func (c convertedKeys[T, NT]) Keys() iter.Seq[NT] {
-	s, vw := c.s, c.viewer
+	src, vw := c.src, c.viewer
 	return func(yield func(NT) bool) {
-		for t := range s.Keys() {
+		for t := range src.Keys() {
 			if !yield(vw.ToKeyView(t)) {
 				return
 			}
@@ -138,8 +147,8 @@ func (c convertedKeys[T, NT]) Keys() iter.Seq[NT] {
 }
 
 func (c convertedKeys[T, NT]) KeySlice() []NT {
-	out := make([]NT, 0, c.s.Len())
-	for t := range c.s.Keys() {
+	out := make([]NT, 0, c.src.Len())
+	for t := range c.src.Keys() {
 		out = append(out, c.viewer.ToKeyView(t))
 	}
 	return out
@@ -186,9 +195,12 @@ func (v SortedSetView[T]) RangeKeys(lo, hi T) iter.Seq[T] { return v.s.RangeKeys
 // MapView is a read-only view of a Map, with keys and values converted.
 type MapView[NK, NV any] struct{ impl innerKeyValues[NK, NV] }
 
-// ViewMap returns a view of m whose entries are converted by viewer.
-func ViewMap[K comparable, V, NK, NV any](m Map[K, V], viewer CanViewMap[K, NK, V, NV]) MapView[NK, NV] {
-	return MapView[NK, NV]{impl: convertedPairs[K, V, NK, NV]{m, viewer}}
+// ViewMapWith returns a view of v whose entries are converted by viewer.
+//
+// The source is a view, so views compose (ADR 0023): pass m.View() to convert a
+// container, or an existing MapView to narrow one further.
+func ViewMapWith[K, V, NK, NV any](v MapView[K, V], viewer CanViewMap[K, NK, V, NV]) MapView[NK, NV] {
+	return MapView[NK, NV]{impl: convertedPairs[K, V, NK, NV]{v, viewer}}
 }
 
 // View returns a read-only view of m that converts nothing. Free, as
@@ -275,17 +287,18 @@ func (v MapView[NK, NV]) AllSlice() []Entry[NK, NV] {
 	return v.impl.AllSlice()
 }
 
-// convertedPairs adapts a Map through a key/value viewer.
-type convertedPairs[K comparable, V, NK, NV any] struct {
-	m      Map[K, V]
+// convertedPairs adapts a MapView through a key/value viewer (ADR 0023). The
+// source is a view, so these compose; see convertedKeys for why K is `any`.
+type convertedPairs[K, V, NK, NV any] struct {
+	src    MapView[K, V]
 	viewer CanViewMap[K, NK, V, NV]
 }
 
-func (c convertedPairs[K, V, NK, NV]) Len() int { return c.m.Len() }
+func (c convertedPairs[K, V, NK, NV]) Len() int { return c.src.Len() }
 
 func (c convertedPairs[K, V, NK, NV]) Has(nk NK) bool {
 	k, ok := c.viewer.FromKeyView(nk)
-	return ok && c.m.Has(k)
+	return ok && c.src.Has(k)
 }
 
 func (c convertedPairs[K, V, NK, NV]) Get(nk NK) (NV, bool) {
@@ -294,7 +307,7 @@ func (c convertedPairs[K, V, NK, NV]) Get(nk NK) (NV, bool) {
 		var z NV
 		return z, false
 	}
-	v, ok := c.m.Get(k)
+	v, ok := c.src.Get(k)
 	if !ok {
 		var z NV
 		return z, false
@@ -303,9 +316,9 @@ func (c convertedPairs[K, V, NK, NV]) Get(nk NK) (NV, bool) {
 }
 
 func (c convertedPairs[K, V, NK, NV]) Keys() iter.Seq[NK] {
-	m, vw := c.m, c.viewer
+	src, vw := c.src, c.viewer
 	return func(yield func(NK) bool) {
-		for k := range m.Keys() {
+		for k := range src.Keys() {
 			if !yield(vw.ToKeyView(k)) {
 				return
 			}
@@ -314,9 +327,9 @@ func (c convertedPairs[K, V, NK, NV]) Keys() iter.Seq[NK] {
 }
 
 func (c convertedPairs[K, V, NK, NV]) Values() iter.Seq[NV] {
-	m, vw := c.m, c.viewer
+	src, vw := c.src, c.viewer
 	return func(yield func(NV) bool) {
-		for v := range m.Values() {
+		for v := range src.Values() {
 			if !yield(vw.ToValueView(v)) {
 				return
 			}
@@ -325,9 +338,9 @@ func (c convertedPairs[K, V, NK, NV]) Values() iter.Seq[NV] {
 }
 
 func (c convertedPairs[K, V, NK, NV]) All() iter.Seq2[NK, NV] {
-	m, vw := c.m, c.viewer
+	src, vw := c.src, c.viewer
 	return func(yield func(NK, NV) bool) {
-		for k, v := range m.All() {
+		for k, v := range src.All() {
 			if !yield(vw.ToKeyView(k), vw.ToValueView(v)) {
 				return
 			}
@@ -336,24 +349,24 @@ func (c convertedPairs[K, V, NK, NV]) All() iter.Seq2[NK, NV] {
 }
 
 func (c convertedPairs[K, V, NK, NV]) KeySlice() []NK {
-	out := make([]NK, 0, c.m.Len())
-	for k := range c.m.Keys() {
+	out := make([]NK, 0, c.src.Len())
+	for k := range c.src.Keys() {
 		out = append(out, c.viewer.ToKeyView(k))
 	}
 	return out
 }
 
 func (c convertedPairs[K, V, NK, NV]) ValueSlice() []NV {
-	out := make([]NV, 0, c.m.Len())
-	for v := range c.m.Values() {
+	out := make([]NV, 0, c.src.Len())
+	for v := range c.src.Values() {
 		out = append(out, c.viewer.ToValueView(v))
 	}
 	return out
 }
 
 func (c convertedPairs[K, V, NK, NV]) AllSlice() []Entry[NK, NV] {
-	out := make([]Entry[NK, NV], 0, c.m.Len())
-	for k, v := range c.m.All() {
+	out := make([]Entry[NK, NV], 0, c.src.Len())
+	for k, v := range c.src.All() {
 		out = append(out, Entry[NK, NV]{c.viewer.ToKeyView(k), c.viewer.ToValueView(v)})
 	}
 	return out
@@ -370,9 +383,13 @@ type SortedMapView[K cmp.Ordered, NV any] struct {
 	impl innerSortedKeyValues[K, NV]
 }
 
-// ViewSortedMap returns a view of m whose values are converted by viewer.
-func ViewSortedMap[K cmp.Ordered, V, NV any](m SortedMap[K, V], viewer CanViewSortedMap[V, NV]) SortedMapView[K, NV] {
-	return SortedMapView[K, NV]{impl: convertedValues[K, V, NV]{m, viewer}}
+// ViewSortedMapWith returns a view of v whose values are converted by viewer.
+//
+// The source is a view, so views compose (ADR 0023): pass m.View() to convert a
+// container, or an existing SortedMapView to narrow one further. Keys are not
+// converted at any depth -- see ADR 0012 section 3.
+func ViewSortedMapWith[K cmp.Ordered, V, NV any](v SortedMapView[K, V], viewer CanViewSortedMap[V, NV]) SortedMapView[K, NV] {
+	return SortedMapView[K, NV]{impl: convertedValues[K, V, NV]{v, viewer}}
 }
 
 // View returns a read-only view of m that converts nothing. Free, as
@@ -542,26 +559,28 @@ func (v SortedMapView[K, NV]) RangeKeys(lo, hi K) iter.Seq[K] {
 	return v.impl.RangeKeys(lo, hi)
 }
 
-// convertedValues adapts a SortedMap through a value viewer. Keys pass through.
+// convertedValues adapts a SortedMapView through a value viewer; keys pass
+// through (ADR 0012 section 3). The source is a view, so these compose (ADR 0023).
+// K stays cmp.Ordered because SortedMapView requires it.
 type convertedValues[K cmp.Ordered, V, NV any] struct {
-	m      SortedMap[K, V]
+	src    SortedMapView[K, V]
 	viewer CanViewSortedMap[V, NV]
 }
 
-func (c convertedValues[K, V, NV]) Len() int               { return c.m.Len() }
-func (c convertedValues[K, V, NV]) Has(k K) bool           { return c.m.Has(k) }
-func (c convertedValues[K, V, NV]) Keys() iter.Seq[K]      { return c.m.Keys() }
-func (c convertedValues[K, V, NV]) KeySlice() []K          { return c.m.KeySlice() }
-func (c convertedValues[K, V, NV]) MinKey() (K, bool)      { return c.m.MinKey() }
-func (c convertedValues[K, V, NV]) MaxKey() (K, bool)      { return c.m.MaxKey() }
-func (c convertedValues[K, V, NV]) FloorKey(k K) (K, bool) { return c.m.FloorKey(k) }
-func (c convertedValues[K, V, NV]) CeilKey(k K) (K, bool)  { return c.m.CeilKey(k) }
+func (c convertedValues[K, V, NV]) Len() int               { return c.src.Len() }
+func (c convertedValues[K, V, NV]) Has(k K) bool           { return c.src.Has(k) }
+func (c convertedValues[K, V, NV]) Keys() iter.Seq[K]      { return c.src.Keys() }
+func (c convertedValues[K, V, NV]) KeySlice() []K          { return c.src.KeySlice() }
+func (c convertedValues[K, V, NV]) MinKey() (K, bool)      { return c.src.MinKey() }
+func (c convertedValues[K, V, NV]) MaxKey() (K, bool)      { return c.src.MaxKey() }
+func (c convertedValues[K, V, NV]) FloorKey(k K) (K, bool) { return c.src.FloorKey(k) }
+func (c convertedValues[K, V, NV]) CeilKey(k K) (K, bool)  { return c.src.CeilKey(k) }
 func (c convertedValues[K, V, NV]) RangeKeys(lo, hi K) iter.Seq[K] {
-	return c.m.RangeKeys(lo, hi)
+	return c.src.RangeKeys(lo, hi)
 }
 
 func (c convertedValues[K, V, NV]) Get(k K) (NV, bool) {
-	v, ok := c.m.Get(k)
+	v, ok := c.src.Get(k)
 	if !ok {
 		var z NV
 		return z, false
@@ -570,9 +589,9 @@ func (c convertedValues[K, V, NV]) Get(k K) (NV, bool) {
 }
 
 func (c convertedValues[K, V, NV]) Values() iter.Seq[NV] {
-	m, vw := c.m, c.viewer
+	src, vw := c.src, c.viewer
 	return func(yield func(NV) bool) {
-		for v := range m.Values() {
+		for v := range src.Values() {
 			if !yield(vw.ToValueView(v)) {
 				return
 			}
@@ -581,9 +600,9 @@ func (c convertedValues[K, V, NV]) Values() iter.Seq[NV] {
 }
 
 func (c convertedValues[K, V, NV]) All() iter.Seq2[K, NV] {
-	m, vw := c.m, c.viewer
+	src, vw := c.src, c.viewer
 	return func(yield func(K, NV) bool) {
-		for k, v := range m.All() {
+		for k, v := range src.All() {
 			if !yield(k, vw.ToValueView(v)) {
 				return
 			}
@@ -592,25 +611,25 @@ func (c convertedValues[K, V, NV]) All() iter.Seq2[K, NV] {
 }
 
 func (c convertedValues[K, V, NV]) ValueSlice() []NV {
-	out := make([]NV, 0, c.m.Len())
-	for v := range c.m.Values() {
+	out := make([]NV, 0, c.src.Len())
+	for v := range c.src.Values() {
 		out = append(out, c.viewer.ToValueView(v))
 	}
 	return out
 }
 
 func (c convertedValues[K, V, NV]) AllSlice() []Entry[K, NV] {
-	out := make([]Entry[K, NV], 0, c.m.Len())
-	for k, v := range c.m.All() {
+	out := make([]Entry[K, NV], 0, c.src.Len())
+	for k, v := range c.src.All() {
 		out = append(out, Entry[K, NV]{k, c.viewer.ToValueView(v)})
 	}
 	return out
 }
 
-func (c convertedValues[K, V, NV]) Min() (K, NV, bool)      { return c.conv(c.m.Min()) }
-func (c convertedValues[K, V, NV]) Max() (K, NV, bool)      { return c.conv(c.m.Max()) }
-func (c convertedValues[K, V, NV]) Floor(k K) (K, NV, bool) { return c.conv(c.m.Floor(k)) }
-func (c convertedValues[K, V, NV]) Ceil(k K) (K, NV, bool)  { return c.conv(c.m.Ceil(k)) }
+func (c convertedValues[K, V, NV]) Min() (K, NV, bool)      { return c.conv(c.src.Min()) }
+func (c convertedValues[K, V, NV]) Max() (K, NV, bool)      { return c.conv(c.src.Max()) }
+func (c convertedValues[K, V, NV]) Floor(k K) (K, NV, bool) { return c.conv(c.src.Floor(k)) }
+func (c convertedValues[K, V, NV]) Ceil(k K) (K, NV, bool)  { return c.conv(c.src.Ceil(k)) }
 
 func (c convertedValues[K, V, NV]) conv(k K, v V, ok bool) (K, NV, bool) {
 	if !ok {
@@ -622,9 +641,9 @@ func (c convertedValues[K, V, NV]) conv(k K, v V, ok bool) (K, NV, bool) {
 }
 
 func (c convertedValues[K, V, NV]) Range(lo, hi K) iter.Seq2[K, NV] {
-	m, vw := c.m, c.viewer
+	src, vw := c.src, c.viewer
 	return func(yield func(K, NV) bool) {
-		for k, v := range m.Range(lo, hi) {
+		for k, v := range src.Range(lo, hi) {
 			if !yield(k, vw.ToValueView(v)) {
 				return
 			}
@@ -643,9 +662,16 @@ func (c convertedValues[K, V, NV]) Range(lo, hi K) iter.Seq2[K, NV] {
 // VectorView is a read-only view of a Vector, with elements converted.
 type VectorView[NT any] struct{ impl innerPositionValues[int, NT] }
 
-// ViewVector returns a view of v whose elements are converted by viewer.
-func ViewVector[T, NT any](v Vector[T], viewer CanViewVector[T, NT]) VectorView[NT] {
-	return VectorView[NT]{impl: convertedElems[T, NT]{v.ValueSlice(), viewer}}
+// ViewVectorWith returns a view of v whose elements are converted by viewer.
+//
+// The source is a view, so views compose (ADR 0023): pass v.View() to convert a
+// Vector, ViewSliceIdentity(s) to convert a plain slice, or an existing
+// VectorView to narrow one further.
+//
+// It also tracks growth, which the old ViewVector did not: it held
+// v.ValueSlice() and so froze at construction. See convertedElems.
+func ViewVectorWith[T, NT any](v VectorView[T], viewer CanViewVector[T, NT]) VectorView[NT] {
+	return VectorView[NT]{impl: convertedElems[T, NT]{v, viewer}}
 }
 
 // View returns a read-only view of v that converts nothing. Free, as
@@ -665,8 +691,11 @@ func (v Vector[T]) View() VectorView[T] {
 // It views a VALUE, not a variable (ADR 0016): an element write is visible
 // through the view and an append is not, because the append made a different
 // slice the view was never given. Reach for Vector when growth must be visible.
-func ViewSlice[T, NT any](s []T, viewer CanViewSlice[T, NT]) VectorView[NT] {
-	return VectorView[NT]{impl: convertedElems[T, NT]{s, viewer}}
+// It keeps a []T source where every other converting constructor takes a view,
+// because a []T has no View() method to call -- a builtin is not this package's
+// type to extend. That is the language rather than an exception (ADR 0023).
+func ViewSliceWith[T, NT any](s []T, viewer CanViewSlice[T, NT]) VectorView[NT] {
+	return VectorView[NT]{impl: convertedElems[T, NT]{ViewSliceIdentity(s), viewer}}
 }
 
 // ViewSliceIdentity returns a view of s that converts nothing.
@@ -782,19 +811,29 @@ func (r rawSlice[T]) AllSlice() []Entry[int, T] {
 	return out
 }
 
-// convertedElems adapts a []T through an element viewer.
+// convertedElems adapts a VectorView through an element viewer (ADR 0023).
+//
+// The source is a VIEW, not a []T. That is what fixes the defect ADR 0023
+// records: the old form held v.ValueSlice(), so a converting Vector view
+// SNAPSHOTTED at construction and stopped tracking appends while the identity
+// view tracked them -- contradicting Vector's contract (ADR 0015) and View's own
+// doc comment. Holding the view walks it live.
+//
+// A plain []T reaches this through ViewSliceWith, which wraps the slice in an
+// identity view first; that keeps a slice view's header semantics unchanged
+// (ADR 0016 decision 2).
 type convertedElems[T, NT any] struct {
-	s      []T
+	src    VectorView[T]
 	viewer interface{ ToValueView(T) NT }
 }
 
-func (c convertedElems[T, NT]) Len() int    { return len(c.s) }
-func (c convertedElems[T, NT]) At(i int) NT { return c.viewer.ToValueView(c.s[i]) }
+func (c convertedElems[T, NT]) Len() int    { return c.src.Len() }
+func (c convertedElems[T, NT]) At(i int) NT { return c.viewer.ToValueView(c.src.At(i)) }
 
 func (c convertedElems[T, NT]) Values() iter.Seq[NT] {
-	s, vw := c.s, c.viewer
+	src, vw := c.src, c.viewer
 	return func(yield func(NT) bool) {
-		for _, e := range s {
+		for e := range src.Values() {
 			if !yield(vw.ToValueView(e)) {
 				return
 			}
@@ -802,21 +841,12 @@ func (c convertedElems[T, NT]) Values() iter.Seq[NT] {
 	}
 }
 
-func (c convertedElems[T, NT]) Positions() iter.Seq[int] {
-	s := c.s
-	return func(yield func(int) bool) {
-		for i := range s {
-			if !yield(i) {
-				return
-			}
-		}
-	}
-}
+func (c convertedElems[T, NT]) Positions() iter.Seq[int] { return c.src.Positions() }
 
 func (c convertedElems[T, NT]) All() iter.Seq2[int, NT] {
-	s, vw := c.s, c.viewer
+	src, vw := c.src, c.viewer
 	return func(yield func(int, NT) bool) {
-		for i, e := range s {
+		for i, e := range src.All() {
 			if !yield(i, vw.ToValueView(e)) {
 				return
 			}
@@ -825,24 +855,18 @@ func (c convertedElems[T, NT]) All() iter.Seq2[int, NT] {
 }
 
 func (c convertedElems[T, NT]) ValueSlice() []NT {
-	out := make([]NT, 0, len(c.s))
-	for _, e := range c.s {
+	out := make([]NT, 0, c.src.Len())
+	for e := range c.src.Values() {
 		out = append(out, c.viewer.ToValueView(e))
 	}
 	return out
 }
 
-func (c convertedElems[T, NT]) PositionSlice() []int {
-	out := make([]int, len(c.s))
-	for i := range out {
-		out[i] = i
-	}
-	return out
-}
+func (c convertedElems[T, NT]) PositionSlice() []int { return c.src.PositionSlice() }
 
 func (c convertedElems[T, NT]) AllSlice() []Entry[int, NT] {
-	out := make([]Entry[int, NT], 0, len(c.s))
-	for i, e := range c.s {
+	out := make([]Entry[int, NT], 0, c.src.Len())
+	for i, e := range c.src.All() {
 		out = append(out, Entry[int, NT]{i, c.viewer.ToValueView(e)})
 	}
 	return out

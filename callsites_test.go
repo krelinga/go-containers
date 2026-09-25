@@ -1123,3 +1123,100 @@ func TestSealDoesNotFreezeContents(t *testing.T) {
 	}
 	t.Logf("structure sealed, contents not: %q", held.Name)
 }
+
+// ---------------------------------------------------------------------------
+// ADR 0023: composable views, and the Vector defect the change repairs.
+// ---------------------------------------------------------------------------
+
+type doubled struct{}
+
+func (doubled) ToValueView(n int) int { return n * 2 }
+
+type plusOne struct{}
+
+func (plusOne) ToValueView(n int) int { return n + 1 }
+
+// THE REGRESSION TEST. Before ADR 0023, ViewVector held v.ValueSlice(), so a
+// CONVERTING Vector view snapshotted at construction and stopped tracking
+// appends while the identity view kept tracking them. That contradicted Vector's
+// contract (ADR 0015) and View's own doc comment, and nothing caught it.
+func TestConvertingVectorViewTracksGrowth(t *testing.T) {
+	v := containers.NewVector(1, 2)
+	conv := containers.ViewVectorWith(v.View(), doubled{})
+	ident := v.View()
+
+	v.Append(3)
+
+	if got := conv.Len(); got != 3 {
+		t.Errorf("converting view snapshotted instead of tracking growth: Len = %d, want 3", got)
+	}
+	if got := ident.Len(); got != 3 {
+		t.Errorf("identity view: Len = %d, want 3", got)
+	}
+	if got := conv.At(2); got != 6 {
+		t.Errorf("converting view At(2) = %d, want 6", got)
+	}
+}
+
+// Views compose: the second function could not be written before ADR 0023,
+// because a converting constructor took the container and a view's holder cannot
+// reach it (ADR 0022's seal).
+func narrowFurther(v containers.VectorView[int]) containers.VectorView[int] {
+	return containers.ViewVectorWith(v, plusOne{})
+}
+
+func TestViewsCompose(t *testing.T) {
+	v := containers.NewVector(1, 2, 3)
+
+	once := containers.ViewVectorWith(v.View(), doubled{}) // 2, 4, 6
+	twice := narrowFurther(once)                           // 3, 5, 7
+
+	if got := twice.ValueSlice(); !slices.Equal(got, []int{3, 5, 7}) {
+		t.Errorf("composed view = %v, want [3 5 7]", got)
+	}
+
+	// Depth is not special: a third layer reads the same way.
+	thrice := containers.ViewVectorWith(twice, plusOne{}) // 4, 6, 8
+	if got := thrice.ValueSlice(); !slices.Equal(got, []int{4, 6, 8}) {
+		t.Errorf("3-deep view = %v, want [4 6 8]", got)
+	}
+
+	// And a composed view still cannot be cast back to anything writable.
+	if _, ok := any(thrice).(containers.Vector[int]); ok {
+		t.Error("composed view was assertable back to its container")
+	}
+}
+
+// A plain []T composes too, entering through ViewSliceWith -- the one converting
+// constructor with a non-view source, because a builtin has no View() method.
+func TestSliceComposesThroughViewSliceWith(t *testing.T) {
+	s := []int{1, 2, 3}
+	once := containers.ViewSliceWith(s, doubled{})
+	twice := containers.ViewVectorWith(once, plusOne{})
+	if got := twice.ValueSlice(); !slices.Equal(got, []int{3, 5, 7}) {
+		t.Errorf("composed slice view = %v, want [3 5 7]", got)
+	}
+}
+
+// AsMap exists because a conversion cannot infer its type arguments.
+func TestAsMapInfers(t *testing.T) {
+	raw := map[string]int{"a": 1, "b": 2}
+
+	withConversion := containers.Map[string, int](raw) // both arguments, always
+	inferred := containers.AsMap(raw)                  // inferred
+
+	if withConversion.Len() != inferred.Len() {
+		t.Errorf("AsMap disagreed with the conversion: %d vs %d",
+			inferred.Len(), withConversion.Len())
+	}
+	// It is the same map, not a copy.
+	inferred.Set("c", 3)
+	if len(raw) != 3 {
+		t.Errorf("AsMap copied instead of converting: len(raw) = %d, want 3", len(raw))
+	}
+	if n := testing.AllocsPerRun(200, func() { sinkAsMap = containers.AsMap(raw) }); n != 0 {
+		t.Errorf("AsMap allocated %.1f times, want 0", n)
+	}
+}
+
+var sinkAsMap containers.Map[string, int]

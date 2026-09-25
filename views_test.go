@@ -83,7 +83,7 @@ func TestViewConvertsKeys(t *testing.T) {
 	d.Set(k, &item{Name: "payload"})
 
 	vw := itemViewer{itemKeys: itemKeys{known: map[string]*item{"alpha": k}}}
-	var v containers.MapView[string, itemView] = containers.ViewMap(d, vw)
+	var v containers.MapView[string, itemView] = containers.ViewMapWith(d.View(), vw)
 
 	for gotKey, gotVal := range v.All() {
 		if gotKey != "alpha" {
@@ -102,7 +102,7 @@ func TestFromKeyViewFailureIsAMiss(t *testing.T) {
 	d.Set(k, &item{Name: "payload"})
 
 	vw := itemViewer{itemKeys: itemKeys{known: map[string]*item{"alpha": k}}}
-	v := containers.ViewMap(d, vw)
+	v := containers.ViewMapWith(d.View(), vw)
 
 	if _, ok := v.Get("alpha"); !ok {
 		t.Error("a convertible, present key should hit")
@@ -117,7 +117,7 @@ func TestFromKeyViewFailureIsAMiss(t *testing.T) {
 func TestMissDoesNotConvert(t *testing.T) {
 	d := containers.NewSortedMap[int, *item]()
 	called := false
-	v := containers.ViewSortedMap(d, valueCounter{&called})
+	v := containers.ViewSortedMapWith(d.View(), valueCounter{&called})
 	if _, ok := v.Get(99); ok {
 		t.Error("empty dict should miss")
 	}
@@ -136,7 +136,7 @@ func TestSortedViewsConvertValuesOnly(t *testing.T) {
 	sd := containers.NewSortedMap[int, *item]()
 	sd.Set(1, &item{Name: "one"})
 	sd.Set(3, &item{Name: "three"})
-	v := containers.ViewSortedMap(sd, itemValues{})
+	v := containers.ViewSortedMapWith(sd.View(), itemValues{})
 
 	// Ordered lookups take and return the container's own key type: no
 	// conversion, so no order-preservation question arises.
@@ -266,7 +266,7 @@ func (itemValuesOnly) ToValueView(i *item) itemView { return itemView{i} }
 
 func TestIndexedViewConvertsElements(t *testing.T) {
 	v := containers.NewVector(&item{Name: "first"}, &item{Name: "second"})
-	view := containers.ViewVector(v, itemValuesOnly{})
+	view := containers.ViewVectorWith(v.View(), itemValuesOnly{})
 
 	if view.Len() != 2 {
 		t.Errorf("Len = %d, want 2", view.Len())
@@ -339,7 +339,7 @@ func TestZeroVectorViewReadsAsEmpty(t *testing.T) {
 
 func TestSliceViewConvertsElements(t *testing.T) {
 	s := []*item{{Name: "first"}, {Name: "second"}}
-	view := containers.ViewSlice(s, itemValuesOnly{})
+	view := containers.ViewSliceWith(s, itemValuesOnly{})
 
 	if view.Len() != 2 {
 		t.Errorf("Len = %d, want 2", view.Len())
