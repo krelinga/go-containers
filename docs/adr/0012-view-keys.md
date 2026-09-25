@@ -1,15 +1,21 @@
 # 12. Converting keys through a view
 
-- **Status:** Accepted. Not yet implemented, so this constrains the change
-  rather than describing it.
+- **Status:** Accepted, and **partly superseded**. Decision 5 (*no `View`
+  method*) was **reversed by ADR `0022`**; decisions 1, 2, 3, 4 and 6 stand and
+  are implemented. The "not yet implemented" note this ADR carried is long stale:
+  the viewer families and the both-directions key conversion shipped with ADR
+  `0018`.
 - **Date:** 2026-09-07
 - **Evidence:** `experiments/viewkeys/` (`RESULTS.md`)
 - **Relates to:** ADR `0011` (views project values only — this closes the
   follow-up it recorded), `0008` (the contract layers, whose constraints this
   relaxes), `0003` (whose `SortedDictFunc` follow-up would reopen decision 3).
 - **Supersedes:** ADR `0011`'s decision that every container has a `View` method
-  returning the identity view. See decision 5. ADR `0011`'s rule that **every
-  container must have a view** survives unchanged; only its shape changes.
+  returning the identity view. See decision 5 — **and note that ADR `0022` has
+  since reinstated it**, so on this one point `0011` was right and this ADR was
+  wrong. ADR `0011`'s rule that **every container must have a view** survives
+  unchanged throughout.
+- **Partly superseded by:** ADR `0022` (decision 5 only).
 
 ## Context
 
@@ -151,6 +157,32 @@ field is already an indirect call and an itab lookup adds nothing measurable. An
 interface field also composes by embedding, which a struct of functions does not.
 
 ### 5. No `View` method; every view is constructed explicitly
+
+> **REVERSED by ADR `0022`.** `c.View()` exists again on every container, and the
+> `View<Container>Identity` constructors are gone. `ViewSliceIdentity` is the
+> only survivor, because a plain `[]T` has no receiver to hang a method on.
+> Converting views keep their named constructors exactly as specified below, so
+> the half of this decision that says *a conversion must be named* stands; only
+> the half that refuses a spelling for its absence is gone.
+>
+> Two things changed the answer. First, **sealing the read shape interfaces made
+> a view mandatory at every read-only boundary** — a container no longer fits one
+> — so the terseness of the identity spelling stopped being a convenience and
+> became load-bearing.
+>
+> Second, and more to the point, **the argument below overstates what `Identity`
+> bought.** It claims a caller writing `Identity` "has stated that identity is
+> the choice". But the choice that actually matters for a `Map[K, *V]` is not
+> whether a *conversion* is applied — it is whether the values are **aliased**,
+> and `ViewMapIdentity(m)` never warned about that either. The word named the
+> absence of conversion, not the presence of aliasing, so the thinking it was
+> supposed to prompt was not prompted by it. ADR `0022` puts that warning where
+> it can actually fire: a compiled call site
+> (`TestSealDoesNotFreezeContents`) plus the caveat in each `View` doc comment.
+>
+> What remains true is the *instinct*: a bare `View()` does read as "give me a
+> view" with no hint that key and value handling is a dimension. That is why the
+> converting constructors were not collapsed into it.
 
 ADR `0011` gave each container a `View()` method returning the identity view.
 **That is withdrawn.** `View()` reads as "give me a view" with no hint that key

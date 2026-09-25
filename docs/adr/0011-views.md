@@ -1,7 +1,14 @@
 # 11. How a read-only view is expressed
 
-- **Status:** Accepted. Not yet implemented, so this constrains the change
-  rather than describing it.
+- **Status:** Accepted, and **partly superseded**. The `View()` method specified
+  here was withdrawn by ADR `0012` (decision 5) and then **reinstated by ADR
+  `0022`** — so the shape below is right again, though its receivers and names are
+  not: views are values rather than pointers (ADR `0018`) and the container names
+  changed twice. The "not yet implemented" note is stale; views shipped with
+  `0018`.
+- **Partly superseded by:** ADR `0012` (which withdrew `View()`) and ADR `0022`
+  (which brought it back). The rule that **every container must have a view**
+  survives both.
 - **Date:** 2026-09-07
 - **Evidence:** `experiments/views/` (`RESULTS.md`), with context from
   `experiments/copycost/`, `dispatch/` and `hashdict/`.
