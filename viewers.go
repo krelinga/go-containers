@@ -73,10 +73,11 @@ type CanViewSortedMap[V, NV any] interface {
 
 // IdentityViewer converts nothing, in both directions and on both halves.
 //
-// The Identity constructors do not use it: ADR 0013 gives them a viewer-less
-// representation that is one word and allocates nothing. It is here for
-// composing a *partial* identity — a viewer that converts keys but passes values
-// through, or the reverse — by embedding the half you do not want to write.
+// Nothing in this package constructs one, and that is deliberate: c.View() has a
+// viewer-less representation that is one word and allocates nothing (ADRs 0013,
+// 0022). It is exported for composing a *partial* identity — a viewer that
+// converts keys but passes values through, or the reverse — by embedding the half
+// you do not want to write.
 type IdentityViewer[K, V any] struct{}
 
 func (IdentityViewer[K, V]) ToKeyView(k K) K           { return k }
@@ -85,8 +86,19 @@ func (IdentityViewer[K, V]) ToValueView(v V) V         { return v }
 
 // IdentityValueViewer converts nothing, and offers only the value half.
 //
-// Embed it in a viewer that converts keys but should pass values through. As
-// with IdentityViewer, ViewSortedDictIdentity does not use it.
+// Embed it in a viewer that converts keys but should pass values through, then
+// write only ToKeyView and FromKeyView:
+//
+//	type byName struct {
+//		containers.IdentityValueViewer[int]
+//		known map[string]*Item
+//	}
+//	func (b byName) ToKeyView(i *Item) string          { … }
+//	func (b byName) FromKeyView(s string) (*Item, bool) { … }
+//
+//	v := containers.ViewMap[*Item, int, string, int](m, byName{known: reg})
+//
+// As with IdentityViewer, nothing in this package constructs one.
 type IdentityValueViewer[V any] struct{}
 
 func (IdentityValueViewer[V]) ToValueView(v V) V { return v }
