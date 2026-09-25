@@ -221,6 +221,24 @@ this needs to answer it directly rather than quietly reverse it.
   from every holder — but it is not in the names, and the doc comments have to
   carry it.
 
+**One more thing changed, and `0016` measured it as a non-win under an assumption
+this ADR breaks.** Its Task K asked whether an adapter was needed to round-trip a
+sequence through `encoding/json` and answered no — *because decision 1 keeps the
+field a plain slice*. Once the field is declared `Slice[T]`, the question returns
+with a different answer:
+
+```
+Slice:  in={"hosts":["a","b"]}  out={"hosts":["a","b"]}
+Vector: in={"hosts":["a","b"]}  out={"hosts":{}}        <- lossy
+```
+
+Measured. **`Slice[T]` would be the only *sequence* in the library that
+round-trips**, because `Vector`'s state is unexported — which is the open
+serialization problem CLAUDE.md records for every slice-backed container. This
+ADR does not solve that problem, and must not be read as solving it: it gives one
+sequence type that happens not to have it, exactly as `Map` already does among the
+key/value containers. The library-wide ADR CLAUDE.md asks for is still owed.
+
 The reason to take the type is the one ADR `0016` could not weigh, plus one it
 did not consider: **a caller may find their own code easier to express by
 declaring the field `Slice[T]` in the first place**, rather than converting at
@@ -425,19 +443,27 @@ All three belong in `callsites_test.go` as a stdlib-baseline-first diff.
    value it panics with an index error rather than a nil error — which is what
    `var s []T; s[0] = e` does, so the rule in CLAUDE.md holds even though the
    panic's text differs from the map-backed containers'.
-8. **`Slice[T]` gets no constructor**, and needs none. Unlike every other
-   container, its state *is* its underlying type, so the caller already has both
-   spellings natively:
+8. **`Slice[T]` gets no constructor**, and needs none — **following the rule
+   `Map` already established**, not making an exception to it. There is no
+   `NewMap` either. The split is not container-by-container: it is whether the
+   state is the underlying type.
+
+   | | construction |
+   |---|---|
+   | `Map[K,V]`, `Slice[T]` — the two builtin adapters | the language: literals, `make` |
+   | `MapSet`, `SortedSet`, `SortedMap`, `Vector` — unexported state | `New*` |
 
    ```go
-   containers.Slice[int]{1, 2, 3}       // composite literal
-   make(containers.Slice[int], 0, 64)   // sized construction, no API required
+   containers.Slice[int]{1, 2, 3}         // composite literal
+   make(containers.Slice[int], 0, 64)     // sized construction, no API required
+   make(containers.Map[string, int], 64)  // the same, and it already works
    ```
 
-   That second line matters more than the first: ADR `0006`'s size hint is worth
-   2.7x–3.7x for the map-backed containers and needs a `New*` to carry it, whereas
-   `Slice` gets it from `make` for free. A constructor would add a name and buy
-   nothing. Left open as a future change if a reason appears.
+   The `make` line matters more than the literal: **ADR `0006`'s size hint is
+   worth 2.7x–3.7x and needs a `New*` to carry it for the four containers with
+   unexported state — while the two adapters get it from `make` for free.** A
+   constructor would add a name and buy nothing. Left open as a future change if a
+   reason appears.
 9. **`SliceView` and `VectorView` keep `PositionValues[P, V]`** rather than a
    narrower shared interface. Two satisfiers is not yet evidence that the
    contract is wrong.
