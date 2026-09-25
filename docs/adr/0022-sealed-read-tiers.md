@@ -1,7 +1,11 @@
 # 22. Delete the mutation tiers; seal the read tiers
 
-- **Status:** **Proposed.** Do not implement without review. The decision below
-  is the one this ADR recommends, not one that has been taken.
+- **Status:** **Proposed.** Do not implement without review. Four of the five
+  open questions are now **settled** (see *What to decide*): the guarantee is
+  worth the plumbing, the token is named `callViewFirst`, `View()` lands with
+  this ADR, and `SortedSetView`'s internal exception stands because it does not
+  reach the exported API. The fifth — a replacement tripwire for the mutator
+  vocabulary — has a recommendation awaiting a ruling.
 - **Date:** 2026-09-25
 - **Evidence:** `experiments/sealing/` (`RESULTS.md`), which also asserts in
   `run.sh` that the sealed assertion still fails to compile.
@@ -268,19 +272,73 @@ rather than a doc comment that does neither.
 ## What to decide
 
 1. **Whether the guarantee is worth ~60 lines of unexported plumbing** for a case
-   with **zero current instances**. This is the whole question. The library has no
-   cross-container generic read-only code today; the risk is entirely about
-   external callers and future code. Sealing is cheapest to adopt *before* that
-   code exists, and the mirror hierarchy is pure cost until it does.
-2. **The token's name.** `callViewFirst` is recommended, because the name is the
-   error message. It is also rendered in godoc, where it reads oddly.
-3. **Whether `View()` lands with this or separately.** It is free and sealing
-   makes it near-mandatory, but it revisits ADR `0012` and carries the
-   shallowness-naming question above, which is a different argument.
-4. **Whether a replacement tripwire is wanted** for "every container carries its
-   mutators", now that the mutation tiers are gone. Two ad-hoc lines per
-   container, or nothing.
-5. **Whether `SortedSetView` is an exception worth keeping.** It holds its
-   container concretely rather than through an interface (`views.go:135`),
-   because its keys never convert — so it needs no mirror interface. Uniformity
-   would give it one it does not use.
+   with zero current instances. **SETTLED: yes.** Noted that sealing is cheapest
+   to adopt *before* cross-container generic read-only code exists, and the mirror
+   hierarchy is pure cost until it does — that is accepted.
+2. **The token's name.** **SETTLED: `callViewFirst`.** The name is the entire
+   diagnostic a caller receives, and instructing beats hinting. It reads oddly in
+   godoc's rendering of the interface; that is the accepted price.
+3. **Whether `View()` lands with this or separately.** **SETTLED: with this.**
+   Sealing makes it near-mandatory — every read-only boundary now needs a view —
+   so shipping the seal without it would be shipping the friction without the
+   remedy. It is free (0.39 ns, 0 allocations) and returns the ordinary view type.
+   This **revisits ADR `0012`**, which refused a bare `View()`: see *What this
+   does NOT fix* for why `Identity` was doing less work than `0012` credited, and
+   why the aliasing warning belongs in a hazard call site rather than a name.
+   `View<Container>Identity` is superseded by it.
+4. **Whether a replacement tripwire is wanted** for the mutator vocabulary.
+   **OPEN — recommendation: yes.**
+
+   Today four assertions at the bottom of `contracts.go` make `go build` fail if a
+   container drifts from ADR `0017`'s vocabulary (`Add`/`AddAll`, `Set`/`SetAll`,
+   `Delete`/`DeleteAll`). They catch a new container that forgets `DeleteAll`, a
+   rename applied to one container but not its sibling, and a signature drift from
+   `...K` to `[]K`. Per-container tests cover each container's own mutators, but
+   **nothing else asserts uniformity across containers**, which is what these
+   assert. Deleting the tiers deletes the type the assertion needs.
+
+   The replacement keeps them **unexported** and **not embedding the read tiers**:
+
+   ```go
+   type mutatesKeys[K any] interface {
+   	Add(K); AddAll(...K); Delete(K); DeleteAll(...K)
+   }
+   type mutatesKeyValues[K, V any] interface {
+   	Set(K, V); SetAll(...Entry[K, V]); Delete(K); DeleteAll(...K)
+   }
+   ```
+
+   Unexported, so no caller can take one as a parameter — the hazard that
+   motivated deleting `Mutable*` cannot arise. Non-embedding, so a container never
+   needs the seal token — the conflict that *forced* deleting `Mutable*` cannot
+   arise either. Verified: it builds, and renaming `MapSet.DeleteAll` breaks
+   `go build` with `missing method DeleteAll`. ~10 lines.
+
+   The counter-argument is that it re-adds what this ADR deletes. The answer is
+   that both properties that made `Mutable*` a problem — exported, and embedding
+   `Keys[K]` — are absent here.
+5. **Whether `SortedSetView` is an exception worth keeping.** **SETTLED: keep it,
+   because it is invisible.** It holds its container concretely
+   (`views.go:135`) rather than through an interface, since its keys never
+   convert, so it needs no mirror interface. Its **exported** surface is the same
+   shape as every other view — `IsZero`, `Len`, `Has`, `Keys`, `KeySlice`, plus the
+   ordered reads it carries for being sorted — and the field type is unexported.
+   Uniformity of the exported API is what matters; internal uniformity is not
+   worth an interface nothing dispatches through.
+
+## Implementation order, once accepted
+
+1. Delete `MutableKeys`/`MutableKeyValues`; rewrite `prune` and `pruneContainer`
+   to declare the two methods they use; rewrite the `views_test.go` guard as an
+   ad-hoc mutator assertion; delete `TestContractSatisfaction` and
+   `TestMutableSetSatisfaction`.
+2. Add the unexported tripwire (pending question 4).
+3. Add the mirror hierarchy and repoint the view structs' `impl` fields at it.
+4. Seal the read tiers with `callViewFirst`; implement it on the five view types;
+   drop the container-side read assertions.
+5. Add `View()` to the five containers; supersede `View<Container>Identity`.
+6. Add both call-site sketches to `callsites_test.go`, plus the pointer-aliasing
+   hazard case, as a stdlib-baseline-first diff.
+7. Update CLAUDE.md: the shape-interface paragraph ("**not** sealed") is now
+   wrong; the `View()` prohibition under *Shape and naming* is superseded; add
+   `callViewFirst` and the aliasing caveat to the three-rules section.
