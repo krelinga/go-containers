@@ -9,20 +9,6 @@ import (
 	"github.com/krelinga/go-containers"
 )
 
-// Every container satisfies its contract, and the pointer does while the value
-// does not -- ADR 0002's uniform pointer receivers.
-func TestContractSatisfaction(t *testing.T) {
-	var (
-		_ containers.MutableKeys[int]              = containers.NewMapSet[int]()
-		_ containers.MutableKeys[int]              = containers.NewSortedSet[int]()
-		_ containers.MutableKeyValues[int, string] = containers.NewSortedMap[int, string]()
-		_ containers.MutableKeyValues[int, string] = containers.Map[int, string]{}
-		_ containers.MutableKeyValues[int, string] = containers.Map[int, string]{}
-	)
-	var s containers.MapSet[int]
-	var _ containers.MutableKeys[int] = s
-}
-
 // The *Slice contract, which is the whole of ADR 0017 proposal D: a result is a
 // full, independent copy. Nothing the container does afterwards is visible
 // through it, and nothing done to it is visible in the container.
@@ -245,8 +231,8 @@ func TestReadOnlyBoundaryTakesViews(t *testing.T) {
 	hs := containers.NewMapSet(1, 2, 3)
 	ss := containers.NewSortedSet(1, 2, 3)
 	for name, s := range map[string]containers.Keys[int]{
-		"HashSet":   containers.ViewMapSetIdentity(hs),
-		"SortedSet": containers.ViewSortedSet(ss),
+		"HashSet":   hs.View(),
+		"SortedSet": ss.View(),
 	} {
 		if got := countPresent[int](s, 1, 3, 99); got != 2 {
 			t.Errorf("%s: countPresent = %d, want 2", name, got)
@@ -263,9 +249,9 @@ func TestReadOnlyBoundaryTakesViews(t *testing.T) {
 	hd.Set("a", 1)
 	hd.Set("b", 2)
 	for name, d := range map[string]containers.KeyValues[string, int]{
-		"Map":        containers.ViewMapIdentity(m),
-		"SortedDict": containers.ViewSortedMapIdentity(sd),
-		"HashDict":   containers.ViewMapIdentity(hd),
+		"Map":        m.View(),
+		"SortedDict": sd.View(),
+		"HashDict":   hd.View(),
 	} {
 		if got := lookupAll[string, int](d, "a", "b", "zz"); got != 2 {
 			t.Errorf("%s: lookupAll = %d, want 2", name, got)
@@ -295,11 +281,11 @@ func TestIdentityViewsDoNotAllocate(t *testing.T) {
 	var sinkSortedMap containers.SortedMapView[string, int]
 
 	for name, f := range map[string]func(){
-		"ViewMapSetIdentity":    func() { sinkMapSet = containers.ViewMapSetIdentity(hs) },
-		"ViewSortedSet":         func() { sinkSortedSet = containers.ViewSortedSet(ss) },
-		"ViewMapIdentity":       func() { sinkMap = containers.ViewMapIdentity(hd) },
-		"ViewSortedMapIdentity": func() { sinkSortedMap = containers.ViewSortedMapIdentity(sd) },
-		"ViewMapIdentity/again": func() { sinkMap = containers.ViewMapIdentity(m) },
+		"ViewMapSetIdentity":    func() { sinkMapSet = hs.View() },
+		"ViewSortedSet":         func() { sinkSortedSet = ss.View() },
+		"ViewMapIdentity":       func() { sinkMap = hd.View() },
+		"ViewSortedMapIdentity": func() { sinkSortedMap = sd.View() },
+		"ViewMapIdentity/again": func() { sinkMap = m.View() },
 	} {
 		if got := testing.AllocsPerRun(100, f); got != 0 {
 			t.Errorf("%s: %v allocs, want 0", name, got)
@@ -311,7 +297,7 @@ func TestIdentityViewsDoNotAllocate(t *testing.T) {
 // MutableSet carries Delete, mirroring MutableDict's (ADR 0017 renamed the
 // sets' Remove to match, since a set's element is its key).
 func TestMutableSetDelete(t *testing.T) {
-	drop := func(s containers.MutableKeys[int], v int) { s.Delete(v) }
+	drop := func(s interface{ Delete(int) }, v int) { s.Delete(v) }
 
 	hs := containers.NewMapSet(1, 2, 3)
 	drop(hs, 2)

@@ -116,5 +116,5 @@ func appendMany(v containers.Vector[int], n int) {
 }
 
 func TestVectorSatisfiesIndexedViewThroughItsView(t *testing.T) {
-	var _ containers.VectorView[int] = containers.ViewVectorIdentity(containers.NewVector(1))
+	var _ containers.VectorView[int] = containers.NewVector(1).View()
 }

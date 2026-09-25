@@ -1,13 +1,10 @@
 # 22. Delete the mutation tiers; seal the read tiers
 
-- **Status:** **Proposed**, with **all five open questions settled** (see *What
-  to decide*): the guarantee is worth the plumbing, the token is named
-  `callViewFirst`, `View()` lands with this ADR, `SortedSetView`'s internal
-  exception stands because it does not reach the exported API, and the mutator
-  vocabulary keeps a tripwire in unexported form. **Not yet accepted — awaiting a
-  read-through of this ADR before implementation.** *Implementation order* at the
-  end is the plan it would be implemented from.
-- **Date:** 2026-09-25
+- **Status:** **Accepted** and **implemented** (2026-09-25). All five open
+  questions were settled before acceptance; see *What to decide*, kept for the
+  record. `ViewSliceIdentity` is the one identity constructor that survived,
+  because a plain `[]T` has no receiver to hang `View()` on.
+- **Date:** 2026-09-25 (accepted and implemented the same day)
 - **Evidence:** `experiments/sealing/` (`RESULTS.md`), which also asserts in
   `run.sh` that the sealed assertion still fails to compile.
 - **Relates to:** ADR `0018` (which created the shape interfaces and whose view

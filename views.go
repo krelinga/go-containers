@@ -49,15 +49,24 @@ import (
 // ---------------------------------------------------------------------------
 
 // MapSetView is a read-only view of a MapSet, with keys converted by a viewer.
-type MapSetView[NT any] struct{ impl Keys[NT] }
+type MapSetView[NT any] struct{ impl innerKeys[NT] }
 
 // ViewMapSet returns a view of s whose keys are converted by viewer.
 func ViewMapSet[T comparable, NT any](s MapSet[T], viewer CanViewMapSet[T, NT]) MapSetView[NT] {
 	return MapSetView[NT]{impl: convertedKeys[T, NT]{s, viewer}}
 }
 
-// ViewMapSetIdentity returns a view of s that converts nothing.
-func ViewMapSetIdentity[T comparable](s MapSet[T]) MapSetView[T] {
+// View returns a read-only view of s that converts nothing.
+//
+// It is free: the container is one word, and a one-word value boxes into the
+// view's interface field without allocating (0.39 ns, 0 allocs --
+// experiments/sealing). It replaced ViewMapSetIdentity in ADR 0022.
+//
+// The view is read-only in STRUCTURE: nothing can be added, removed or replaced
+// through it, and nothing can assert it back to the container. If T is a pointer
+// or contains one, the values it yields remain mutable -- Go cannot express
+// otherwise. Use ViewMapSet with a key viewer when that matters (ADR 0012).
+func (s MapSet[T]) View() MapSetView[T] {
 	return MapSetView[T]{impl: s}
 }
 
@@ -134,10 +143,13 @@ func (c convertedKeys[T, NT]) KeySlice() []NT {
 // SortedSetView is a read-only view of a SortedSet.
 type SortedSetView[T cmp.Ordered] struct{ s SortedSet[T] }
 
-// ViewSortedSet returns a view of s. There is no converting form: a SortedSet
-// keys on cmp.Ordered, which admits only immutable value types, so its keys
-// need no protection (ADR 0012).
-func ViewSortedSet[T cmp.Ordered](s SortedSet[T]) SortedSetView[T] {
+// View returns a read-only view of s. There is no converting form: a SortedSet
+// keys on cmp.Ordered, which admits only immutable value types, so its keys need
+// no protection (ADR 0012) -- and for the same reason its values need no
+// aliasing caveat, unlike the other containers' View.
+//
+// It replaced ViewSortedSet in ADR 0022.
+func (s SortedSet[T]) View() SortedSetView[T] {
 	return SortedSetView[T]{s: s}
 }
 
@@ -163,15 +175,19 @@ func (v SortedSetView[T]) RangeKeys(lo, hi T) iter.Seq[T] { return v.s.RangeKeys
 // ---------------------------------------------------------------------------
 
 // MapView is a read-only view of a Map, with keys and values converted.
-type MapView[NK, NV any] struct{ impl KeyValues[NK, NV] }
+type MapView[NK, NV any] struct{ impl innerKeyValues[NK, NV] }
 
 // ViewMap returns a view of m whose entries are converted by viewer.
 func ViewMap[K comparable, V, NK, NV any](m Map[K, V], viewer CanViewMap[K, NK, V, NV]) MapView[NK, NV] {
 	return MapView[NK, NV]{impl: convertedPairs[K, V, NK, NV]{m, viewer}}
 }
 
-// ViewMapIdentity returns a view of m that converts nothing.
-func ViewMapIdentity[K comparable, V any](m Map[K, V]) MapView[K, V] {
+// View returns a read-only view of m that converts nothing. Free, as
+// MapSet.View is. It replaced ViewMapIdentity in ADR 0022.
+//
+// Read-only in STRUCTURE only: if K or V is a pointer or contains one, what the
+// view yields stays mutable. Use ViewMap with a viewer when that matters.
+func (m Map[K, V]) View() MapView[K, V] {
 	return MapView[K, V]{impl: m}
 }
 
@@ -342,7 +358,7 @@ func (c convertedPairs[K, V, NK, NV]) AllSlice() []Entry[NK, NV] {
 // Keys are cmp.Ordered and pass through unchanged, which is what lets a sorted
 // view stand in for an unordered one without breaking the hierarchy (ADR 0012).
 type SortedMapView[K cmp.Ordered, NV any] struct {
-	impl SortedKeyValues[K, NV]
+	impl innerSortedKeyValues[K, NV]
 }
 
 // ViewSortedMap returns a view of m whose values are converted by viewer.
@@ -350,8 +366,13 @@ func ViewSortedMap[K cmp.Ordered, V, NV any](m SortedMap[K, V], viewer CanViewSo
 	return SortedMapView[K, NV]{impl: convertedValues[K, V, NV]{m, viewer}}
 }
 
-// ViewSortedMapIdentity returns a view of m that converts nothing.
-func ViewSortedMapIdentity[K cmp.Ordered, V any](m SortedMap[K, V]) SortedMapView[K, V] {
+// View returns a read-only view of m that converts nothing. Free, as
+// MapSet.View is. It replaced ViewSortedMapIdentity in ADR 0022.
+//
+// Read-only in STRUCTURE only: keys are cmp.Ordered and safe, but if V is a
+// pointer or contains one, the values stay mutable. Use ViewSortedMap with a
+// value viewer when that matters.
+func (m SortedMap[K, V]) View() SortedMapView[K, V] {
 	return SortedMapView[K, V]{impl: m}
 }
 
@@ -611,18 +632,22 @@ func (c convertedValues[K, V, NV]) Range(lo, hi K) iter.Seq2[K, NV] {
 // ---------------------------------------------------------------------------
 
 // VectorView is a read-only view of a Vector, with elements converted.
-type VectorView[NT any] struct{ impl PositionValues[int, NT] }
+type VectorView[NT any] struct{ impl innerPositionValues[int, NT] }
 
 // ViewVector returns a view of v whose elements are converted by viewer.
 func ViewVector[T, NT any](v Vector[T], viewer CanViewVector[T, NT]) VectorView[NT] {
 	return VectorView[NT]{impl: convertedElems[T, NT]{v.ValueSlice(), viewer}}
 }
 
-// ViewVectorIdentity returns a view of v that converts nothing.
+// View returns a read-only view of v that converts nothing. Free, as
+// MapSet.View is. It replaced ViewVectorIdentity in ADR 0022.
 //
 // Unlike ViewSlice, this tracks growth: the view holds the Vector, and a Vector
 // hides reallocation from every holder (ADR 0015).
-func ViewVectorIdentity[T any](v Vector[T]) VectorView[T] {
+//
+// Read-only in STRUCTURE only: if T is a pointer or contains one, the elements
+// stay mutable. Use ViewVector with a viewer when that matters.
+func (v Vector[T]) View() VectorView[T] {
 	return VectorView[T]{impl: v}
 }
 
@@ -636,6 +661,9 @@ func ViewSlice[T, NT any](s []T, viewer CanViewSlice[T, NT]) VectorView[NT] {
 }
 
 // ViewSliceIdentity returns a view of s that converts nothing.
+//
+// This is the one identity view that stayed a function when ADR 0022 turned the
+// rest into a View() method: a plain []T has no methods to hang one on.
 func ViewSliceIdentity[T any](s []T) VectorView[T] {
 	return VectorView[T]{impl: rawSlice[T]{s}}
 }

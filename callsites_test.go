@@ -18,6 +18,7 @@ package containers_test
 import (
 	"cmp"
 	"fmt"
+	"iter"
 	"maps"
 	"slices"
 	"testing"
@@ -670,7 +671,10 @@ func pruneSortedStdlib[K cmp.Ordered, V any](m containers.SortedMap[K, V], keep 
 // The container version: one function body for both backings. It uses the more
 // conservative iteration discipline, so it collects keys where pruneMapStdlib
 // deletes in place -- the cost of working against both.
-func pruneContainer[K comparable, V any](m containers.MutableKeyValues[K, V], keep func(V) bool) {
+func pruneContainer[K comparable, V any](m interface {
+	All() iter.Seq2[K, V]
+	Delete(K)
+}, keep func(V) bool) {
 	var drop []K
 	for k, v := range m.All() {
 		if !keep(v) {
@@ -805,7 +809,7 @@ func (l *auditLogContainer) Record(e string) { l.entries.Append(e) }
 // Safe, O(1), and no allocation: the view cannot write, so there is nothing to
 // defend against by copying.
 func (l *auditLogContainer) Entries() containers.VectorView[string] {
-	return containers.ViewVectorIdentity(l.entries)
+	return l.entries.View()
 }
 
 // ---------------------------------------------------------------------------
@@ -968,7 +972,7 @@ func TestTaskIForgettingTheAssignment(t *testing.T) {
 // two holders of a slice header.
 func ExampleVector() {
 	log := containers.NewVector[string]()
-	view := containers.ViewVectorIdentity(log)
+	view := log.View()
 
 	for _, e := range []string{"login", "read", "write"} {
 		log.Append(e) // reallocates as it grows
@@ -1037,4 +1041,85 @@ func TestTaskNAccessorDoesNotCopy(t *testing.T) {
 	if _, ok := any(view).([]string); ok {
 		t.Error("view was assertable back to the slice")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// ADR 0022: the seal, and the one hole it deliberately does not close.
+// ---------------------------------------------------------------------------
+
+// publishStdlib is the baseline: a plain map handed to a function that promises
+// only to read it. Nothing stops the callee writing, and nothing says so.
+func publishStdlib(m map[string]int) int { return len(m) }
+
+// publishContainer takes a sealed read tier. A CONTAINER cannot be passed here
+// at all -- the caller writes .View() -- and nothing taken out of it can be
+// asserted back to something writable.
+func publishContainer(ks containers.Keys[string]) int { return ks.Len() }
+
+// publishConcrete is what most read-only APIs should say instead. Naming the
+// view type needs no seal, and boxes nothing: 1.86 ns against 14.8 ns and one
+// allocation for the interface form (experiments/sealing). Reach for the shape
+// interface only when the function must accept several container kinds.
+func publishConcrete(v containers.MapView[string, int]) int { return v.Len() }
+
+func TestSealedReadTierCallSites(t *testing.T) {
+	m := containers.Map[string, int]{}
+	m.SetAll(containers.Entry[string, int]{Slot: "a", Value: 1})
+
+	if got := publishStdlib(map[string]int{"a": 1}); got != 1 {
+		t.Errorf("stdlib baseline = %d, want 1", got)
+	}
+
+	// publishContainer(m) does not compile:
+	//   Map[string, int] does not implement Keys[string] (missing method
+	//   callViewFirst)
+	if got := publishContainer(m.View()); got != 1 {
+		t.Errorf("publishContainer = %d, want 1", got)
+	}
+	if got := publishConcrete(m.View()); got != 1 {
+		t.Errorf("publishConcrete = %d, want 1", got)
+	}
+}
+
+func TestViewIsFreeAndSealed(t *testing.T) {
+	m := containers.Map[string, int]{"a": 1}
+
+	if n := testing.AllocsPerRun(200, func() { sinkMapView = m.View() }); n != 0 {
+		t.Errorf("m.View() allocated %.1f times, want 0", n)
+	}
+	v := m.View()
+	if _, ok := any(v).(containers.Map[string, int]); ok {
+		t.Error("view was assertable back to its container")
+	}
+	if _, ok := any(v).(interface{ Set(string, int) }); ok {
+		t.Error("view exposed a mutator")
+	}
+}
+
+var sinkMapView containers.MapView[string, int]
+
+// THE HAZARD ADR 0022 DOES NOT CLOSE, kept as a compiled call site rather than a
+// doc comment so it breaks the build if the API drifts.
+//
+// The seal is structural. Through a sealed, un-castable view over a container of
+// POINTERS, the pointed-to values stay mutable. Go cannot express "contains no
+// pointers" as a constraint, so this is not closable -- name the conversion with
+// ViewMap and a value viewer when it matters.
+type aliasedValue struct{ Name string }
+
+func TestSealDoesNotFreezeContents(t *testing.T) {
+	held := &aliasedValue{Name: "original"}
+	m := containers.Map[string, *aliasedValue]{"a": held}
+
+	v := m.View() // sealed: no Set, no Delete, no cast back to the container
+
+	for _, p := range v.All() {
+		p.Name = "mutated through a read-only view"
+	}
+
+	if held.Name == "original" {
+		t.Fatal("expected the aliased value to be mutable; the doc comment on " +
+			"Map.View and ADR 0022 both promise only structural read-only")
+	}
+	t.Logf("structure sealed, contents not: %q", held.Name)
 }

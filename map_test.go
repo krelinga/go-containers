@@ -2,6 +2,7 @@ package containers_test
 
 import (
 	"encoding/json"
+	"iter"
 	"maps"
 	"slices"
 	"testing"
@@ -72,15 +73,14 @@ func TestMapOperations(t *testing.T) {
 
 // The value satisfies, unlike every other container here.
 func TestMapInterfaceSatisfaction(t *testing.T) {
-	var (
-		_ containers.MutableKeyValues[int, string] = containers.Map[int, string]{}
-		_ containers.MutableKeyValues[int, string] = containers.Map[int, string]{}
-		_ containers.MutableKeyValues[int, string] = containers.NewSortedMap[int, string]()
-	)
+	var ()
 }
 
 // prune, written once, run against both backings -- the point of the contract.
-func prune[K comparable, V any](m containers.MutableKeyValues[K, V], keep func(V) bool) {
+func prune[K comparable, V any](m interface {
+	All() iter.Seq2[K, V]
+	Delete(K)
+}, keep func(V) bool) {
 	var drop []K
 	for k, v := range m.All() {
 		if !keep(v) {

@@ -146,10 +146,3 @@ func TestAlgebraOnZeroValues(t *testing.T) {
 		t.Errorf("Difference with empty = %v", got)
 	}
 }
-
-// The interface is satisfied by the pointer, and from a value only via &.
-func TestMutableSetSatisfaction(t *testing.T) {
-	s := containers.NewMapSet[int]()
-	var _ containers.MutableKeys[int] = s
-	var _ containers.MutableKeys[int] = containers.NewMapSet[int]()
-}

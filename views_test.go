@@ -48,7 +48,7 @@ type itemViewer struct {
 //	  -> *HashDict[string, int] does not implement DictView[string, int]
 //	     (missing method sealedView)
 //
-//	v := containers.ViewMapIdentity(d)
+//	v := d.View()
 //	_ = v.(containers.Map[string, int])
 //	  -> impossible type assertion
 //
@@ -57,13 +57,18 @@ type itemViewer struct {
 func TestViewDoesNotLeakItsContainer(t *testing.T) {
 	d := containers.Map[string, int]{}
 	d.Set("a", 1)
-	v := containers.ViewMapIdentity(d)
+	v := d.View()
 
 	if _, ok := any(v).(containers.Map[string, int]); ok {
 		t.Error("view was assertable back to its container through any()")
 	}
-	if _, ok := any(v).(containers.MutableKeyValues[string, int]); ok {
-		t.Error("view satisfied the mutation contract")
+	// The mutation tiers are gone (ADR 0022), so assert the hazard itself
+	// rather than a named proxy for it.
+	if _, ok := any(v).(interface {
+		Set(string, int)
+		Delete(string)
+	}); ok {
+		t.Error("view exposed mutators through any()")
 	}
 	if v.Len() != 1 {
 		t.Errorf("Len = %d, want 1", v.Len())
@@ -146,7 +151,7 @@ func TestSortedViewsConvertValuesOnly(t *testing.T) {
 	}
 
 	// A sorted set view takes no viewer at all.
-	sv := containers.ViewSortedSet(containers.NewSortedSet(3, 1, 2))
+	sv := containers.NewSortedSet(3, 1, 2).View()
 	if mn, ok := sv.MinKey(); mn != 1 || !ok {
 		t.Errorf("SortedSetView.Min = %v,%v", mn, ok)
 	}
@@ -168,9 +173,9 @@ func TestOrderedViewsSubstituteForBase(t *testing.T) {
 
 	// All three are the same type at this boundary.
 	for name, d := range map[string]containers.KeyValues[string, int]{
-		"SortedDict": containers.ViewSortedMapIdentity(sd),
-		"HashDict":   containers.ViewMapIdentity(hd),
-		"Map":        containers.ViewMapIdentity(m),
+		"SortedDict": sd.View(),
+		"HashDict":   hd.View(),
+		"Map":        m.View(),
 	} {
 		if got, ok := d.Get("a"); !ok || got != 1 {
 			t.Errorf("%s: Get(a) = %v,%v", name, got, ok)
@@ -180,8 +185,8 @@ func TestOrderedViewsSubstituteForBase(t *testing.T) {
 	ss := containers.NewSortedSet(1, 2)
 	hs := containers.NewMapSet(1, 2)
 	for name, s := range map[string]containers.Keys[int]{
-		"SortedSet": containers.ViewSortedSet(ss),
-		"HashSet":   containers.ViewMapSetIdentity(hs),
+		"SortedSet": ss.View(),
+		"HashSet":   hs.View(),
 	} {
 		if !s.Has(1) {
 			t.Errorf("%s: Has(1) = false", name)
@@ -235,17 +240,17 @@ func TestViewOverZeroContainerReadsAsEmpty(t *testing.T) {
 	zss := containers.NewSortedSet[int]()
 	zv := containers.NewVector[int]()
 
-	if v := containers.ViewMapSetIdentity(zs); v.Len() != 0 || v.Has(1) {
+	if v := zs.View(); v.Len() != 0 || v.Has(1) {
 		t.Error("view over a zero MapSet should be empty")
 	}
-	if v := containers.ViewSortedSet(zss); v.Len() != 0 {
+	if v := zss.View(); v.Len() != 0 {
 		t.Error("view over a zero SortedSet should be empty")
 	}
-	if v := containers.ViewVectorIdentity(zv); v.Len() != 0 {
+	if v := zv.View(); v.Len() != 0 {
 		t.Error("view over a zero Vector should be empty")
 	}
 	n := 0
-	for range containers.ViewMapSetIdentity(zs).Keys() {
+	for range zs.View().Keys() {
 		n++
 	}
 	if n != 0 {
@@ -284,7 +289,7 @@ func TestIndexedViewConvertsElements(t *testing.T) {
 func TestVectorIdentityViewDoesNotAllocate(t *testing.T) {
 	v := containers.NewVector(1, 2, 3)
 	var sink containers.VectorView[int]
-	if got := testing.AllocsPerRun(100, func() { sink = containers.ViewVectorIdentity(v) }); got != 0 {
+	if got := testing.AllocsPerRun(100, func() { sink = v.View() }); got != 0 {
 		t.Errorf("ViewVectorIdentity: %v allocs, want 0", got)
 	}
 	if sink.Len() != 3 {
@@ -298,7 +303,7 @@ func TestVectorIdentityViewDoesNotAllocate(t *testing.T) {
 //	  -> *Vector[int] does not implement IndexedView[int] (missing method sealedView)
 func TestIndexedViewIsSealed(t *testing.T) {
 	v := containers.NewVector(1, 2)
-	view := containers.ViewVectorIdentity(v)
+	view := v.View()
 
 	if _, ok := any(view).(containers.Vector[int]); ok {
 		t.Error("view was assertable back to its container")
@@ -325,7 +330,7 @@ func TestZeroVectorViewReadsAsEmpty(t *testing.T) {
 
 	// And a view over a zero Vector is the same thing.
 	zv := containers.NewVector[int]()
-	if v := containers.ViewVectorIdentity(zv); v.Len() != 0 {
+	if v := zv.View(); v.Len() != 0 {
 		t.Error("view over a zero Vector should be empty")
 	}
 }
@@ -425,7 +430,7 @@ func TestSliceViewIsSealed(t *testing.T) {
 func TestBothSequenceViewsSatisfyIndexedView(t *testing.T) {
 	vec := containers.NewVector("a", "b")
 	for name, v := range map[string]containers.VectorView[string]{
-		"Vector": containers.ViewVectorIdentity(vec),
+		"Vector": vec.View(),
 		"slice":  containers.ViewSliceIdentity([]string{"a", "b"}),
 	} {
 		if v.Len() != 2 || v.At(0) != "a" {

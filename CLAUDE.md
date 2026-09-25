@@ -16,7 +16,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `vector.go` | `Vector[T any]` | slice, insertion-ordered (ADR `0015`) | `VectorView[NT]` |
 | — | *(no `Slice` type)* | a plain `[]T` | `VectorView[NT]`, via `ViewSlice` |
 | `entry.go` | `Entry[S, V]` | the pair type bulk operations carry | — |
-| `contracts.go` | the shape interfaces below | — | — |
+| `contracts.go` | the shape interfaces below, sealed (ADR `0022`) | — | — |
 | `views.go` | the view structs and their constructors | — | — |
 | `viewers.go` | `KeyViewer`, `ValueViewer`, the `CanView<Container>` set | the conversions a view applies (ADR `0012`) | — |
 
@@ -33,19 +33,38 @@ SortedKeys[K]   +-> SortedKeyValues[K,V]
 MutableKeys[K]   MutableKeyValues[K,V]
 ```
 
-They are **not sealed**: containers satisfy them, and so do views. That is the
-point — a function needing only reads takes one and accepts either. They are a
-convenience, **not a guarantee**: a *container* placed in one can be asserted
-back out and written through. Where the guarantee matters, take a concrete view
-type; nothing can assert one back to anything writable.
+They are **sealed** (ADR `0022`): each declares the unexported `callViewFirst`,
+which **only a view implements**. So a container cannot be passed where reads are
+promised — `publish(s)` is a compile error naming `callViewFirst`, and the fix is
+`publish(s.View())`, which is free. Nothing taken out of one can be asserted back
+to something writable.
+
+Two things about the seal are easy to get wrong, and both are measured in
+`experiments/sealing`. **Sealing only works because the container is excluded** —
+a sealed interface a container also satisfies is exactly as leaky as an unsealed
+one. And **one token serves the whole package**: an interface-typed value
+satisfies another sealed interface only if it *declares* the same unexported
+method, so a token per interface would stop the tiers composing.
+
+The unexported `inner*` mirrors at the bottom of `contracts.go` are the unsealed
+copies the plumbing needs, because a view is `struct{ impl <tier> }` and an
+identity view passes its container straight in. **They are also where "a new
+container exposes its reads whole" is now checked** — the public tiers cannot do
+it any more.
+
+`mutatesKeys`/`mutatesKeyValues` are the mutation contract, **unexported**. They
+replaced exported `MutableKeys`/`MutableKeyValues`, and two properties are
+load-bearing: unexported, so no caller can take one as a parameter; and they
+**never embed a read tier**, because a container implementing `callViewFirst`
+would reopen the hole completely.
 
 `callsites_test.go` holds every stdlib-vs-container comparison. Alongside:
 `docs/adr/` (design decisions) and `experiments/` (measurement harnesses, each
 its own module). **Check an ADR's status before treating it as binding.** `0014`
 is **Rejected and superseded by `0018`**; `0020` is **Abandoned** (its problem was
 solved by `0021`, its solutions cost the zero-value rule for no measured gain);
-`0010`, `0019`, `0021` and `0022` are **Proposed** and describe nothing that
-exists in code. The rest are Accepted. `0017` is Accepted **as proposal D** while
+`0010`, `0019` and `0021` are **Proposed** and describe nothing that exists in
+code. The rest are Accepted, `0022` most recently. `0017` is Accepted **as proposal D** while
 containing three rejected proposals in full, and `0018` is Accepted **as option
 (b)** and likewise keeps its rejected options.
 
@@ -135,8 +154,20 @@ These are first because they are the ones that get re-derived wrongly.
   `ViewSlice(s)` takes a slice, not `*[]T`: an element write shows through and an
   **append does not**, because the append made a different slice. Reach for
   `Vector` when growth must be visible to every holder.
-- **There is deliberately no `View()` method** (ADR `0012`). Callers name the
-  conversion, or name its absence with the `Identity` constructor.
+- **`c.View()` is the identity view; a conversion is named** (ADR `0022`,
+  revisiting `0012`). `View()` is free — the container is one word, so it boxes
+  into the view's interface field without allocating — and it replaced the
+  `View<Container>Identity` constructors. `ViewSliceIdentity` is the one that
+  stayed a function: a plain `[]T` has no methods to hang one on. A *converting*
+  view still names its conversion: `ViewMapSet(s, viewer)`.
+- **A view is read-only in STRUCTURE, never in contents.** Through a sealed,
+  un-castable view over a container of pointers, the pointed-to values stay
+  mutable. Go cannot express "contains no pointers" as a constraint — not with
+  `comparable`, not with a marker interface, not with a type set — so this half
+  is a documented convention, as it is for `slices.Clone`. It is recorded as a
+  compiled call site (`TestSealDoesNotFreezeContents`) rather than only a doc
+  comment, so it breaks the build if the API drifts. Name the conversion with a
+  viewer when it matters.
 - **Hash containers convert keys both ways; ordered containers convert values
   only** (ADR `0012`). `SortedSet` and `SortedMap` key on `cmp.Ordered`, which
   admits only immutable value types, so their keys need no protection — which is
