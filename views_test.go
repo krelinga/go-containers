@@ -438,3 +438,76 @@ func TestBothSequenceViewsSatisfyIndexedView(t *testing.T) {
 		}
 	}
 }
+
+// A slice view is the ONLY view in this package that can go stale, and nothing
+// tested it. CLAUDE.md and ADR 0016 decision 2 describe it in prose: the view
+// holds the slice HEADER, so an element write shows through and an append does
+// not. Every other view holds something that is itself a reference to shared
+// state, so it re-reads and cannot disagree with its source.
+func TestSliceViewObservesTheHeaderNotTheVariable(t *testing.T) {
+	// An element write goes through the shared backing array and IS visible.
+	s := []int{1, 2}
+	v := containers.ViewSliceIdentity(s)
+	s[0] = 99
+	if got := v.At(0); got != 99 {
+		t.Errorf("element write not visible through the view: At(0) = %d, want 99", got)
+	}
+
+	// An append makes a different slice, and is NOT visible.
+	s = append(s, 3)
+	if v.Len() != 2 {
+		t.Errorf("view saw an append: Len = %d, want 2 (ADR 0016 decision 2)", v.Len())
+	}
+
+	// Nor is a reslice -- in EITHER direction. The view can be longer than the
+	// variable, not merely shorter, because it holds its own copy of the header.
+	long := []int{1, 2, 3}
+	lv := containers.ViewSliceIdentity(long)
+	long = long[:1]
+	if lv.Len() != 3 {
+		t.Errorf("view saw a reslice: Len = %d, want 3", lv.Len())
+	}
+
+	// Two views of the same VARIABLE taken at different times disagree. No other
+	// view in this package can do this.
+	grow := []int{1}
+	first := containers.ViewSliceIdentity(grow)
+	grow = append(grow, 2)
+	second := containers.ViewSliceIdentity(grow)
+	if first.Len() != 1 || second.Len() != 2 {
+		t.Errorf("two views of one variable: first = %d, second = %d; want 1 and 2",
+			first.Len(), second.Len())
+	}
+}
+
+// The contrast, asserted so the asymmetry cannot drift: every CONTAINER view
+// tracks its source's length, because every container is a reference type.
+func TestContainerViewsTrackTheirSource(t *testing.T) {
+	set := containers.NewMapSet(1, 2)
+	setView := set.View()
+	set.Add(3)
+	if setView.Len() != 3 {
+		t.Errorf("MapSetView did not track Add: %d", setView.Len())
+	}
+
+	ss := containers.NewSortedSet(1, 2)
+	ssView := ss.View()
+	ss.Add(3)
+	if ssView.Len() != 3 {
+		t.Errorf("SortedSetView did not track Add: %d", ssView.Len())
+	}
+
+	m := containers.Map[string, int]{"a": 1}
+	mView := m.View()
+	m.Set("b", 2)
+	if mView.Len() != 2 {
+		t.Errorf("MapView did not track Set: %d", mView.Len())
+	}
+
+	vec := containers.NewVector(1, 2)
+	vecView := vec.View()
+	vec.Append(3)
+	if vecView.Len() != 3 {
+		t.Errorf("VectorView did not track Append: %d (ADR 0015)", vecView.Len())
+	}
+}

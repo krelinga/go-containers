@@ -290,6 +290,56 @@ as empty, and neither is assignable to the other — which is the point.
 identical bodies over a shared impl. That is the price of not merging, and it is
 paid deliberately.
 
+### `SliceView` is the only view that can go stale — and it already differs
+
+The decision not to merge `SliceView` into `VectorView` was taken on the
+expectation that the two would diverge. **They already have**, in the one place it
+matters most, and the mechanism is worth stating exactly.
+
+**What a slice view holds is a pointer to a heap copy of the slice header.** Not
+the header inline — the view struct is 16 B, two words, an interface — and not a
+pointer to the caller's slice *variable*. Boxing a three-word value copies it to
+the heap, which is the same fact as the allocation below: *the allocation exists
+because the header is held by value.*
+
+Every other view holds something that is **itself** a reference to shared state —
+a map header, or a `*state` pointer — so it re-reads and cannot disagree with its
+source. Measured, and now asserted in `views_test.go`:
+
+| view | holds | later length change visible? |
+|---|---|---|
+| `MapSetView`, `MapView` | a map header (one word, reference type) | **yes** |
+| `SortedSetView` | `SortedSet[T]` = `*state` | **yes** |
+| `SortedMapView` | `SortedMap[K,V]` = `*state` | **yes** |
+| `VectorView` | `Vector[T]` = `*state` | **yes** (ADR `0015`) |
+| `SliceView` | a **boxed copy of the header** | **no** |
+
+Three consequences, each measured:
+
+- An **element write** through the caller's slice *is* visible — the backing array
+  is shared.
+- An **append is not**, which is ADR `0016` decision 2 and CLAUDE.md's existing
+  rule. But the sharper statement is that **no header change is visible in either
+  direction**: after `s = s[:1]` the view still reads 3, so a slice view can be
+  *longer* than its source, not merely shorter.
+- **Two views of the same variable taken at different times disagree** — 1 and 2
+  across an `append`. No other view in the package can do that.
+
+So a shared type or a generic alias would have been actively misleading rather
+than merely premature: a reader seeing `SliceView` beside `VectorView` would
+reasonably expect them to behave alike, and they do not.
+
+**This also makes `Slice[T]` the one container where CLAUDE.md's "copies share" is
+only half true**: element writes share, length changes do not. That rule is one of
+the three CLAUDE.md singles out as most often re-derived wrongly, so `Slice`
+needs an explicit line there rather than inheriting the rule silently.
+
+None of this is new behaviour — `ViewSliceIdentity` has worked exactly this way
+since ADR `0016`. What is new is that **naming the type makes the asymmetry
+prominent**, and that it was documented in prose and tested nowhere.
+`TestSliceViewObservesTheHeaderNotTheVariable` and
+`TestContainerViewsTrackTheirSource` now assert both halves.
+
 ### `Slice.View()` is the one `View()` that allocates
 
 | | width, measured | `View()` |
@@ -485,7 +535,9 @@ All three belong in `callsites_test.go` as a stdlib-baseline-first diff.
 5. Delete `ViewSlice` and `ViewSliceIdentity`.
 6. Update CLAUDE.md: the container table gains a `Slice` row and loses the
    *(no `Slice` type)* row; the view-construction bullets gain the `…With`
-   spelling; the `View()` bullet gains the three-word exception.
+   spelling; the `View()` bullet gains the three-word exception; and the
+   **"copies share"** rule gains the `Slice` caveat — element writes share, length
+   changes do not.
 
 ## Open
 
