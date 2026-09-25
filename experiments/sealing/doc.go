@@ -25,7 +25,8 @@
 // concrete CONTAINER, so a view cannot be narrowed or re-converted by whoever
 // holds it. compose.go prices the two source-parameter shapes that would fix
 // that -- the concrete view type, and the sealed shape interface -- at one, two
-// and three levels deep.
+// and three levels deep. It also prices a defined slice type as an adapter, which
+// ADR 0023 proposed and withdrew; that question is deferred to a later ADR.
 //
 // The harness is bench_test.go, seal_test.go and compose_test.go; the findings
 // are RESULTS.md.

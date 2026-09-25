@@ -130,7 +130,10 @@ func viewFromTier(k coTier, vw coViewer) coView {
 }
 
 // ---------------------------------------------------------------------------
-// ADR 0023 part 3: a defined slice type as an adapter.
+// A defined slice type as an adapter -- proposed inside ADR 0023 and WITHDRAWN.
+// Kept because the question is deferred to a later ADR and these are its inputs,
+// and because the boxing rule generalises: a value wider than one word cannot
+// enter an interface without allocating.
 //
 // Two questions. Can a defined []T satisfy the full position-keyed inner tier
 // on VALUE receivers (no Append -- a value receiver cannot grow a slice)? And

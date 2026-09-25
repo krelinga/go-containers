@@ -1,32 +1,23 @@
-# 23. Composable views, and a `Slice` type
+# 23. Composable views
 
-- **Status:** **Proposed.** Two changes, scoped together for a specific reason:
-  Part 2 makes every converting constructor take a *view* as its source, and a
-  plain `[]T` has no view and no `View()` method — so without Part 3 the slice
-  constructor would be the one exception to the rule Part 2 establishes.
+- **Status:** **Proposed.**
 - **Date:** 2026-09-25
-- **Evidence:** `experiments/sealing/` — `RESULTS.md` §3 for composition and the
-  `Slice` adapter costs. The analysis this reverses is
-  `experiments/sliceadapter/`.
+- **Evidence:** `experiments/sealing/` (`RESULTS.md` §3).
 - **Relates to:** ADR `0011` and `0012`, which both recorded *views that compose*
   as an open follow-up; `0012` decision 5 (the constructor shape this changes);
-  `0022` (whose seal makes the composition gap permanent, and whose `View()`
-  method is the new argument for a `Slice` type); `0002` (methods cannot have type
-  parameters — decisive); `0015` (`Vector`, whose growth contract this repairs);
-  `0009` (`Map`, the adapter `Slice` is modelled on); `0021` (`Each`, which
-  removes the per-layer allocations).
-- **Supersedes:** ADR `0016` decision 1, *"Add no new type"*. `0016`'s decisions 2
-  and 3 stand, and its analysis of why a slice cannot be `Map` stands — see
-  *Part 3*.
+  `0022` (whose seal makes the composition gap permanent); `0002` (methods cannot
+  have type parameters — decisive); `0015` (`Vector`, whose growth contract this
+  repairs); `0016` (whose decision 1, *no `Slice` type*, **stands** — see
+  *Rejected alternatives*); `0021` (`Each`, which removes the per-layer
+  allocations); `0009` (`Map`, for `CastMap`).
+- **Out of scope:** how the library should handle plain slices. A `Slice[T]` type
+  was proposed inside this ADR and withdrawn; the analysis is kept in full under
+  *Rejected alternatives*, and **a later ADR will take the question up properly.**
 
 ## The problem
 
-Three gaps, and they share a shape: **the view layer treats a container as the
-only thing a view can come from.**
-
-### 1. A view cannot be re-viewed
-
-Every converting constructor takes the concrete container:
+**A view cannot be re-viewed.** Every converting constructor takes the concrete
+container:
 
 ```go
 func ViewMapSet[T comparable, NT any](s MapSet[T], viewer CanViewMapSet[T, NT]) MapSetView[NT]
@@ -51,9 +42,7 @@ composing *viewer* and pass it to the existing constructor. Verified working
 the container, must be written per viewer family, and composes viewers where the
 caller was thinking about views.
 
-### 2. A converting `Vector` view silently stops tracking growth
-
-A live defect, not a missing feature:
+### And a live defect that falls out of the same cause
 
 ```go
 v := containers.NewVector(1, 2)
@@ -67,24 +56,10 @@ Measured. `ViewVector` is `convertedElems[T, NT]{v.ValueSlice(), viewer}` — it
 **snapshots at construction**, because `convertedElems` holds a `[]T`. The
 identity view holds the `Vector` and tracks growth, as ADR `0015` requires and as
 `View`'s doc comment promises. Nobody decided the converting form should differ;
-it fell out of the impl holding a slice. Nothing documents it and no test covers
-it.
+it fell out of the impl holding a slice rather than the container. Nothing
+documents it and no test covers it.
 
 Part 2 fixes it for free, which is the strongest single argument in this ADR.
-
-### 3. `[]T` is the only view source with no container
-
-Every container has one method and one function. A plain slice has **two
-functions and no method**:
-
-| | identity | converting |
-|---|---|---|
-| every container | `c.View()` | `View<Kind>(c, viewer)` |
-| a plain `[]T` | `ViewSliceIdentity(s)` | `ViewSlice(s, viewer)` |
-
-ADR `0022` introduced `View()` as a method and a slice has no receiver to hang it
-on. That is a **new** argument for a `Slice` type: ADR `0016` rejected one, but
-`View()` did not exist when it did.
 
 ## Part 1: the method question is settled by the language
 
@@ -157,204 +132,46 @@ containers.ViewMapSet(s, viewer)            // before
 containers.ViewMapSetWith(s.View(), viewer) // after
 ```
 
-`View()` is free for every container whose value is one word — 0.39 ns, 0
-allocations (ADR `0022`) — so for those this is spelling, not cost. It is also
-*consistent* with the seal: after `0022`, handing a container anywhere read-only
-already means writing `.View()`.
+`View()` is free — 0.39 ns, 0 allocations (ADR `0022`) — so this is spelling, not
+cost. It is also *consistent* with the seal: after `0022`, handing a container
+anywhere read-only already means writing `.View()`.
 
-## Part 3: `Slice[T]`
+### `ViewSliceWith` is the one exception, and stays one
 
-```go
-type Slice[T any] []T
-```
+A plain `[]T` has no view, because **it has no methods** — `[]T` is not this
+package's type to extend. So `ViewSliceWith` keeps a `[]T` source where every
+other `…With` takes a view, and `ViewSliceIdentity` stays a function where every
+container has a `View()` method.
 
-A defined slice type, modelled on `Map[K, V]` being a defined `map[K]V` (ADR
-`0009`). Value receivers, the position-keyed reads, `Set(i int, e T)` for in-place
-element writes, **no `Append` method**, and **no constructor** — `make` and a
-composite literal both work on it natively.
+That is not an API inconsistency to design around; it is the language, and every
+Go reader already knows it. A `Slice[T]` adapter would give slices a receiver —
+and would cost four measured irregularities to remove this one. See *Rejected
+alternatives*.
 
-Measured rather than assumed: a defined `[]T` satisfies the whole of
-`innerPositionValues[int, T]` — `Len`, `At`, `Positions`, `PositionSlice`,
-`Values`, `ValueSlice`, `All`, `AllSlice` — on value receivers, and `Set` works
-too, because an element write goes through the shared backing array. Only `Append`
-is impossible. The compile-time assertion is in `experiments/sealing`.
+## Part 3: `CastMap`
 
-### What ADR 0016 decided, and what has changed
-
-ADR `0016` is titled *"A view over a plain slice, and **no `Slice` type**"*. It
-set out to propose exactly this type and its measurements turned it around, so
-this needs to answer it directly rather than quietly reverse it.
-
-**What still stands, unchanged:**
-
-- **A `Slice[T]` cannot have an `Append` *method*.** A slice's length lives in its
-  header, which *is* the value, so a value receiver cannot grow it and a pointer
-  receiver would forfeit the assignability that makes an adapter an adapter.
-  **Growth itself is not lost** — `s = append(s, x)` works on a `Slice[T]`
-  variable exactly as on a `[]T`, verified — so what the type lacks is the
-  *method*, not the capability. That is a smaller gap than ADR `0016`'s framing
-  suggests, but it is still a real asymmetry with `Vector`, whose `Append` is a
-  method precisely because its state is behind a pointer.
-- **It fixes no slice hazard.** Naming a slice type changes no slice semantics.
-  Every hazard ADR `0015` records survives — in particular, appends off a shared
-  `Slice[T]` still alias. **`Vector` remains the answer where growth must be
-  visible to every holder**, and this ADR does not narrow that.
-
-**What changed:**
-
-- **ADR `0022` introduced `c.View()` as a method.** `0016`'s reason for an adapter
-  was that *the view might need one*, and it measured that the view does not. It
-  could not have weighed "a slice has no receiver to hang `View()` on", because
-  there was no `View()` method. **That is the only new argument being claimed**,
-  and it is the whole of gap 3 above.
-- **`Elems`/`Elems2` are gone** (ADR `0017` proposal D), which voids `0016`'s
-  sharpest objection: that a type has one `All`, so a `Slice` yielding values
-  could not also serve a pairs-shaped constructor.
-- **`0016`'s "a fourth exception to ADR `0008`'s naming scheme" reads differently
-  after `0018`**, which made `Map` *the centre* of the naming scheme rather than
-  an exception to it. `Map` : `map` :: `Slice` : `[]T` — both are adapters named
-  after the builtin they wrap, while the richer containers (`MapSet`, `SortedMap`,
-  `Vector`) are `<Backing><Concept>`. On that reading `Slice` is consistent.
-- **`0016`'s "a second sequence type whose difference from `Vector` is invisible
-  in the name" is not answered**, and is accepted as a cost. The difference is
-  real — `Slice` has value semantics and no growth; `Vector` hides reallocation
-  from every holder — but it is not in the names, and the doc comments have to
-  carry it.
-
-**One more thing changed, and `0016` measured it as a non-win under an assumption
-this ADR breaks.** Its Task K asked whether an adapter was needed to round-trip a
-sequence through `encoding/json` and answered no — *because decision 1 keeps the
-field a plain slice*. Once the field is declared `Slice[T]`, the question returns
-with a different answer:
-
-```
-Slice:  in={"hosts":["a","b"]}  out={"hosts":["a","b"]}
-Vector: in={"hosts":["a","b"]}  out={"hosts":{}}        <- lossy
-```
-
-Measured. **`Slice[T]` would be the only *sequence* in the library that
-round-trips**, because `Vector`'s state is unexported — which is the open
-serialization problem CLAUDE.md records for every slice-backed container. This
-ADR does not solve that problem, and must not be read as solving it: it gives one
-sequence type that happens not to have it, exactly as `Map` already does among the
-key/value containers. The library-wide ADR CLAUDE.md asks for is still owed.
-
-The reason to take the type is the one ADR `0016` could not weigh, plus one it
-did not consider: **a caller may find their own code easier to express by
-declaring the field `Slice[T]` in the first place**, rather than converting at
-each boundary. That is an ergonomic claim, deliberately not quantified (CLAUDE.md
-forbids it), and it is the caller's judgement to make rather than ours to
-measure.
-
-### `CastSlice` and `CastMap` restore inference
-
-A conversion cannot infer its type argument:
+Adjacent rather than central, and it fell out of the withdrawn slice work: a
+conversion cannot infer its type arguments, so a caller wrapping a `map[K]V`
+writes them out in full every time.
 
 ```go
-containers.Slice(s)        // cannot use generic type Slice without instantiation
-containers.Slice[int](s)   // the type argument is mandatory
+containers.Map[string, int](m)   // today: both type arguments, always
+containers.CastMap(m)            // inferred
 ```
 
-A function call can. So:
-
 ```go
-func CastSlice[T any](s []T) Slice[T]                 { return Slice[T](s) }
 func CastMap[K comparable, V any](m map[K]V) Map[K, V] { return Map[K, V](m) }
 ```
 
-Measured: both infer, and `CastSlice` costs **0 allocations** — the conversion is
-free, since a defined slice type has the same representation as its underlying
-type, and the call inlines away.
+Free — the conversion is free, since a defined map type has the same
+representation as its underlying type, and the call inlines away. `Map` has needed
+this since ADR `0009` introduced it; `0009` did not discuss inference and the gap
+was simply never noticed.
 
-`CastMap` closes the same gap for `Map`, where a caller has had to write
-`containers.Map[string, int](m)` in full since ADR `0009` introduced it. `0009`
-did not discuss inference; the gap was simply never noticed.
-
-### `Slice` keeps its own view type
-
-`SliceView[NT]`, distinct from `VectorView[NT]` — **not merged, and not an
-alias.** The two are identical in shape today and are expected to diverge; a
-shared type or a generic alias would make that divergence a breaking change
-rather than an addition.
-
-The duplication is smaller than it looks, because **the plumbing is shared**: both
-view structs wrap the same unexported `innerPositionValues[int, NT]`, so
-`rawSlice`, the converting impl, and every inner-tier assertion serve both. What
-duplicates is one view struct and its forwarding methods.
-
-Measured in `experiments/sealing` (`compose.go`): two distinct view types over one
-shared inner tier compile and convert correctly, each keeps a zero value that reads
-as empty, and neither is assignable to the other — which is the point.
-
-`ViewSliceWith` and `ViewVectorWith` therefore stay separate functions with
-identical bodies over a shared impl. That is the price of not merging, and it is
-paid deliberately.
-
-### `SliceView` is the only view that can go stale — and it already differs
-
-The decision not to merge `SliceView` into `VectorView` was taken on the
-expectation that the two would diverge. **They already have**, in the one place it
-matters most, and the mechanism is worth stating exactly.
-
-**What a slice view holds is a pointer to a heap copy of the slice header.** Not
-the header inline — the view struct is 16 B, two words, an interface — and not a
-pointer to the caller's slice *variable*. Boxing a three-word value copies it to
-the heap, which is the same fact as the allocation below: *the allocation exists
-because the header is held by value.*
-
-Every other view holds something that is **itself** a reference to shared state —
-a map header, or a `*state` pointer — so it re-reads and cannot disagree with its
-source. Measured, and now asserted in `views_test.go`:
-
-| view | holds | later length change visible? |
-|---|---|---|
-| `MapSetView`, `MapView` | a map header (one word, reference type) | **yes** |
-| `SortedSetView` | `SortedSet[T]` = `*state` | **yes** |
-| `SortedMapView` | `SortedMap[K,V]` = `*state` | **yes** |
-| `VectorView` | `Vector[T]` = `*state` | **yes** (ADR `0015`) |
-| `SliceView` | a **boxed copy of the header** | **no** |
-
-Three consequences, each measured:
-
-- An **element write** through the caller's slice *is* visible — the backing array
-  is shared.
-- An **append is not**, which is ADR `0016` decision 2 and CLAUDE.md's existing
-  rule. But the sharper statement is that **no header change is visible in either
-  direction**: after `s = s[:1]` the view still reads 3, so a slice view can be
-  *longer* than its source, not merely shorter.
-- **Two views of the same variable taken at different times disagree** — 1 and 2
-  across an `append`. No other view in the package can do that.
-
-So a shared type or a generic alias would have been actively misleading rather
-than merely premature: a reader seeing `SliceView` beside `VectorView` would
-reasonably expect them to behave alike, and they do not.
-
-**This also makes `Slice[T]` the one container where CLAUDE.md's "copies share" is
-only half true**: element writes share, length changes do not. That rule is one of
-the three CLAUDE.md singles out as most often re-derived wrongly, so `Slice`
-needs an explicit line there rather than inheriting the rule silently.
-
-None of this is new behaviour — `ViewSliceIdentity` has worked exactly this way
-since ADR `0016`. What is new is that **naming the type makes the asymmetry
-prominent**, and that it was documented in prose and tested nowhere.
-`TestSliceViewObservesTheHeaderNotTheVariable` and
-`TestContainerViewsTrackTheirSource` now assert both halves.
-
-### `Slice.View()` is the one `View()` that allocates
-
-| | width, measured | `View()` |
-|---|---|---|
-| `Map[K,V]` | **8 B** — one word (map header) | **0 allocs** |
-| `Vector[T]` | **8 B** — one word (`*state`) | **0 allocs** |
-| `MapSet[T]` | **8 B** | **0 allocs** |
-| `Slice[T]` | **24 B** — three words (ptr, len, cap) | **1 alloc** |
-
-A one-word value boxes into the view's interface field for free; a three-word
-slice header cannot. **This is not a regression** — `ViewSliceIdentity(s)` already
-costs one allocation today, for the same reason, and it is inherent rather than
-fixable. But ADR `0022` and CLAUDE.md both say `View()` is free, with "the
-container is one word" as the stated reason, so `Slice` is a documented exception
-and its doc comment must say so.
+The name is kept over `AsMap`/`ToMap`/`MapOf` for being short and unambiguous,
+with one objection recorded: Go's spec calls these *conversions*, not casts, and
+"cast" carries an unchecked-reinterpretation connotation from other languages that
+does not apply here.
 
 ## The resulting surface
 
@@ -365,17 +182,11 @@ and its doc comment must say so.
 | `Map[K,V]` | `m.View()` | `ViewMapWith(v, viewer)` |
 | `SortedMap[K,V]` | `m.View()` | `ViewSortedMapWith(v, viewer)` |
 | `Vector[T]` | `v.View()` | `ViewVectorWith(v, viewer)` |
-| `Slice[T]` | `s.View()` | `ViewSliceWith(v, viewer)` |
+| a plain `[]T` | `ViewSliceIdentity(s)` | `ViewSliceWith(s, viewer)` — `[]T` source |
 
-`ViewSliceIdentity` is deleted outright — `CastSlice(s).View()` replaces it.
-`ViewSlice` is not so much deleted as re-sourced: `ViewSliceWith` takes a
-`SliceView[T]` where `ViewSlice` took a `[]T`, so it is a different function
-wearing a related name, and a caller starting from a bare slice writes
-`ViewSliceWith(CastSlice(s).View(), viewer)`.
-
-**A method for identity, a `…With` function for a conversion, on all six.** The
-asymmetry between them is required by the language (Part 1) and now the names say
-so.
+**A method for identity and a `…With` function for a conversion, for everything
+this package defines a type for.** A `[]T` gets functions for both, because it is
+a builtin.
 
 ## What composition means per view kind
 
@@ -384,11 +195,11 @@ so.
 | `MapSetView[NT]` | keys, both directions | `FromKeyView` chains in reverse and may fail at either stage |
 | `MapView[NK, NV]` | keys both ways, values outbound | |
 | `SortedMapView[K, NV]` | **values only** | keys are `cmp.Ordered` and pass through (ADR `0012` §3) |
-| `VectorView[NT]` | elements outbound | **and gains live growth tracking** — gap 2 |
-| `SliceView[NT]` | elements outbound | a slice has no growth to track; ADR `0016` decision 2 |
+| `VectorView[NT]` | elements outbound | **and gains live growth tracking** — see the defect above |
 | `SortedSetView[T]` | **not at all** | no converting constructor exists, by decision (`0012` §3) |
 
-`SortedSetView` having no composing form is not an inconsistency to paper over.
+A `VectorView` produced by `ViewSliceIdentity` composes like any other, with the
+header semantics a slice view has always had (`TestSliceViewObservesTheHeaderNotTheVariable`).
 
 ## Call sites
 
@@ -418,26 +229,7 @@ if conv.Len() != 3 {
 }
 ```
 
-**Sketch — the declaration site `Slice` is for**, which is the case
-`CastSlice` does *not* serve:
-
-```go
-type Config struct {
-	Hosts containers.Slice[string] // declared as the adapter, not converted at use
-}
-
-func (c Config) HostsView() containers.SliceView[string] { return c.Hosts.View() }
-```
-
-Compare a caller handed a plain `[]T` from elsewhere, who pays the cast:
-
-```go
-func hostsView(hosts []string) containers.SliceView[string] {
-	return containers.CastSlice(hosts).View()
-}
-```
-
-All three belong in `callsites_test.go` as a stdlib-baseline-first diff.
+Both belong in `callsites_test.go` as a stdlib-baseline-first diff.
 
 ## Rejected alternatives
 
@@ -453,100 +245,147 @@ All three belong in `callsites_test.go` as a stdlib-baseline-first diff.
   costs the zero-value rule.
 - **A sealed-tier source parameter.** One more allocation, and it discards a
   view's kind. See Part 2.
-- **Merging `SliceView` into `VectorView`**, or aliasing one to the other with
-  `type SliceView[NT any] = VectorView[NT]`. Verified that generic aliases work at
-  this Go version, so this is available — and rejected: the two types are expected
-  to diverge, and an alias makes divergence a breaking change instead of an
-  addition. Identical shape today is not evidence of identical shape later.
-- **Collapsing `ViewSliceWith` into `ViewVectorWith`.** Follows from merging the
-  views, and rejected with it. Their bodies are identical over a shared impl;
-  their *types* are the point.
-- **`Slice[T]` with a pointer receiver so it can `Append`.** Rejected by ADR
-  `0016` and still rejected: a `*Slice[T]` cannot be produced by a free conversion
-  from a `[]T` value, cannot be passed where a `[]T` is expected, and reintroduces
-  the mixed-receiver problem ADR `0002` decision 2 rejected. A type that needs a
-  pointer is `Vector`.
-- **`AsSlice` / `ToSlice` / `SliceOf` instead of `CastSlice`.** Go's spec calls
-  these *conversions*, not casts, and "cast" carries an unchecked-reinterpretation
-  connotation from other languages that does not apply here. `Cast*` is kept for
-  being short and unambiguous in practice, and because it pairs across the two
-  adapters; the objection is recorded rather than dismissed.
 - **Viewer composition in the library.** A composing viewer works and is a handful
   of lines, but it overlaps entirely with view composition for anyone who owns
   their container. One mechanism, and views are the one callers ask for.
+- **A `Slice[T]` adapter.** Below, in full.
+
+### `Slice[T] []T` — proposed in this ADR and withdrawn
+
+**This is the second time the type has been proposed and rejected.** ADR `0016` is
+titled *"A view over a plain slice, and no `Slice` type"*; it set out to propose
+the type and its measurements turned it around. This ADR proposed it again — to
+give a slice a receiver for `View()`, which is an argument `0016` could not have
+weighed, because `View()` did not exist until ADR `0022`. **ADR `0016` decision 1
+stands.**
+
+The shape was: a defined `[]T` with value receivers, the position-keyed reads,
+`Set(i int, e T)`, no `Append` method, no constructor, a distinct `SliceView[NT]`,
+`ViewSliceWith` sourced from it, and `CastSlice` for inference.
+
+**What is genuinely attractive about it**, and what a later ADR should weigh
+rather than rediscover:
+
+- **It gives slices a receiver.** `hosts.View()` where `hosts` is declared
+  `Slice[T]`, rather than `ViewSliceIdentity(hosts)`.
+- **Construction is free of API.** Its state *is* its underlying type, so
+  `Slice[int]{1,2,3}` and `make(Slice[int], 0, 64)` both work — and that second
+  form hands over ADR `0006`'s size hint, worth 2.7x–3.7x, with no `New*` to carry
+  it. `Map` already works this way; there is no `NewMap` either.
+- **It would be the only *sequence* that round-trips through `encoding/json`.**
+  Measured: a declared `Slice[T]` field marshals to `["a","b"]` where a `Vector`
+  field marshals to `{}`, because `Vector`'s state is unexported. ADR `0016`'s
+  Task K measured this as a non-win, but only *because its decision 1 kept the
+  field a plain slice* — the answer changes once the field is the adapter.
+- **Callers may simply find it easier to express**, declaring the field as the
+  adapter rather than converting at each boundary. Not quantified, per CLAUDE.md.
+
+**Why it was withdrawn: the consistency arithmetic runs the wrong way.** It
+removes one irregularity and adds four, each measured in this session.
+
+Removed: a `[]T` needs `ViewSliceIdentity(s)` where every container has
+`c.View()`.
+
+Added:
+
+| | measured |
+|---|---|
+| `SliceView` would be the **only view that does not track its source** | view=2 where the slice is 3 |
+| `Slice` would be the **only container where "copies share" is half true** | elements share, length does not |
+| `Slice.View()` would be the **only `View()` that allocates** | 24 B cannot box free where 8 B can |
+| `Slice` would be the **only sequence with no `Append` method** | `Vector` has one |
+
+**And the irregularity it removes is not an API irregularity at all — it is the
+language.** A method cannot be put on `[]T`. `ViewSliceIdentity(s)` being a
+function is the obvious consequence of `[]T` not being this package's to extend,
+and every Go reader knows that already. The four it adds *are* API
+irregularities, because `Slice` would sit in the container table beside the others
+and measurably behave unlike them.
+
+**The staleness one is the deepest, and it is not fixable.** A slice view holds a
+pointer to a heap *copy* of the slice header — not the header inline (a view is an
+interface, two words) and not a pointer to the caller's variable. Every other view
+holds something that is itself a reference to shared state, a map header or a
+`*state` pointer, so it re-reads and cannot disagree with its source:
+
+| view | holds | later length change visible? |
+|---|---|---|
+| `MapSetView`, `MapView` | a map header (one word, reference type) | **yes** |
+| `SortedSetView`, `SortedMapView` | the container = `*state` | **yes** |
+| `VectorView` | `Vector[T]` = `*state` | **yes** (ADR `0015`) |
+| a view over a `[]T` | a **boxed copy of the header** | **no** |
+
+A `*Slice[T]` source *does* fix it — 0 allocations too, since one word boxes free,
+and it tracks both `append` and `s = s[:1]`. It was built and measured. It fails
+for two other reasons:
+
+- **It tracks wholesale variable reassignment, which no real view does.** Measured
+  on the shipped library: `Vector` view=2 after the variable is reassigned to a
+  4-element vector, `MapSet` view=2 against variable=1, `Map` view=1 against
+  variable=2. Every view holds the container *value*. A pointer to a variable
+  follows the variable, so this trades *"misses changes the others see"* for
+  *"sees a change the others miss"* — a surprise rather than a limitation.
+- **It requires a pointer receiver**, so `CastSlice(raw).View()` and
+  `Slice[int]{1,2}.View()` stop compiling (`cannot call pointer method
+  ViewTracking on Slice[int]`), and `Slice` becomes the only container with mixed
+  receivers, where ADR `0002` chose uniformity and `0018` kept it while flipping
+  which kind.
+
+**There is no third form.** To track its source a view needs the container to be
+*itself* a reference to shared state. For a slice that means holding a pointer —
+`struct{ st *[]T }` — at which point it is not a defined `[]T` (no literals, no
+`make`, no JSON round-trip, no free conversion) and it **is `Vector`**. ADR
+`0016`'s "wall in the analogy" is exactly this: a map is a reference type, a slice
+is not, and nothing in the slice world copies that.
+
+So the library's existing answer stands: **`Vector` is the sequence whose growth is
+visible to every holder, and a `[]T` gets a view over the header it had when you
+handed it over.** Both halves are now asserted, in
+`TestSliceViewObservesTheHeaderNotTheVariable` and
+`TestContainerViewsTrackTheirSource`.
+
+### Also withdrawn with it
+
+`CastSlice`, `SliceView`, a `Slice`-sourced `ViewSliceWith`, and the deletion of
+`ViewSlice`/`ViewSliceIdentity`. `CastMap` survives on its own merits (Part 3).
 
 ## Decisions
 
 1. Converting constructors take the **concrete view type** as their source.
 2. They are renamed with a **`With` suffix**.
-3. The **`Vector` growth defect is fixed here**, not separately. It is a behaviour
+3. `ViewSliceWith` keeps a **`[]T` source**, and `ViewSliceIdentity` stays a
+   function. A builtin has no methods; this is the language, not an inconsistency
+   to design around.
+4. The **`Vector` growth defect is fixed here**, not separately. It is a behaviour
    change — a converting `Vector` view starts seeing appends — and nothing depends
    on the old behaviour, which contradicted `View`'s doc comment and ADR `0015`.
-4. **`Slice[T]` is added**, superseding ADR `0016` decision 1, with `CastSlice`
-   and `CastMap` for inference.
-5. **`SliceView[NT]` is distinct from `VectorView[NT]`**, and `ViewSliceWith` from
-   `ViewVectorWith`.
+5. **`CastMap` is added.**
 6. **No viewer composition** in the library.
-7. **`Slice[T]` carries `Set(i int, e T)`**, spelled exactly as `Vector.Set` is, so
-   the two sequence types share a mutator vocabulary as far as they can. An
-   element write goes through the shared backing array and sticks. On the zero
-   value it panics with an index error rather than a nil error — which is what
-   `var s []T; s[0] = e` does, so the rule in CLAUDE.md holds even though the
-   panic's text differs from the map-backed containers'.
-8. **`Slice[T]` gets no constructor**, and needs none — **following the rule
-   `Map` already established**, not making an exception to it. There is no
-   `NewMap` either. The split is not container-by-container: it is whether the
-   state is the underlying type.
-
-   | | construction |
-   |---|---|
-   | `Map[K,V]`, `Slice[T]` — the two builtin adapters | the language: literals, `make` |
-   | `MapSet`, `SortedSet`, `SortedMap`, `Vector` — unexported state | `New*` |
-
-   ```go
-   containers.Slice[int]{1, 2, 3}         // composite literal
-   make(containers.Slice[int], 0, 64)     // sized construction, no API required
-   make(containers.Map[string, int], 64)  // the same, and it already works
-   ```
-
-   The `make` line matters more than the literal: **ADR `0006`'s size hint is
-   worth 2.7x–3.7x and needs a `New*` to carry it for the four containers with
-   unexported state — while the two adapters get it from `make` for free.** A
-   constructor would add a name and buy nothing. Left open as a future change if a
-   reason appears.
-9. **`SliceView` and `VectorView` keep `PositionValues[P, V]`** rather than a
-   narrower shared interface. Two satisfiers is not yet evidence that the
-   contract is wrong.
+7. **No `Slice[T]` type.** ADR `0016` decision 1 stands.
 
 ## Implementation order
 
-1. Repoint the four *container-sourced* converting constructors — `ViewMapSet`,
+1. Repoint the four container-sourced converting constructors — `ViewMapSet`,
    `ViewMap`, `ViewSortedMap`, `ViewVector` — at view sources, and rename to
-   `…With`. There are **five** converting constructors today; the fifth,
-   `ViewSlice`, cannot move yet because its view source (`SliceView`) does not
-   exist until step 3. The `Vector` fix falls out of this step —
-   `convertedElems` stops holding `v.ValueSlice()` — so land its regression test
-   here.
-2. Add `Slice[T]`, its reads, `Set(i int, e T)`, and the inner-tier assertions. No
-   `Append` method and no constructor (decisions 7 and 8).
-3. Add `SliceView[NT]` and `ViewSliceWith`, sharing `rawSlice` and the converting
-   impl with `VectorView`.
-4. Add `CastSlice` and `CastMap`.
-5. Delete `ViewSlice` and `ViewSliceIdentity`.
-6. Update CLAUDE.md: the container table gains a `Slice` row and loses the
-   *(no `Slice` type)* row; the view-construction bullets gain the `…With`
-   spelling; the `View()` bullet gains the three-word exception; and the
-   **"copies share"** rule gains the `Slice` caveat — element writes share, length
-   changes do not.
+   `…With`. Rename `ViewSlice` to `ViewSliceWith` without changing its `[]T`
+   source.
+2. The `Vector` fix falls out of step 1: `convertedElems` stops holding
+   `v.ValueSlice()`. Land its regression test here.
+3. Add `CastMap`.
+4. Update CLAUDE.md: the view-construction bullets gain the `…With` spelling, and
+   the `[]T` row gains a note that its two functions are the language rather than
+   an exception.
 
-## Open
+## Open — deferred to a later ADR
 
-- **A `Slice[T]` constructor**, if a reason ever appears. Decision 8 records why
-  there is none today: `make` and a composite literal both work natively, so there
-  is nothing a `New*` would carry.
-- **`Slice[T]` has no mutation contract**, and neither does `Vector` — ADR `0015`
-  punted one until there was a second mutable sequence, and `Slice` is now that
-  second sequence. So the question `0015` deferred is live again, but it is a
-  question about the *setter* vocabulary across both, which is wider than this ADR
-  and should not be answered inside it. The mutation tripwire in `contracts.go`
-  (`mutatesKeys`/`mutatesKeyValues`, ADR `0022`) is key-shaped and fits neither.
+**How the library should handle plain slices.** The `Slice[T]` analysis above is
+the input, not the answer. What that ADR has to reconcile:
+
+- A slice is not a reference type, so no adapter over one can behave like the
+  other containers. Anything that does is `Vector`.
+- Yet three real wants survive: a receiver for `View()`, `encoding/json`
+  round-tripping for a sequence, and whatever ergonomic gain there is in declaring
+  a field as the adapter.
+- The JSON want overlaps the **library-wide serialization problem** CLAUDE.md
+  already records as owed — slice-backed containers are silently lossy — and is
+  probably better solved there than by one type that happens to dodge it.

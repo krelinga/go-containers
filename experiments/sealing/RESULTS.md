@@ -166,8 +166,12 @@ allocations for the same reason it removes the flat ones.
 
 ### A slice adapter is the one container whose `View()` allocates
 
-ADR `0023` part 3 adds `Slice[T] []T`. Two things follow from a slice header being
-three words where every other container is one:
+These numbers were taken for a `Slice[T] []T` adapter proposed inside ADR `0023`
+and **withdrawn** — they are part of why. They stay here because the question is
+deferred to a later ADR, and because the boxing rule they demonstrate is general.
+
+Two things follow from a slice header being three words where every other
+container is one:
 
 | | width | `View()` |
 |---|---|---|
@@ -188,7 +192,9 @@ Two other facts the ADR needed:
   lives in the header, which *is* the value.
 - **A conversion cannot infer its type argument, and a function call can.**
   `Slice(s)` is `cannot use generic type Slice without instantiation`;
-  `CastSlice(s)` infers `T` and costs **0 allocations**.
+  `CastSlice(s)` infers `T` and costs **0 allocations**. This is the finding that
+  outlived the withdrawn adapter: ADR `0023` keeps `CastMap` for `Map`, which has
+  the same gap.
 
 ## Durable / perishable
 
