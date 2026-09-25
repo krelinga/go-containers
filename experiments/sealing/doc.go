@@ -21,5 +21,12 @@
 // dynamic-dispatch measurement through it reads as free. Every shape here keeps
 // a second implementation behind a runtime-selected branch for that reason.
 //
-// The harness is bench_test.go and seal_test.go; the findings are RESULTS.md.
+// A third question arrived with ADR 0023: a converting constructor takes the
+// concrete CONTAINER, so a view cannot be narrowed or re-converted by whoever
+// holds it. compose.go prices the two source-parameter shapes that would fix
+// that -- the concrete view type, and the sealed shape interface -- at one, two
+// and three levels deep.
+//
+// The harness is bench_test.go, seal_test.go and compose_test.go; the findings
+// are RESULTS.md.
 package sealing

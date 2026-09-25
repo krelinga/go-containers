@@ -129,6 +129,41 @@ closable at any price**, and is the one part of "read-only" that has to remain a
 documented convention. Go's own precedent is the same: `slices.Clone` states its
 shallowness in the doc comment and is not named `ShallowClone`.
 
+## 3. Composing views: where the source parameter should point
+
+ADR `0023`'s question. Today a converting constructor takes the **concrete
+container**, so a view cannot be narrowed or re-converted by whoever holds it —
+and the seal makes that final, since the holder cannot reach the container. Two
+source-parameter shapes fix it.
+
+| n=64 | construct | iterate | per layer |
+|---|---|---|---|
+| baseline — source is the **container** (today, not composable) | **1** alloc | 537 ns / 6 | — |
+| **A** — source is the **concrete view type** | **1** alloc | 539 ns / 6 | — |
+| **B** — source is the **sealed shape interface** | **2** allocs | 538 ns / 6 | — |
+| A, composed 2 deep | 1 alloc | 697 ns / 9 | +160 ns, +3 |
+| B, composed 2 deep | 2 allocs | 695 ns / 9 | +156 ns, +3 |
+| A, composed 3 deep | 1 alloc | 874 ns / 12 | +177 ns, +3 |
+
+**Taking a view as the source costs nothing per element.** 537 / 539 / 538 ns is
+one number three times. The extra dynamic call a view source introduces is paid
+**once per `Keys()` call**, obtaining the iterator — not once per element — so at
+n=64 it is already invisible. This is the same per-call-not-per-element shape as
+finding 2's allocations.
+
+**A dominates B.** Same walk cost, but B must box a two-word view to enter the
+sealed interface, so it construct-allocates twice where A allocates once. B's
+compensation is that it accepts *any* key-exposing view whatever container it came
+from; A accepts only its own view type. That is a design question about whether
+cross-kind re-viewing is wanted, not a performance one.
+
+**Each composition layer costs ~160 ns and 3 allocations, per call.** Linear, and
+it is the nested range-over-func machinery: one closure plus the range state and
+yield closure for each additional `for range` in the chain. Depth is therefore
+cheap to add and cheap to walk, but a composed view is a worse candidate for a
+hot loop than a flat one — and `Each` (ADR `0021`) removes the per-layer
+allocations for the same reason it removes the flat ones.
+
 ## Durable / perishable
 
 **Durable.** A concrete struct wrapping an interface adds no measurable cost to
@@ -146,6 +181,12 @@ method set and not by its dynamic type. The unexported method's name is the only
 diagnostic a caller receives. Embedding satisfies a seal without granting
 mutators. A seal constrains structure only; Go has no way to express deep
 immutability, so contents cannot be protected by the type system.
+
+A view used as a converting constructor's SOURCE adds one dynamic call per
+iterator construction, not per element, so composition depth is free to walk and
+costs only at the call. Boxing a two-word view into a sealed interface costs the
+allocation that taking the concrete view type avoids. Each nested range-over-func
+layer costs its own closure plus range state and yield closure.
 
 **Perishable.** Every absolute number, and the ~1 ns point-read spreads in
 particular — they are at the resolution limit and ordered differently between

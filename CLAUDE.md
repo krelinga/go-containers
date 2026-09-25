@@ -63,8 +63,8 @@ would reopen the hole completely.
 its own module). **Check an ADR's status before treating it as binding.** `0014`
 is **Rejected and superseded by `0018`**; `0020` is **Abandoned** (its problem was
 solved by `0021`, its solutions cost the zero-value rule for no measured gain);
-`0010`, `0019` and `0021` are **Proposed** and describe nothing that exists in
-code. The rest are Accepted, `0022` most recently. `0017` is Accepted **as proposal D** while
+`0010`, `0019`, `0021` and `0023` are **Proposed** and describe nothing that
+exists in code. The rest are Accepted, `0022` most recently. `0017` is Accepted **as proposal D** while
 containing three rejected proposals in full, and `0018` is Accepted **as option
 (b)** and likewise keeps its rejected options.
 
