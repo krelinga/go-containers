@@ -164,6 +164,32 @@ cheap to add and cheap to walk, but a composed view is a worse candidate for a
 hot loop than a flat one — and `Each` (ADR `0021`) removes the per-layer
 allocations for the same reason it removes the flat ones.
 
+### A slice adapter is the one container whose `View()` allocates
+
+ADR `0023` part 3 adds `Slice[T] []T`. Two things follow from a slice header being
+three words where every other container is one:
+
+| | width | `View()` |
+|---|---|---|
+| a one-word container (`Map`, `Vector`, `MapSet`) | 8 B | **0 allocs** |
+| a defined `[]T` | **24 B** | **1 alloc** |
+
+A one-word value boxes into a view's interface field for free; three words cannot.
+This is not a regression — `ViewSliceIdentity([]T)` already costs one allocation
+today for the same reason — but it is an exception to ADR `0022`'s rule that
+`View()` is free, and the rule's stated reason ("the container is one word") is
+exactly why.
+
+Two other facts the ADR needed:
+
+- **A defined `[]T` satisfies the whole position-keyed inner tier on value
+  receivers** — `Len`, `At`, `Positions`, `PositionSlice`, `Values`, `ValueSlice`,
+  `All`, `AllSlice`, and `Set`. Only `Append` is impossible, because the length
+  lives in the header, which *is* the value.
+- **A conversion cannot infer its type argument, and a function call can.**
+  `Slice(s)` is `cannot use generic type Slice without instantiation`;
+  `CastSlice(s)` infers `T` and costs **0 allocations**.
+
 ## Durable / perishable
 
 **Durable.** A concrete struct wrapping an interface adds no measurable cost to
@@ -181,6 +207,13 @@ method set and not by its dynamic type. The unexported method's name is the only
 diagnostic a caller receives. Embedding satisfies a seal without granting
 mutators. A seal constrains structure only; Go has no way to express deep
 immutability, so contents cannot be protected by the type system.
+
+A one-word container boxes into a view's interface field for free; a three-word
+slice header cannot, so a slice adapter's view construction allocates where every
+other container's does not. A defined slice type satisfies a position-keyed read
+contract on value receivers but can never grow, because its length lives in the
+value. A conversion cannot infer its type arguments; a function wrapping one can,
+for free.
 
 A view used as a converting constructor's SOURCE adds one dynamic call per
 iterator construction, not per element, so composition depth is free to walk and

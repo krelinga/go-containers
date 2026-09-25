@@ -1,6 +1,9 @@
 package sealing
 
-import "testing"
+import (
+	"testing"
+	"unsafe"
+)
 
 const coN = 64
 
@@ -63,4 +66,28 @@ func BenchmarkCompose(b *testing.B) {
 	run("2-deep/A-concrete-view", a2)
 	run("2-deep/B-sealed-tier", b2)
 	run("3-deep/A-concrete-view", a3)
+}
+
+var (
+	coSinkSlice coSlice[int]
+	coSinkSView coSliceView[int]
+)
+
+// ADR 0023 part 3. A slice header is three words where every other container is
+// one, so the one-word-boxes-free rule (ADR 0022) does not reach it.
+func TestSliceAdapterCosts(t *testing.T) {
+	raw := []int{1, 2, 3}
+
+	t.Logf("width: defined []T = %d B, a one-word container = 8 B", unsafe.Sizeof(coSlice[int](nil)))
+
+	cs := CastCoSlice(raw) // T inferred; a conversion could not
+	t.Logf("CastSlice infers: %T", cs)
+	t.Logf("CastSlice:        %.1f allocs/op", testing.AllocsPerRun(300, func() { coSinkSlice = CastCoSlice(raw) }))
+	t.Logf("Slice.View():     %.1f allocs/op  <- three words cannot box free",
+		testing.AllocsPerRun(300, func() { coSinkSView = CastCoSlice(raw).View() }))
+
+	// distinct view types, shared plumbing, zero value still reads empty
+	var zero coSliceView[int]
+	t.Logf("zero SliceView reads empty: Len=%d", zero.Len())
+	var _ coVectorView[int] // distinct type; a coSliceView is not assignable to it
 }
