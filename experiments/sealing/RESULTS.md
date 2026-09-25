@@ -193,7 +193,7 @@ Two other facts the ADR needed:
 - **A conversion cannot infer its type argument, and a function call can.**
   `Slice(s)` is `cannot use generic type Slice without instantiation`;
   `CastSlice(s)` infers `T` and costs **0 allocations**. This is the finding that
-  outlived the withdrawn adapter: ADR `0023` keeps `CastMap` for `Map`, which has
+  outlived the withdrawn adapter: ADR `0023` keeps `AsMap` for `Map`, which has
   the same gap.
 
 ## Durable / perishable

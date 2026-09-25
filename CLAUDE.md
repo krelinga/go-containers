@@ -140,10 +140,15 @@ These are first because they are the ones that get re-derived wrongly.
   assertions at the bottom of `contracts.go` are how you find out. Views satisfy
   the read tiers and must **never** satisfy a mutation tier.
 - **Every container has a view, and a new one is not finished without it.** Build
-  one with `View<Container>(c, viewer)` or `View<Container>Identity(c)`.
-- **A view is exactly two words: `struct{ impl <shape interface> }`.** The
-  interface erases the container's type parameter, which a converting view needs
-  because `MapSetView[NT]` cannot name the `T` it came from. Construction is
+  one with `c.View()` for the identity view, or `View<Container>(c, viewer)` when a
+  viewer converts. The `View<Container>Identity` constructors are gone (ADR
+  `0022`); `ViewSliceIdentity` survives because a `[]T` has no receiver.
+- **A view is two words: `struct{ impl <inner tier> }`** — 16 B, measured, for
+  four of the five. `SortedSetView` is the exception at 8 B: it holds its
+  `SortedSet` directly, because `cmp.Ordered` keys never convert so there is no
+  type parameter to erase. The interface erases that parameter for the others,
+  which a converting view needs because `MapSetView[NT]` cannot name the `T` it
+  came from. Construction is
   free; the cost is that passing a view into a shape-interface parameter boxes
   (~14.5 ns, 1 alloc) where passing a *container* does not. If that ever matters,
   ADR `0018` records the alternative: per-container `…IdentityView` types.

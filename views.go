@@ -19,23 +19,32 @@ import (
 // The shape interfaces in contracts.go carry the other job, generality:
 //
 //	func handOut() MapSetView[string]   // nothing can write through this
-//	func audit(k Keys[string])          // reads; a container or a view, either
+//	func audit(k Keys[string])          // reads, from any container kind
+//	audit(s.View())                     // ...and a CONTAINER does not fit
 //
-// Keys and its siblings are NOT sealed -- containers satisfy them too, which is
-// the point. They are a convenience, not a guarantee: a CONTAINER placed in one
-// can be asserted back out and written through. Use a concrete view where the
-// guarantee matters.
+// Keys and its siblings are SEALED (ADR 0022): each declares an unexported
+// callViewFirst that only a view implements, so passing a container where reads
+// are promised is a compile error and the caller writes c.View(). The unexported
+// inner* mirrors in contracts.go are the unsealed copies the plumbing needs,
+// because the struct below holds one.
 //
-// # Every view is exactly one word
+// # A view is two words, and boxing a wider one allocates
 //
-// This is a rule, not an implementation detail. A one-word struct is
-// pointer-shaped and boxes into an interface for free; anything wider allocates
-// on EVERY crossing -- measured at 13.59 ns and one allocation against 0.88 ns
-// and none (ADR 0018). So a view holds one pointer to its state, and a viewer
-// lives inside that state rather than beside it.
+// Every view here is struct{ impl <inner tier> }, and an interface field is two
+// words -- 16 B, measured. The exception is SortedSetView, which holds its
+// SortedSet directly and is 8 B, because its keys are cmp.Ordered and never
+// convert, so there is no type parameter to erase.
 //
-// **Do not add a second field to a view struct.** It compiles, and it silently
-// allocates at every call site that generalises.
+// The rule that matters is not the count but the consequence: a one-word value is
+// pointer-shaped and boxes into an interface for free, while anything wider
+// allocates on EVERY crossing -- measured at 13.59 ns and one allocation against
+// 0.88 ns and none (ADR 0018). Two words is already past that line, which is why
+// passing a view into a shape interface costs an allocation where passing a
+// container does not (ADR 0022 records the numbers, and 0023 the alternative).
+//
+// **Do not add a second field to a view struct.** Two words box at one
+// allocation; three words box at one allocation and copy more, and the struct
+// stops being a candidate for ever becoming pointer-shaped again.
 //
 // # Zero values
 //

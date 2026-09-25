@@ -9,7 +9,7 @@
   have type parameters — decisive); `0015` (`Vector`, whose growth contract this
   repairs); `0016` (whose decision 1, *no `Slice` type*, **stands** — see
   *Rejected alternatives*); `0021` (`Each`, which removes the per-layer
-  allocations); `0009` (`Map`, for `CastMap`).
+  allocations); `0009` (`Map`, for `AsMap`).
 - **Out of scope:** how the library should handle plain slices. A `Slice[T]` type
   was proposed inside this ADR and withdrawn; the analysis is kept in full under
   *Rejected alternatives*, and **a later ADR will take the question up properly.**
@@ -91,12 +91,14 @@ source is the sealed shape interface rather than the concrete view type.
 
 | | construct | iterate |
 |---|---|---|
-| source is the **container** (today; not composable) | **1** alloc | 537 ns / 6 |
-| **source is the concrete view type** | **1** alloc | 539 ns / 6 |
-| source is the **sealed shape interface** | **2** allocs | 538 ns / 6 |
+| source is the **container** (today; not composable) | **1** alloc | 537.1 ns / 6 |
+| **source is the concrete view type** | **1** alloc | 538.5 ns / 6 |
+| source is the **sealed shape interface** | **2** allocs | 538.4 ns / 6 |
 
-**Taking a view as the source costs nothing per element.** 537 / 539 / 538 ns is
-one number written three times. The extra dynamic call a view source introduces
+**Taking a view as the source costs nothing per element.** The decimals are shown
+deliberately: rounded to whole nanoseconds the last two read 539 and 538, which
+would imply an ordering between two numbers 0.1 ns apart. It is one number written
+three times. The extra dynamic call a view source introduces
 is paid **once per `Keys()` call**, obtaining the iterator — not once per element.
 A per-element penalty was expected and there is none.
 
@@ -112,9 +114,9 @@ naming scheme is for.
 
 | depth | iterate | delta |
 |---|---|---|
-| 1 | 539 ns / 6 | — |
-| 2 | 697 ns / 9 | +158 ns, +3 allocs |
-| 3 | 874 ns / 12 | +177 ns, +3 allocs |
+| 1 | 538.5 ns / 6 | — |
+| 2 | 697.3 ns / 9 | +158.8 ns, +3 allocs |
+| 3 | 874.4 ns / 12 | +177.1 ns, +3 allocs |
 
 **Linear, ~160 ns and 3 allocations per layer, per call** — the nested
 range-over-func machinery, one closure plus range state and yield closure for each
@@ -148,7 +150,7 @@ Go reader already knows it. A `Slice[T]` adapter would give slices a receiver �
 and would cost four measured irregularities to remove this one. See *Rejected
 alternatives*.
 
-## Part 3: `CastMap`
+## Part 3: `AsMap`
 
 Adjacent rather than central, and it fell out of the withdrawn slice work: a
 conversion cannot infer its type arguments, so a caller wrapping a `map[K]V`
@@ -156,11 +158,11 @@ writes them out in full every time.
 
 ```go
 containers.Map[string, int](m)   // today: both type arguments, always
-containers.CastMap(m)            // inferred
+containers.AsMap(m)            // inferred
 ```
 
 ```go
-func CastMap[K comparable, V any](m map[K]V) Map[K, V] { return Map[K, V](m) }
+func AsMap[K comparable, V any](m map[K]V) Map[K, V] { return Map[K, V](m) }
 ```
 
 Free — the conversion is free, since a defined map type has the same
@@ -168,10 +170,14 @@ representation as its underlying type, and the call inlines away. `Map` has need
 this since ADR `0009` introduced it; `0009` did not discuss inference and the gap
 was simply never noticed.
 
-The name is kept over `AsMap`/`ToMap`/`MapOf` for being short and unambiguous,
-with one objection recorded: Go's spec calls these *conversions*, not casts, and
+**On the name.** It was `CastMap` in an earlier draft and became `AsMap` to match
+how Go libraries spell this. Go's spec calls these *conversions*, not casts, and
 "cast" carries an unchecked-reinterpretation connotation from other languages that
-does not apply here.
+does not apply to a free change of named type. `As…` is also the established
+prefix for a cheap, non-copying reinterpretation in the standard library's
+vicinity, where `To…` tends to imply work. `MapOf` was considered and dropped: it
+reads as a constructor taking elements, which is what `New*` does elsewhere in
+this package.
 
 ## The resulting surface
 
@@ -326,10 +332,12 @@ for two other reasons:
   follows the variable, so this trades *"misses changes the others see"* for
   *"sees a change the others miss"* — a surprise rather than a limitation.
 - **It requires a pointer receiver**, so `CastSlice(raw).View()` and
-  `Slice[int]{1,2}.View()` stop compiling (`cannot call pointer method
-  ViewTracking on Slice[int]`), and `Slice` becomes the only container with mixed
-  receivers, where ADR `0002` chose uniformity and `0018` kept it while flipping
-  which kind.
+  `Slice[int]{1,2}.View()` stop compiling — you cannot take the address of a
+  function result or a composite literal. The prototype spelled the method
+  `ViewTracking`, so the error read `cannot call pointer method ViewTracking on
+  Slice[int]`; the name is incidental, the rule is not. It also makes `Slice` the
+  only container with mixed receivers, where ADR `0002` chose uniformity and
+  `0018` kept it while flipping which kind.
 
 **There is no third form.** To track its source a view needs the container to be
 *itself* a reference to shared state. For a slice that means holding a pointer —
@@ -347,7 +355,7 @@ handed it over.** Both halves are now asserted, in
 ### Also withdrawn with it
 
 `CastSlice`, `SliceView`, a `Slice`-sourced `ViewSliceWith`, and the deletion of
-`ViewSlice`/`ViewSliceIdentity`. `CastMap` survives on its own merits (Part 3).
+`ViewSlice`/`ViewSliceIdentity`. `AsMap` survives on its own merits (Part 3).
 
 ## Decisions
 
@@ -359,7 +367,7 @@ handed it over.** Both halves are now asserted, in
 4. The **`Vector` growth defect is fixed here**, not separately. It is a behaviour
    change — a converting `Vector` view starts seeing appends — and nothing depends
    on the old behaviour, which contradicted `View`'s doc comment and ADR `0015`.
-5. **`CastMap` is added.**
+5. **`AsMap` is added.**
 6. **No viewer composition** in the library.
 7. **No `Slice[T]` type.** ADR `0016` decision 1 stands.
 
@@ -371,7 +379,7 @@ handed it over.** Both halves are now asserted, in
    source.
 2. The `Vector` fix falls out of step 1: `convertedElems` stops holding
    `v.ValueSlice()`. Land its regression test here.
-3. Add `CastMap`.
+3. Add `AsMap`.
 4. Update CLAUDE.md: the view-construction bullets gain the `…With` spelling, and
    the `[]T` row gains a note that its two functions are the language rather than
    an exception.
