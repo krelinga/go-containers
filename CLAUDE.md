@@ -42,11 +42,12 @@ type; nothing can assert one back to anything writable.
 `callsites_test.go` holds every stdlib-vs-container comparison. Alongside:
 `docs/adr/` (design decisions) and `experiments/` (measurement harnesses, each
 its own module). **Check an ADR's status before treating it as binding.** `0014`
-is **Rejected and superseded by `0018`**; `0010`, `0019`, `0020` and `0021` are
-**Proposed** and describe nothing that exists in code; the rest are Accepted.
-`0017` is Accepted **as proposal D** while containing three rejected proposals in
-full, and `0018` is Accepted **as option (b)** and likewise keeps its rejected
-options.
+is **Rejected and superseded by `0018`**; `0020` is **Abandoned** (its problem was
+solved by `0021`, its solutions cost the zero-value rule for no measured gain);
+`0010`, `0019`, `0021` and `0022` are **Proposed** and describe nothing that
+exists in code. The rest are Accepted. `0017` is Accepted **as proposal D** while
+containing three rejected proposals in full, and `0018` is Accepted **as option
+(b)** and likewise keeps its rejected options.
 
 Intent, per the module path `github.com/krelinga/go-containers`: a generic
 (type-parameterized) container library.
@@ -192,6 +193,9 @@ Go itself — not tests of this library. For comparisons that exercise this
 library's own API, see **Call sites** below. Each is **its own module**, so the root
 `go test ./...` never runs them and they stay out of the library's dependency
 graph. `experiments/copycost/` is the worked example; copy its shape.
+`experiments/sealing/` shows the other thing an experiment can do: its `run.sh`
+asserts that a particular assertion still **fails** to compile, so a change that
+reopens a closed hole breaks the experiment instead of passing quietly.
 
 An experiment is `experiments/<name>/` containing:
 

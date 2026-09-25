@@ -1,0 +1,12 @@
+package badcast
+
+import s "github.com/krelinga/go-containers/experiments/sealing"
+
+// MapSet[string] has Len() and Keys() iter.Seq[string], matching
+// IfaceView[string] on every method EXCEPT the unexported seal. So the compiler
+// error below names viewOnly and nothing else -- which is the proof that the
+// seal, not an accidental signature mismatch, is what closes the hole.
+func Escape(v s.IfaceView[string]) {
+	w := v.(s.MapSet[string])
+	w.Add("injected")
+}

@@ -1,17 +1,82 @@
 # 20. Views by carried witness
 
-- **Status:** **Proposed**, and now covering two shapes. The carried witness is
-  specified and measured; a second shape — **parameterise the container and keep
-  views as interfaces** — is measured alongside it and is currently the
-  favoured one, because it merges spans with views and so dissolves the
-  instantiation cycle that defeats every other attempt at that merge.
-- **Date:** 2026-09-23
+- **Status:** **ABANDONED** (2026-09-25). Both shapes proposed here are
+  withdrawn: the problem they existed to solve was answered more cheaply by ADR
+  `0021`, and measurement showed they were paying for it with the zero-value rule
+  in exchange for a performance gain of roughly nothing. **Superseded in intent
+  by ADR `0022`**, which keeps `0018`'s view structs and seals the shape
+  interfaces instead. The measurements below stand and are cited by `0021`; only
+  the proposals are dead. See *Why this was abandoned*.
+- **Date:** 2026-09-23, abandoned 2026-09-25
 - **Evidence:** `experiments/witness/` (`RESULTS.md`), with history in
-  `experiments/views/` (ADR `0011`'s harness).
+  `experiments/views/` (ADR `0011`'s harness). The measurements that killed it
+  are in `experiments/sealing/`.
 - **Relates to:** ADR `0011` (which measured a witness and found it cheapest),
-  `0012` (which closed it off), `0013` (whose erratum this removes), `0018`
-  (whose view structs this replaces), `0019` (whose spans would inherit the
-  same parameters).
+  `0012` (which closed it off), `0013` (whose erratum this tried to remove),
+  `0018` (whose view structs this proposed to replace, and which stands),
+  `0019` (which no longer waits on this), `0021` (which solved the motivating
+  problem), `0022` (which supersedes this in intent).
+
+## Why this was abandoned
+
+Four things, in the order they landed.
+
+**1. The motivating problem got a cheaper answer.** This ADR exists because
+iterating a view allocates (ADR `0013`'s erratum), and both shapes here are ways
+to restructure views so that it does not. ADR `0021`'s `Each` removes the
+allocations **without touching view shape at all** — 6 allocations to 0, a fixed
+~72 ns to ~0.6 ns, and 4.5x on early exit. Once the erratum has a direct fix,
+nothing here is load-bearing.
+
+**2. The span merge was not free after all.** The parameterised-container shape
+became the favoured one because it merges spans with views, dissolving the
+instantiation cycle that defeats every other attempt. That still holds as a type
+result. But `experiments/witness` then measured a span returned through a view
+interface at **one allocation** — the span is a container plus two bounds,
+wider than one word, so it cannot box free — against **zero** for a direct
+`EachKeyInRange`. The merge buys uniformity, not speed.
+
+**3. The performance case evaporated.** The concrete view struct's measured
+penalty was boxing into a shape interface: 14.8 ns and 1 allocation against
+~2.3 ns and 0. `experiments/sealing` found that a read-only API naming the
+**concrete view type** has nothing to box into — **1.86 ns, 0 allocations**. The
+penalty only lands on code generic over *container kind*, of which this library
+currently contains none.
+
+**4. And the wrapper was never slow.** The comparison nobody had run: today's
+`struct{ impl … }` against the bare interface it wraps, same implementation
+underneath.
+
+| n=64 | StructView (today) | bare interface |
+|---|---|---|
+| point read | 1.40 ns / 0 | 1.06 ns / 0 |
+| iterate | 422 ns / 3 | 425 ns / 3 |
+| `View()`, identity | **0.39 ns / 0** | 0 allocs |
+| **zero value** | **reads empty** | **PANICS** |
+
+Iteration is indistinguishable. The extra hop inlines away; there is one dynamic
+call either way.
+
+**So the trade both shapes were offering was: give up the zero-value rule — one
+of the library's three central rules, and the thing `0018` was explicitly asked
+to preserve — to win ~0.3 ns on point reads and an allocation that a concrete
+parameter type already avoids.** A nil interface cannot read as empty, and no
+amount of design changes that.
+
+Two costs specific to the parameterised container are also worth keeping on the
+record, because they were real: it moves five type parameters onto the
+*container*, the type every caller writes; and it requires a **stateless**
+witness, which loses stateful inbound key conversion (`FromKeyView` with a
+registry) — the exact objection ADR `0012` raised, reappearing in a shape that
+had seemed to escape it.
+
+**What survives.** Everything measured below, in particular the attribution of
+the three allocations, the break-even curve, and the 34 ns cost-context table —
+all cited by `0021`. The finding that a zero-size field is free at the front of a
+struct and padded at the back. And the instantiation-cycle analysis in *Could
+spans be expressed through the witness?*, which remains the reason ADR `0019`
+cannot express spans through a type parameter. **ADR `0019` no longer waits on
+this ADR**; its open question 2 is void.
 
 ## The problem
 
@@ -532,7 +597,16 @@ marshals JSON, touches a channel or allocates a page cannot measure it. It is
 tight in-memory loop that does nothing else — which is the profile ADR `0015`
 already tells callers to use a plain `[]T` for rather than a container.
 
-## What to decide
+## What to decide — VOID
+
+Kept for the record; none of these is live. Items 1 and 4 are answered by ADR
+`0022` (the shape interfaces survive and are sealed; identity views keep a
+spelling, now `View()`). Item 2 is void: ADR `0019`'s spans inherit nothing from
+a witness that is not being built. Item 3 — whether `CanViewSortedMap`,
+`CanViewVector` and `CanViewSlice` collapse into `ValueViewer` — is genuinely
+still open and independent of this ADR; it should be reopened wherever the viewer
+interfaces are next touched.
+
 
 1. **Whether the shape interfaces survive this.** They exist partly to abstract
    over view types; a witness makes view types *more* numerous, which argues
